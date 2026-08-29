@@ -1,0 +1,16 @@
+.DS_Store
+.idea/
+.vscode/
+
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+coverage/
+*.log
+
+/deploy/secrets/
+/deploy/data/
+/deploy/backup-staging/

@@ -1,0 +1,616 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-toolbox.local/schemas/ai-artifact-1.0.json",
+  "title": "Dev Toolbox AI Artifact v1.0",
+  "description": "开发百宝箱一期 AI 派生结果。所有字段均为派生信息，不能覆盖原始记录。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactType",
+    "title",
+    "summary",
+    "classification",
+    "blocks",
+    "warnings",
+    "sourceFragmentIds",
+    "review"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "artifactType": {
+      "type": "string",
+      "enum": [
+        "organized_record",
+        "correctness_review",
+        "image_analysis"
+      ]
+    },
+    "title": {
+      "$ref": "#/$defs/shortText"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "classification": {
+      "$ref": "#/$defs/classification"
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/markdownBlock" },
+          { "$ref": "#/$defs/codeBlock" },
+          { "$ref": "#/$defs/commandBlock" },
+          { "$ref": "#/$defs/commandStepsBlock" },
+          { "$ref": "#/$defs/keyValueBlock" },
+          { "$ref": "#/$defs/tableBlock" },
+          { "$ref": "#/$defs/checklistBlock" },
+          { "$ref": "#/$defs/calloutBlock" },
+          { "$ref": "#/$defs/imageReferenceBlock" },
+          { "$ref": "#/$defs/attachmentReferenceBlock" }
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    },
+    "sourceFragmentIds": {
+      "$ref": "#/$defs/sourceFragmentIds"
+    },
+    "review": {
+      "$ref": "#/$defs/review"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "sourceFragmentIds": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/uuid"
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contentType",
+        "suggestedFolderPath",
+        "suggestedTags",
+        "sensitivitySuggestion"
+      ],
+      "properties": {
+        "contentType": {
+          "type": "string",
+          "enum": [
+            "operations_guide",
+            "command_snippet",
+            "credential_related",
+            "deployment",
+            "database",
+            "development",
+            "reference",
+            "image",
+            "file",
+            "mixed",
+            "other"
+          ]
+        },
+        "suggestedFolderPath": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "suggestedTags": {
+          "type": "array",
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "sensitivitySuggestion": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "sensitive",
+            "unknown"
+          ]
+        },
+        "sensitivityReason": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    },
+    "blockBaseProperties": {
+      "id": {
+        "type": "string",
+        "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+      },
+      "sourceFragmentIds": {
+        "$ref": "#/$defs/sourceFragmentIds"
+      }
+    },
+    "markdownBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "markdown",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "markdown" },
+        "markdown": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000,
+          "description": "只允许安全 Markdown，不允许 HTML。"
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "codeBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "language",
+        "code",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "code" },
+        "language": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50000
+        },
+        "caption": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "wrapByDefault": {
+          "type": "boolean",
+          "default": false
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "commandBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "shell",
+        "command",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "command" },
+        "shell": {
+          "type": "string",
+          "enum": [
+            "bash",
+            "sh",
+            "zsh",
+            "powershell",
+            "cmd",
+            "sql",
+            "docker",
+            "yaml",
+            "text",
+            "other"
+          ]
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "commandStepsBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "title",
+        "steps",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "command_steps" },
+        "title": { "$ref": "#/$defs/shortText" },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "title",
+              "commands",
+              "sourceFragmentIds"
+            ],
+            "properties": {
+              "title": { "$ref": "#/$defs/shortText" },
+              "instruction": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "commands": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "shell",
+                    "command"
+                  ],
+                  "properties": {
+                    "shell": {
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "sh",
+                        "zsh",
+                        "powershell",
+                        "cmd",
+                        "sql",
+                        "docker",
+                        "yaml",
+                        "text",
+                        "other"
+                      ]
+                    },
+                    "command": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20000
+                    },
+                    "description": {
+                      "type": "string",
+                      "maxLength": 1000
+                    }
+                  }
+                }
+              },
+              "notes": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                  "type": "string",
+                  "maxLength": 1000
+                }
+              },
+              "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+            }
+          }
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "keyValueBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "entries",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "key_value" },
+        "title": { "$ref": "#/$defs/shortText" },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "value",
+              "sensitive"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "sensitive": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "tableBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "columns",
+        "rows",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "table" },
+        "title": { "$ref": "#/$defs/shortText" },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "maxLength": 2000
+            }
+          }
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "checklistBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "title",
+        "items",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "checklist" },
+        "title": { "$ref": "#/$defs/shortText" },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "sourceFragmentIds"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+            }
+          }
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "calloutBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "tone",
+        "body",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "callout" },
+        "tone": {
+          "type": "string",
+          "enum": [
+            "info",
+            "tip",
+            "warning",
+            "danger"
+          ]
+        },
+        "title": { "$ref": "#/$defs/shortText" },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "imageReferenceBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "attachmentId",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "image_reference" },
+        "attachmentId": { "$ref": "#/$defs/uuid" },
+        "caption": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "extractedText": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "attachmentReferenceBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "attachmentId",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/blockBaseProperties/id" },
+        "type": { "const": "attachment_reference" },
+        "attachmentId": { "$ref": "#/$defs/uuid" },
+        "caption": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "title",
+        "message",
+        "basis",
+        "sourceFragmentIds"
+      ],
+      "properties": {
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "danger"
+          ]
+        },
+        "title": { "$ref": "#/$defs/shortText" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "basis": {
+          "type": "string",
+          "enum": [
+            "source_evidence",
+            "model_knowledge"
+          ]
+        },
+        "sourceFragmentIds": { "$ref": "#/$defs/sourceFragmentIds" },
+        "recommendation": {
+          "type": "string",
+          "maxLength": 4000
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "basis": { "const": "source_evidence" }
+            }
+          },
+          "then": {
+            "properties": {
+              "sourceFragmentIds": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "limitations"
+      ],
+      "properties": {
+        "status": {
+          "const": "model_reviewed"
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        }
+      }
+    }
+  }
+}
