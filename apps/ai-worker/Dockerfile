@@ -16,6 +16,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=node:node /out ./
 COPY --chown=node:node docs/contracts /app/contracts
+COPY --chown=node:node apps/ai-worker/prompts /app/prompts
 USER node
 EXPOSE 3001
 CMD ["node", "dist/index.js"]

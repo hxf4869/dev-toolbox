@@ -10,6 +10,7 @@ const route = useRoute()
 const library = useLibraryStore()
 const navigationError = ref('')
 const settingsMode = computed(() => String(route.name).includes('settings'))
+const taskMode = computed(() => route.name === 'task-center')
 
 const fixedViews = [
   { id: 'inbox', label: '原始收件箱', icon: 'inbox' as const },
@@ -24,7 +25,7 @@ const fixedViews = [
 const flatFolders = computed(() => flattenFolders(library.folders))
 
 onMounted(async () => {
-  if (settingsMode.value) return
+  if (settingsMode.value || taskMode.value) return
   try {
     await library.loadNavigation()
   } catch (error) {
@@ -46,13 +47,29 @@ function viewActive(view: string) {
 </script>
 
 <template>
-  <aside class="module-nav" :aria-label="settingsMode ? '设置导航' : '工作台导航'">
+  <aside class="module-nav" :aria-label="taskMode ? 'AI 任务导航' : settingsMode ? '设置导航' : '工作台导航'">
     <header class="module-nav__header">
-      <p>{{ settingsMode ? '实例与偏好' : '知识与记录' }}</p>
-      <h1>{{ settingsMode ? '设置' : '资料库' }}</h1>
+      <p>{{ taskMode ? '受控 AI 工作流' : settingsMode ? '实例与偏好' : '知识与记录' }}</p>
+      <h1>{{ taskMode ? 'AI 任务' : settingsMode ? '设置' : '资料库' }}</h1>
     </header>
 
-    <section v-if="settingsMode" aria-labelledby="settings-nav-heading">
+    <section v-if="taskMode" aria-labelledby="task-nav-heading">
+      <h2 id="task-nav-heading">任务工作台</h2>
+      <nav>
+        <RouterLink to="/ai/tasks" :class="{ active: route.name === 'task-center' && !route.query.itemId && !route.query.status }">
+          <UiIcon name="sparkles" /> 全部任务
+        </RouterLink>
+        <RouterLink :to="{ name: 'task-center', query: { status: 'running' } }" :class="{ active: route.query.status === 'running' }">
+          <UiIcon name="clock" /> 运行状态
+        </RouterLink>
+        <RouterLink to="/settings/ai-schedule">
+          <UiIcon name="settings" /> 批量与自动整理
+        </RouterLink>
+      </nav>
+      <p class="module-nav__boundary">AI 仅可读取受控上下文并提交候选 Artifact；不会执行 Shell、SSH、SQL 或任意高权限工具。</p>
+    </section>
+
+    <section v-else-if="settingsMode" aria-labelledby="settings-nav-heading">
       <h2 id="settings-nav-heading">设置</h2>
       <nav>
         <RouterLink to="/settings/providers" :class="{ active: route.name === 'provider-settings' }">
@@ -63,6 +80,9 @@ function viewActive(view: string) {
         </RouterLink>
         <RouterLink to="/settings/ai-security" :class="{ active: route.name === 'ai-security-settings' }">
           <UiIcon name="shield-alert" /> AI 与敏感数据
+        </RouterLink>
+        <RouterLink to="/settings/ai-schedule" :class="{ active: route.name === 'ai-schedule-settings' }">
+          <UiIcon name="clock" /> 批量与自动整理
         </RouterLink>
         <RouterLink to="/settings/security" :class="{ active: route.name === 'security-settings' }">
           <UiIcon name="shield-check" /> 安全与会话
@@ -144,5 +164,6 @@ nav a.active { box-shadow: inset 2px 0 0 var(--accent); }
 .module-nav__error { padding: var(--space-3); border: 1px solid var(--danger); border-radius: var(--radius-control); color: var(--danger); font-size: 11px; }
 .module-nav__manage { display: flex; width: 100%; min-height: 38px; align-items: center; gap: var(--space-2); margin-top: var(--space-6); padding: 0 var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); cursor: pointer; }
 .module-nav__manage:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.module-nav__boundary { margin-top: var(--space-5); padding: var(--space-3); border: 1px solid var(--border-subtle); border-left: 3px solid var(--accent); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-muted); font-size: 11px; }
 @media (max-width: 1099px) { .module-nav { display: none; } }
 </style>

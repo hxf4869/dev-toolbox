@@ -7,6 +7,7 @@ const links = [
   { name: 'provider-settings', to: '/settings/providers', label: 'Provider' },
   { name: 'token-settings', to: '/settings/tokens', label: '外部 Agent' },
   { name: 'ai-security-settings', to: '/settings/ai-security', label: 'AI 与敏感数据' },
+  { name: 'ai-schedule-settings', to: '/settings/ai-schedule', label: '自动整理' },
   { name: 'security-settings', to: '/settings/security', label: '登录安全' },
   { name: 'appearance-settings', to: '/settings/appearance', label: '外观' },
 ]

@@ -29,6 +29,16 @@ async function logout() {
 
     <RouterLink
       class="rail__item"
+      :class="{ 'rail__item--active': route.name === 'task-center' }"
+      to="/ai/tasks"
+      aria-label="AI 任务"
+      title="AI 任务"
+    >
+      <UiIcon name="sparkles" />
+    </RouterLink>
+
+    <RouterLink
+      class="rail__item"
       :class="{ 'rail__item--active': route.name === 'workspace' || route.name === 'item-detail' }"
       to="/"
       aria-label="工作台"
@@ -55,6 +65,7 @@ async function logout() {
           'provider-settings',
           'token-settings',
           'ai-security-settings',
+          'ai-schedule-settings',
         ].includes(String(route.name)),
       }"
       to="/settings/providers"

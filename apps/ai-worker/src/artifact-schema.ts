@@ -7,7 +7,12 @@ const uuidPattern =
 
 export type ArtifactValidator = ValidateFunction<Record<string, unknown>>
 
-export async function loadArtifactValidator(schemaPath: string): Promise<ArtifactValidator> {
+export interface ArtifactContract {
+  readonly schema: Record<string, unknown>
+  readonly validate: ArtifactValidator
+}
+
+export async function loadArtifactContract(schemaPath: string): Promise<ArtifactContract> {
   const rawSchema = await readFile(schemaPath, 'utf8')
   const schema = JSON.parse(rawSchema) as Record<string, unknown>
   const ajv = new Ajv2020({ allErrors: true, strict: true })
@@ -16,5 +21,9 @@ export async function loadArtifactValidator(schemaPath: string): Promise<Artifac
     validate: (value: string) => uuidPattern.test(value),
   })
 
-  return ajv.compile<Record<string, unknown>>(schema)
+  return { schema, validate: ajv.compile<Record<string, unknown>>(schema) }
+}
+
+export async function loadArtifactValidator(schemaPath: string): Promise<ArtifactValidator> {
+  return (await loadArtifactContract(schemaPath)).validate
 }

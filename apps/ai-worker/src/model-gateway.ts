@@ -40,6 +40,7 @@ export interface ProviderTurnRequest {
   readonly deadlineAt: Date
   readonly maxOutputTokens: number
   readonly allowInsecureHttp: boolean
+  readonly signal?: AbortSignal
 }
 
 export interface ProviderTurnResult {
@@ -176,6 +177,7 @@ export async function runProviderTurn(request: ProviderTurnRequest): Promise<Pro
   }
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (request.signal?.aborted) throw new ProviderGatewayError('unavailable', request.signal.reason)
     const remainingMs = request.deadlineAt.getTime() - Date.now()
     if (remainingMs <= 0) throw new ProviderGatewayError('unavailable')
     let responseStatus: number | undefined
@@ -184,7 +186,9 @@ export async function runProviderTurn(request: ProviderTurnRequest): Promise<Pro
     try {
       const options: SimpleStreamOptions = {
         apiKey: provider.apiKey,
-        signal: controller.signal,
+        signal: request.signal === undefined
+          ? controller.signal
+          : AbortSignal.any([controller.signal, request.signal]),
         maxTokens: request.maxOutputTokens,
         maxRetries: 0,
         timeoutMs: remainingMs,
@@ -199,12 +203,13 @@ export async function runProviderTurn(request: ProviderTurnRequest): Promise<Pro
       validateTaskMessage(message, request.context)
       return { message, attempts: attempt }
     } catch (error) {
+      if (request.signal?.aborted) throw new ProviderGatewayError('unavailable', error)
       const failure = classifyTaskFailure(error, responseStatus)
       if (!failure.retryable || attempt === 3) throw failure.error
       const afterRequestMs = request.deadlineAt.getTime() - Date.now()
       const backoffMs = Math.min(attempt === 1 ? 250 : 500, afterRequestMs - 1)
       if (backoffMs <= 0) throw new ProviderGatewayError('unavailable', error)
-      await wait(backoffMs)
+      await wait(backoffMs, request.signal)
     } finally {
       clearTimeout(timeout)
     }
@@ -332,6 +337,21 @@ function classifyTaskFailure(
   return { error: new ProviderGatewayError('unavailable', error), retryable: true }
 }
 
-function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason)
+      return
+    }
+    const finish = (): void => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }
+    const timeout = setTimeout(finish, milliseconds)
+    const abort = (): void => {
+      clearTimeout(timeout)
+      reject(signal?.reason)
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
 }

@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 
-import { loadArtifactValidator } from './artifact-schema.js'
+import { loadArtifactContract } from './artifact-schema.js'
 import { loadConfig } from './config.js'
 import { log } from './logger.js'
 import {
@@ -10,9 +10,20 @@ import {
   type ProviderProtocol,
   type ProviderSnapshot,
 } from './model-gateway.js'
+import { PromptStore } from './prompts.js'
+import { TaskClient } from './task-client.js'
+import { runTaskLoop, TaskRunner } from './task-runner.js'
 
 const config = loadConfig()
-await loadArtifactValidator(config.artifactSchemaPath)
+const artifactContract = await loadArtifactContract(config.artifactSchemaPath)
+const taskClient = new TaskClient(config.apiInternalUrl, config.serviceToken, config.workerId)
+const taskRunner = new TaskRunner(
+  taskClient,
+  new PromptStore(config.promptRoot),
+  artifactContract,
+  config.allowInsecureProviderHttp,
+)
+const taskLoopController = new AbortController()
 
 const [host, rawPort] = config.address.split(':')
 const port = Number(rawPort)
@@ -124,10 +135,17 @@ function isProtocol(value: unknown): value is ProviderProtocol {
 
 server.listen(port, host, () => {
   log('info', 'worker_started', { address: config.address })
+  void runTaskLoop(taskClient, taskRunner, taskLoopController.signal).catch((error: unknown) => {
+    if (!taskLoopController.signal.aborted) {
+      log('error', 'task_loop_failed', { errorType: error instanceof Error ? error.name : 'unknown' })
+      process.exitCode = 1
+    }
+  })
 })
 
 function shutdown(signal: string): void {
   log('info', 'worker_stopping', { signal })
+  taskLoopController.abort(new Error(`worker received ${signal}`))
   server.close((error) => {
     if (error) {
       log('error', 'worker_stop_failed', { errorType: error.name })

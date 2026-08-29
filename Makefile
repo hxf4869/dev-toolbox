@@ -1,4 +1,4 @@
-.PHONY: install check test build init-dev up down logs migrate init-owner reset-auth rebuild-search reset-dev api-test m1-integration-test m2-integration-test m3-integration-test web-test worker-test
+.PHONY: install check test build init-dev up down logs migrate init-owner reset-auth rebuild-search reset-dev api-test m1-integration-test m2-integration-test m3-integration-test m4-integration-test web-test worker-test
 
 install:
 	pnpm install --frozen-lockfile
@@ -56,6 +56,10 @@ m2-integration-test: init-dev
 m3-integration-test: init-dev
 	docker compose --env-file deploy/.env -f deploy/compose.yaml build api
 	./deploy/scripts/test-m3-integration.sh
+
+m4-integration-test: init-dev
+	docker compose --env-file deploy/.env -f deploy/compose.yaml build api
+	./deploy/scripts/test-m4-integration.sh
 
 web-test:
 	pnpm --filter @dev-toolbox/web test

@@ -41,6 +41,20 @@ type libraryCursor struct {
 	ItemID uuid.UUID `json:"i"`
 }
 
+type artifactSummary struct {
+	ID            uuid.UUID  `json:"id"`
+	ArtifactType  string     `json:"artifactType"`
+	VersionNumber int        `json:"versionNumber"`
+	SchemaVersion string     `json:"schemaVersion"`
+	Generator     string     `json:"generator"`
+	ModelName     *string    `json:"modelName"`
+	PromptVersion *string    `json:"promptVersion"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	InvalidatedAt *time.Time `json:"invalidatedAt"`
+	Active        bool       `json:"active"`
+	IsStale       bool       `json:"isStale"`
+}
+
 func (service *Service) listItems(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
 	query := request.URL.Query()
@@ -285,12 +299,115 @@ func (service *Service) getItem(response http.ResponseWriter, request *http.Requ
 		writeLibraryInternal(response, request)
 		return
 	}
+	artifacts, err := service.artifactSummariesForItem(request, itemID)
+	if err != nil {
+		writeLibraryInternal(response, request)
+		return
+	}
+	activeArtifacts := make([]artifactSummary, 0, 3)
+	for _, artifact := range artifacts {
+		if artifact.Active {
+			activeArtifacts = append(activeArtifacts, artifact)
+		}
+	}
 	httpapi.WriteJSON(response, http.StatusOK, map[string]any{
 		"id": itemID, "title": title, "titleOrigin": titleOrigin, "note": note,
 		"folder": folder, "tags": tags, "sensitivity": sensitivity, "favorite": favorite,
 		"createdAt": createdAt, "updatedAt": updatedAt, "rawRecords": rawRecords,
-		"attachments": attachments, "artifacts": []any{}, "availableVersions": []any{},
+		"attachments": attachments, "artifacts": activeArtifacts, "availableVersions": artifacts,
 	})
+}
+
+func (service *Service) artifactSummariesForItem(request *http.Request, itemID uuid.UUID) ([]artifactSummary, error) {
+	currentRaw, err := service.currentArtifactInputIDs(request, itemID, false)
+	if err != nil {
+		return nil, err
+	}
+	currentImages, err := service.currentArtifactInputIDs(request, itemID, true)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := service.database.Query(request.Context(), `
+		SELECT artifact.id, artifact.artifact_type, artifact.version_number,
+		       artifact.schema_version, artifact.generator, artifact.model_name,
+		       artifact.prompt_version, artifact.created_at, artifact.invalidated_at,
+		       active.artifact_id IS NOT NULL, task.input_snapshot
+		FROM ai_artifacts artifact
+		JOIN ai_task_runs task ON task.id = artifact.task_run_id
+		LEFT JOIN item_active_artifacts active ON active.artifact_id = artifact.id
+		WHERE artifact.item_id = $1
+		ORDER BY artifact.artifact_type, artifact.version_number DESC, artifact.id DESC
+	`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]artifactSummary, 0)
+	for rows.Next() {
+		var entry artifactSummary
+		var snapshotBytes []byte
+		if err := rows.Scan(&entry.ID, &entry.ArtifactType, &entry.VersionNumber,
+			&entry.SchemaVersion, &entry.Generator, &entry.ModelName, &entry.PromptVersion,
+			&entry.CreatedAt, &entry.InvalidatedAt, &entry.Active, &snapshotBytes); err != nil {
+			return nil, err
+		}
+		var snapshot struct {
+			RawRecordIDs  []uuid.UUID `json:"rawRecordIds"`
+			AttachmentIDs []uuid.UUID `json:"attachmentIds"`
+		}
+		if json.Unmarshal(snapshotBytes, &snapshot) != nil {
+			return nil, errors.New("invalid artifact input snapshot")
+		}
+		if entry.ArtifactType == "image_analysis" {
+			entry.IsStale = !sameKnowledgeUUIDSet(snapshot.AttachmentIDs, currentImages)
+		} else {
+			entry.IsStale = !sameKnowledgeUUIDSet(snapshot.RawRecordIDs, currentRaw)
+		}
+		result = append(result, entry)
+	}
+	return result, rows.Err()
+}
+
+func (service *Service) currentArtifactInputIDs(request *http.Request, itemID uuid.UUID, images bool) ([]uuid.UUID, error) {
+	query := `SELECT id FROM raw_records WHERE item_id = $1 ORDER BY id`
+	if images {
+		query = `
+			SELECT attachment.id FROM attachments attachment
+			JOIN raw_records record ON record.id = attachment.raw_record_id
+			WHERE record.item_id = $1 AND attachment.status = 'ready' AND attachment.kind = 'image'
+			ORDER BY attachment.id
+		`
+	}
+	rows, err := service.database.Query(request.Context(), query, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
+func sameKnowledgeUUIDSet(left, right []uuid.UUID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[uuid.UUID]struct{}, len(left))
+	for _, id := range left {
+		values[id] = struct{}{}
+	}
+	for _, id := range right {
+		if _, ok := values[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (service *Service) tagEntriesForItem(request *http.Request, itemID uuid.UUID) ([]tagEntry, error) {

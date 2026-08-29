@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { apiRequest, jsonRequest } from '../../lib/api'
+import ItemAIView from '../ai/ItemAIView.vue'
+import type { ArtifactSummary } from '../ai/contracts'
 import RawDocument from './RawDocument.vue'
 import SupplementDrawer from './SupplementDrawer.vue'
 import { type AttachmentEntry, type Sensitivity, type TagEntry, useLibraryStore } from './library'
@@ -57,8 +59,8 @@ interface ItemDetail {
   updatedAt: string
   rawRecords: RawRecordSummary[]
   attachments: AttachmentEntry[]
-  artifacts: unknown[]
-  availableVersions: unknown[]
+  artifacts: ArtifactSummary[]
+  availableVersions: ArtifactSummary[]
 }
 
 interface RawRecord extends RawRecordSummary {
@@ -78,6 +80,7 @@ interface RawRecord extends RawRecordSummary {
 const props = withDefaults(defineProps<{ itemId: string; embedded?: boolean }>(), { embedded: false })
 const emit = defineEmits<{ changed: []; deleted: [] }>()
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 const library = useLibraryStore()
 const loading = ref(true)
@@ -315,6 +318,17 @@ async function onSupplementCreated() {
   emit('changed')
 }
 
+async function locateAISource(fragmentID: string) {
+  activeTab.value = 'raw'
+  await router.replace({ query: { ...route.query, hit: fragmentID } })
+  await applyMatchedFragment()
+}
+
+async function onAIChanged() {
+  await loadDetail()
+  emit('changed')
+}
+
 function flattenFolders(entries: typeof library.folders, depth = 0): Array<{ id: string; name: string; depth: number }> {
   return entries.flatMap((entry) => [
     { id: entry.id, name: entry.name, depth },
@@ -426,7 +440,15 @@ function formatBytes(bytes: number) {
         </article>
       </section>
 
-      <section v-else class="tab-empty"><UiIcon name="sparkles" :size="30" /><h2>暂无 AI 派生版本</h2><p>原始记录、附件和人工元数据仍可完整使用；AI 结果不会覆盖事实层。</p></section>
+      <ItemAIView
+        v-else
+        :item-id="detail.id"
+        :sensitivity="detail.sensitivity"
+        :attachments="detail.attachments"
+        :initial-artifacts="detail.availableVersions.length ? detail.availableVersions : detail.artifacts"
+        @source="locateAISource"
+        @changed="onAIChanged"
+      />
     </template>
   </section>
 
@@ -448,6 +470,7 @@ function formatBytes(bytes: number) {
 .detail-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border-subtle); }
 .back-link { grid-column: 1 / -1; display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-secondary); text-decoration: none; }
 .detail-header__main { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); }
+.detail-header__main > div { min-width: 0; }
 .detail-header__icon { display: grid; width: 44px; height: 44px; place-items: center; border-radius: var(--radius-control); background: var(--accent-soft); color: var(--accent); }
 .detail-header__icon.sensitive { background: color-mix(in srgb, var(--sensitive) 12%, var(--bg-code)); color: var(--sensitive); }
 .detail-header__main p, .detail-header__main h1 { margin: 0; }
@@ -456,6 +479,8 @@ function formatBytes(bytes: number) {
 .favorite, .trash-action { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: transparent; color: var(--text-muted); cursor: pointer; }
 .favorite .filled { fill: var(--warning); color: var(--warning); }
 .detail-actions { display: flex; align-items: center; gap: var(--space-2); }
+.detail-page--embedded .detail-header { grid-template-columns: minmax(0, 1fr); }
+.detail-page--embedded .detail-actions { grid-column: 1; flex-wrap: wrap; margin-left: 56px; }
 .trash-action { color: var(--danger); }
 dl { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-5); margin: var(--space-2) 0 0 56px; }
 dl div { display: grid; gap: 1px; } dt { color: var(--text-muted); font-size: 10px; } dd { margin: 0; color: var(--text-secondary); font-size: 11px; }
@@ -507,5 +532,5 @@ dl div { display: grid; gap: 1px; } dt { color: var(--text-muted); font-size: 10
 .edit-dialog fieldset { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); } .edit-dialog legend { color: var(--text-muted); font-size: 11px; } .tag-check, .favorite-check { display: inline-flex !important; align-items: center; gap: var(--space-1); font-weight: 400 !important; } .tag-check input, .favorite-check input { width: auto; }
 .edit-dialog__notice { padding: var(--space-2); background: var(--accent-soft); color: var(--text-secondary); font-size: 11px; } .edit-dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 .mutation-error { color: var(--danger) !important; }
-@media (max-width: 720px) { .detail-page { min-height: auto; padding: var(--space-3); } .detail-header { grid-template-columns: 1fr; } .detail-actions { flex-wrap: wrap; } .detail-actions button { flex: 1; } dl { margin-left: 0; } .raw-layout { grid-template-columns: 1fr; } .raw-history { display: flex; overflow-x: auto; gap: var(--space-2); padding: 0 0 var(--space-3); border-right: 0; border-bottom: 1px solid var(--border-subtle); } .raw-history button { min-width: 160px; margin: 0; } .edit-dialog__row { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .detail-page { min-height: auto; padding: var(--space-3); } .detail-header { grid-template-columns: 1fr; } .detail-actions, .detail-page--embedded .detail-actions { flex-wrap: wrap; margin-left: 0; } .detail-actions button { flex: 1; } dl { margin-left: 0; } .raw-layout { grid-template-columns: 1fr; } .raw-history { display: flex; overflow-x: auto; gap: var(--space-2); padding: 0 0 var(--space-3); border-right: 0; border-bottom: 1px solid var(--border-subtle); } .raw-history button { min-width: 160px; margin: 0; } .edit-dialog__row { grid-template-columns: 1fr; } }
 </style>

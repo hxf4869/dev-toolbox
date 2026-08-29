@@ -213,7 +213,9 @@ func (service *Service) deleteModel(response http.ResponseWriter, request *http.
 		UPDATE app_settings SET
 			default_organize_model_id = NULLIF(default_organize_model_id, $1),
 			default_review_model_id = NULLIF(default_review_model_id, $1),
-			default_vision_model_id = NULLIF(default_vision_model_id, $1), updated_at = $2
+			default_vision_model_id = NULLIF(default_vision_model_id, $1),
+			schedule_organize_model_id = NULLIF(schedule_organize_model_id, $1),
+			schedule_vision_model_id = NULLIF(schedule_vision_model_id, $1), updated_at = $2
 		WHERE singleton
 	`, id, now); err != nil {
 		writeProviderInternal(response, request)

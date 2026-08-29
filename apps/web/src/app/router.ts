@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+import AIScheduleView from '../modules/ai/AIScheduleView.vue'
+import TaskCenterView from '../modules/ai/TaskCenterView.vue'
 import AppearanceSettingsView from '../modules/settings/AppearanceSettingsView.vue'
 import AISecuritySettingsView from '../modules/settings/AISecuritySettingsView.vue'
 import ProviderSettingsView from '../modules/settings/ProviderSettingsView.vue'
@@ -12,6 +14,7 @@ export const router = createRouter({
   routes: [
     { path: '/', name: 'workspace', component: WorkspaceView },
     { path: '/items/:itemId', name: 'item-detail', component: WorkspaceView },
+    { path: '/ai/tasks', name: 'task-center', component: TaskCenterView },
     {
       path: '/settings/appearance',
       name: 'appearance-settings',
@@ -36,6 +39,11 @@ export const router = createRouter({
       path: '/settings/ai-security',
       name: 'ai-security-settings',
       component: AISecuritySettingsView,
+    },
+    {
+      path: '/settings/ai-schedule',
+      name: 'ai-schedule-settings',
+      component: AIScheduleView,
     },
   ],
   scrollBehavior: () => ({ top: 0 }),

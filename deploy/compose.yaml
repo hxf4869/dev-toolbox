@@ -76,6 +76,8 @@ services:
     environment:
       WORKER_ADDRESS: 0.0.0.0:3001
       ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
+      PROMPT_ROOT: /app/prompts
+      API_INTERNAL_URL: http://api:8080
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
       ALLOW_INSECURE_PROVIDER_HTTP: ${ALLOW_INSECURE_PROVIDER_HTTP:-false}
     secrets:
@@ -94,6 +96,9 @@ services:
       start_period: 5s
     networks:
       - backend
+    depends_on:
+      api:
+        condition: service_healthy
     logging: *local-logging
 
   postgres:

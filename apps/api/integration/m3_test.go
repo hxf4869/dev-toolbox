@@ -421,6 +421,11 @@ func TestM3ProviderPATAndExternalArtifact(t *testing.T) {
 }
 
 func newAuthenticatedM3Server(t *testing.T, database *pgxpool.Pool, attachmentRoot, workerURL string) (*httptest.Server, *http.Client, string) {
+	server, client, csrf, _ := newAuthenticatedM3ServerWithService(t, database, attachmentRoot, workerURL)
+	return server, client, csrf
+}
+
+func newAuthenticatedM3ServerWithService(t *testing.T, database *pgxpool.Pool, attachmentRoot, workerURL string) (*httptest.Server, *http.Client, string, *ai.Service) {
 	t.Helper()
 	password := "M3 correct horse 电池 staple"
 	if err := auth.InitializeOwner(context.Background(), database, "owner", password, time.Now()); err != nil {
@@ -447,7 +452,7 @@ func newAuthenticatedM3Server(t *testing.T, database *pgxpool.Pool, attachmentRo
 	if err != nil {
 		t.Fatal(err)
 	}
-	aiService := ai.NewService(database, bytes.Repeat([]byte{9}, 32), validator, workerURL, m3InternalToken, false)
+	aiService := ai.NewService(database, bytes.Repeat([]byte{9}, 32), validator, workerURL, m3InternalToken, attachmentRoot, false)
 	router := http.NewServeMux()
 	authService.RegisterRoutes(router)
 	knowledgeService.RegisterRoutes(router, authService)
@@ -473,7 +478,7 @@ func newAuthenticatedM3Server(t *testing.T, database *pgxpool.Pool, attachmentRo
 		"challengeId": challengeID, "code": code, "trustDevice": false, "deviceName": "",
 	}, "")
 	assertStatus(t, confirm, http.StatusOK)
-	return server, client, decodeResponse[apiResponse](t, confirm).CSRFToken
+	return server, client, decodeResponse[apiResponse](t, confirm).CSRFToken, aiService
 }
 
 func createM3Token(t *testing.T, client *http.Client, baseURL, csrf, name string, scopes []string) m3TokenResponse {

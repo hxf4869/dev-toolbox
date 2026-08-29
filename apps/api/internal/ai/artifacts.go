@@ -2,9 +2,11 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -18,6 +20,8 @@ import (
 )
 
 const maximumArtifactBytes = 2 * 1024 * 1024
+
+var rawHTMLPattern = regexp.MustCompile(`(?i)<(?:/?[a-z][^>]*|!--|!doctype\b|\?xml\b)[^>]*>`)
 
 type artifactEntry struct {
 	ID            uuid.UUID       `json:"id"`
@@ -33,6 +37,7 @@ type artifactEntry struct {
 	CreatedAt     time.Time       `json:"createdAt"`
 	InvalidatedAt *time.Time      `json:"invalidatedAt"`
 	Active        bool            `json:"active"`
+	IsStale       bool            `json:"isStale"`
 }
 
 type externalArtifactInput struct {
@@ -47,7 +52,9 @@ type externalArtifactInput struct {
 type validatedArtifact struct {
 	ArtifactType    string
 	SourceRecordIDs []uuid.UUID
+	FragmentIDs     []uuid.UUID
 	FragmentByRaw   map[uuid.UUID][]uuid.UUID
+	AttachmentIDs   []uuid.UUID
 }
 
 func (service *Service) createExternalArtifact(response http.ResponseWriter, request *http.Request) {
@@ -109,6 +116,8 @@ func (service *Service) createExternalArtifact(response http.ResponseWriter, req
 	}
 	snapshot, _ := json.Marshal(map[string]any{
 		"rawRecordIds":  validated.SourceRecordIDs,
+		"fragmentIds":   validated.FragmentIDs,
+		"attachmentIds": validated.AttachmentIDs,
 		"generatorName": input.GeneratorName,
 		"modelName":     input.ModelName,
 	})
@@ -151,11 +160,11 @@ func (service *Service) createExternalArtifact(response http.ResponseWriter, req
 		writeArtifactInternal(response, request)
 		return
 	}
-	entry := artifactEntry{ID: artifactID, ItemID: itemID, TaskRunID: taskID, ArtifactType: validated.ArtifactType,
-		VersionNumber: version, SchemaVersion: input.SchemaVersion, Content: input.Content,
-		Generator: "external_agent", ModelName: &input.ModelName, CreatedAt: now, Active: false}
-	prompt := "external-v1"
-	entry.PromptVersion = &prompt
+	entry, err := service.loadArtifact(request.Context(), artifactID)
+	if err != nil {
+		writeArtifactInternal(response, request)
+		return
+	}
 	httpapi.WriteJSON(response, http.StatusCreated, entry)
 }
 
@@ -208,7 +217,7 @@ func (service *Service) validateExternalArtifact(request *http.Request, itemID u
 	if (artifactType == "organized_record" || artifactType == "correctness_review") && len(topFragments) == 0 {
 		return validatedArtifact{}, "", errInvalidProviderInput
 	}
-	if !validateArtifactStructure(content, topFragments) {
+	if !validateArtifactStructure(content, topFragments) || !validateEvidenceWarnings(content) {
 		return validatedArtifact{}, "", errInvalidProviderInput
 	}
 	fragmentByRaw := make(map[uuid.UUID][]uuid.UUID, len(recordIDs))
@@ -246,10 +255,13 @@ func (service *Service) validateExternalArtifact(request *http.Request, itemID u
 			return validatedArtifact{}, "", errInvalidProviderInput
 		}
 	}
-	if !service.validateArtifactAttachments(request, itemID, content) {
+	attachmentIDs, _, _, ok := artifactAttachmentIDs(content)
+	if !ok || !service.validateArtifactAttachments(request, itemID, content) {
 		return validatedArtifact{}, "", errInvalidProviderInput
 	}
-	return validatedArtifact{ArtifactType: artifactType, SourceRecordIDs: recordIDs, FragmentByRaw: fragmentByRaw}, sensitivity, nil
+	return validatedArtifact{ArtifactType: artifactType, SourceRecordIDs: recordIDs,
+		FragmentIDs: mapKeys(topFragments), FragmentByRaw: fragmentByRaw,
+		AttachmentIDs: mapKeys(attachmentIDs)}, sensitivity, nil
 }
 
 func validateArtifactStructure(content map[string]any, topFragments map[uuid.UUID]struct{}) bool {
@@ -268,6 +280,12 @@ func validateArtifactStructure(content map[string]any, topFragments map[uuid.UUI
 			return false
 		}
 		blockIDs[id] = struct{}{}
+		if block["type"] == "markdown" {
+			markdown, _ := block["markdown"].(string)
+			if rawHTMLPattern.MatchString(markdown) {
+				return false
+			}
+		}
 		if block["type"] == "table" {
 			columns, _ := block["columns"].([]any)
 			rows, _ := block["rows"].([]any)
@@ -343,39 +361,11 @@ func stringArray(value any) ([]string, bool) {
 }
 
 func (service *Service) validateArtifactAttachments(request *http.Request, itemID uuid.UUID, content map[string]any) bool {
-	blocks, _ := content["blocks"].([]any)
-	ids := make([]uuid.UUID, 0)
-	imageCount := 0
-	for _, raw := range blocks {
-		block, _ := raw.(map[string]any)
-		kind, _ := block["type"].(string)
-		if kind != "image_reference" && kind != "attachment_reference" {
-			continue
-		}
-		attachmentID, ok := block["attachmentId"].(string)
-		if !ok {
-			return false
-		}
-		id, err := uuid.Parse(attachmentID)
-		if err != nil {
-			return false
-		}
-		if kind == "image_reference" {
-			imageCount++
-		}
-		ids = append(ids, id)
+	ids, images, kinds, ok := artifactAttachmentIDs(content)
+	if !ok || content["artifactType"] == "image_analysis" && len(images) == 0 {
+		return false
 	}
-	if len(ids) > 0 {
-		var count int
-		if err := service.database.QueryRow(request.Context(), `
-			SELECT COUNT(*) FROM attachments attachment
-			JOIN raw_records record ON record.id = attachment.raw_record_id
-			WHERE attachment.id = ANY($1) AND record.item_id = $2 AND attachment.status = 'ready'
-		`, ids, itemID).Scan(&count); err != nil || count != len(ids) {
-			return false
-		}
-	}
-	return content["artifactType"] != "image_analysis" || imageCount > 0
+	return validateStoredAttachmentKinds(request.Context(), service.database, itemID, ids, kinds)
 }
 
 func (service *Service) listArtifacts(response http.ResponseWriter, request *http.Request) {
@@ -427,6 +417,15 @@ func (service *Service) listArtifacts(response http.ResponseWriter, request *htt
 		writeArtifactInternal(response, request)
 		return
 	}
+	rows.Close()
+	for index := range items {
+		stale, err := service.isArtifactStale(request.Context(), items[index].ItemID, items[index].ArtifactType, items[index].TaskRunID)
+		if err != nil {
+			writeArtifactInternal(response, request)
+			return
+		}
+		items[index].IsStale = stale
+	}
 	httpapi.WriteJSON(response, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -437,20 +436,7 @@ func (service *Service) getArtifact(response http.ResponseWriter, request *http.
 		writeArtifactNotFound(response, request)
 		return
 	}
-	var entry artifactEntry
-	var sensitivity string
-	err = service.database.QueryRow(request.Context(), `
-		SELECT artifact.id, artifact.item_id, artifact.task_run_id, artifact.artifact_type,
-		       artifact.version_number, artifact.schema_version, artifact.content,
-		       artifact.generator, artifact.model_name, artifact.prompt_version,
-		       artifact.created_at, artifact.invalidated_at, active.artifact_id IS NOT NULL,
-		       item.sensitivity
-		FROM ai_artifacts artifact JOIN knowledge_items item ON item.id = artifact.item_id
-		LEFT JOIN item_active_artifacts active ON active.artifact_id = artifact.id
-		WHERE artifact.id = $1 AND item.deleted_at IS NULL
-	`, id).Scan(&entry.ID, &entry.ItemID, &entry.TaskRunID, &entry.ArtifactType, &entry.VersionNumber,
-		&entry.SchemaVersion, &entry.Content, &entry.Generator, &entry.ModelName, &entry.PromptVersion,
-		&entry.CreatedAt, &entry.InvalidatedAt, &entry.Active, &sensitivity)
+	entry, err := service.loadArtifact(request.Context(), id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeArtifactNotFound(response, request)
 		return
@@ -459,12 +445,77 @@ func (service *Service) getArtifact(response http.ResponseWriter, request *http.
 		writeArtifactInternal(response, request)
 		return
 	}
-	actor, _ := auth.ActorFromContext(request.Context())
-	if actor.Type == "pat" && sensitivity != "normal" && !actor.HasScope("sensitive:read") {
+	allowed, err := service.canReadArtifactItem(request, entry.ItemID)
+	if err != nil {
+		writeArtifactInternal(response, request)
+		return
+	}
+	if !allowed {
 		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感 Artifact")
 		return
 	}
 	httpapi.WriteJSON(response, http.StatusOK, entry)
+}
+
+func (service *Service) loadArtifact(ctx context.Context, id uuid.UUID) (artifactEntry, error) {
+	var entry artifactEntry
+	err := service.database.QueryRow(ctx, `
+		SELECT artifact.id, artifact.item_id, artifact.task_run_id, artifact.artifact_type,
+		       artifact.version_number, artifact.schema_version, artifact.content,
+		       artifact.generator, artifact.model_name, artifact.prompt_version,
+		       artifact.created_at, artifact.invalidated_at, active.artifact_id IS NOT NULL
+		FROM ai_artifacts artifact
+		JOIN knowledge_items item ON item.id = artifact.item_id AND item.deleted_at IS NULL
+		LEFT JOIN item_active_artifacts active ON active.artifact_id = artifact.id
+		WHERE artifact.id = $1
+	`, id).Scan(&entry.ID, &entry.ItemID, &entry.TaskRunID, &entry.ArtifactType,
+		&entry.VersionNumber, &entry.SchemaVersion, &entry.Content, &entry.Generator,
+		&entry.ModelName, &entry.PromptVersion, &entry.CreatedAt, &entry.InvalidatedAt, &entry.Active)
+	if err != nil {
+		return artifactEntry{}, err
+	}
+	entry.IsStale, err = service.isArtifactStale(ctx, entry.ItemID, entry.ArtifactType, entry.TaskRunID)
+	return entry, err
+}
+
+func (service *Service) isArtifactStale(ctx context.Context, itemID uuid.UUID, artifactType string, taskID uuid.UUID) (bool, error) {
+	var encoded []byte
+	if err := service.database.QueryRow(ctx, `SELECT input_snapshot FROM ai_task_runs WHERE id = $1`, taskID).Scan(&encoded); err != nil {
+		return false, err
+	}
+	var previous taskInputSnapshot
+	if json.Unmarshal(encoded, &previous) != nil {
+		return false, errors.New("invalid artifact input snapshot")
+	}
+	current := make([]uuid.UUID, 0)
+	query := `SELECT id FROM raw_records WHERE item_id = $1 ORDER BY id`
+	if artifactType == "image_analysis" {
+		query = `
+			SELECT attachment.id FROM attachments attachment
+			JOIN raw_records record ON record.id = attachment.raw_record_id
+			WHERE record.item_id = $1 AND attachment.status = 'ready' AND attachment.kind = 'image'
+			ORDER BY attachment.id
+		`
+	}
+	rows, err := service.database.Query(ctx, query, itemID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		current = append(current, id)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if artifactType == "image_analysis" {
+		return !sameUUIDSet(previous.AttachmentIDs, current), nil
+	}
+	return !sameUUIDSet(previous.RawRecordIDs, current), nil
 }
 
 func (service *Service) canReadArtifactItem(request *http.Request, itemID uuid.UUID) (bool, error) {

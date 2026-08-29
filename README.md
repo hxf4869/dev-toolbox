@@ -2,7 +2,7 @@
 
 开发百宝箱是一个面向个人开发与运维工作的自托管工具集合。它从“快速保存、快速找到、保留原始事实、让 AI 生成可重建的整理结果”起步，后续可以继续容纳彼此独立的小工具，但不会在一期建设动态插件平台。
 
-一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前 **M0 工程骨架与契约、M1 身份与原始事实层、M2 检索与资料库、M3 外部 Agent 与 Provider 已经完成并验证**；M4–M5 尚未完成，仓库中的占位状态不代表对应业务能力已经可用。
+一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前 **M0 工程骨架与契约、M1 身份与原始事实层、M2 检索与资料库、M3 外部 Agent 与 Provider、M4 内置 AI 任务引擎已经完成并验证**；M5 部署、恢复与发布验收尚未完成，仓库中的占位状态不代表对应业务能力已经可用。
 
 ## 一期核心闭环
 
@@ -48,6 +48,7 @@ make rebuild-search # 确定性重建当前搜索分片，保留历史片段用�
 make m1-integration-test # 在隔离测试库验证 M1 认证与录入闭环
 make m2-integration-test # 在隔离测试库验证 M2 检索、附件与资料库闭环
 make m3-integration-test # 在隔离测试库验证 M3 Provider、PAT 与外部 Artifact 闭环
+make m4-integration-test # 在隔离测试库验证 M4 任务、Artifact、批量与调度闭环
 make down         # 停止本地服务
 make reset-dev    # 停止服务并清空本地开发数据，保留配置与 Secret
 ```

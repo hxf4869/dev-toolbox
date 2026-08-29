@@ -255,13 +255,35 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	cte := `WITH item_times AS (
 		SELECT item_id, MAX(effective_captured_at) AS effective_at
 		FROM raw_records GROUP BY item_id
+	), current_raw AS (
+		SELECT item_id, to_jsonb(array_agg(id::text ORDER BY id)) AS ids
+		FROM raw_records GROUP BY item_id
+	), current_images AS (
+		SELECT record.item_id, to_jsonb(array_agg(attachment.id::text ORDER BY attachment.id)) AS ids
+		FROM attachments attachment JOIN raw_records record ON record.id = attachment.raw_record_id
+		WHERE attachment.status = 'ready' AND attachment.kind = 'image'
+		GROUP BY record.item_id
 	), scored AS (
 		SELECT i.id AS item_id, i.title, i.sensitivity, item_times.effective_at,
 		       f.id AS fragment_id, f.source_kind, f.content,
+		       CASE WHEN f.artifact_id IS NULL THEN NULL
+		         WHEN artifact.artifact_type = 'image_analysis' THEN NOT (
+		           COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) @> COALESCE(current_images.ids, '[]'::jsonb)
+		           AND COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) <@ COALESCE(current_images.ids, '[]'::jsonb)
+		         )
+		         ELSE NOT (
+		           COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) @> current_raw.ids
+		           AND COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) <@ current_raw.ids
+		         )
+		       END AS artifact_is_stale,
 		       ` + matchClass + ` AS match_class, ` + similarityScore + ` AS similarity
 		FROM search_fragments f
 		JOIN knowledge_items i ON i.id = f.item_id
 		JOIN item_times ON item_times.item_id = i.id
+		JOIN current_raw ON current_raw.item_id = i.id
+		LEFT JOIN current_images ON current_images.item_id = i.id
+		LEFT JOIN ai_artifacts artifact ON artifact.id = f.artifact_id
+		LEFT JOIN ai_task_runs artifact_task ON artifact_task.id = artifact.task_run_id
 		WHERE ` + strings.Join(filters, " AND ") + `
 		  AND (` + literal + ` OR ` + token + ` OR ` + fuzzy + `)
 	), ranked AS (
@@ -297,7 +319,7 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	limitParameter := arguments.add(input.Limit + 1)
 	rows, err := service.database.Query(request.Context(), cte+`
 		SELECT item_id, title, sensitivity, effective_at, fragment_id, source_kind,
-		       content, match_class, similarity
+		       content, artifact_is_stale, match_class, similarity
 		FROM best`+cursorFilter+` ORDER BY `+order+` LIMIT `+limitParameter, arguments.values...)
 	if err != nil {
 		return nil, 0, nil, err
@@ -308,7 +330,8 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 		var result searchResult
 		var content string
 		if err := rows.Scan(&result.ItemID, &result.Title, &result.Sensitivity, &result.EffectiveCapturedAt,
-			&result.MatchedFragmentID, &result.MatchedSource, &content, &result.matchClass, &result.similarity); err != nil {
+			&result.MatchedFragmentID, &result.MatchedSource, &content, &result.ArtifactIsStale,
+			&result.matchClass, &result.similarity); err != nil {
 			return nil, 0, nil, err
 		}
 		if result.Sensitivity == "normal" {

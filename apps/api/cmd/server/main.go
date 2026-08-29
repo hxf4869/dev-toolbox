@@ -61,7 +61,7 @@ func main() {
 		os.Exit(1)
 	}
 	aiService := ai.NewService(
-		pool, cfg.MasterKey, artifactValidator, cfg.AIWorkerURL, cfg.InternalServiceToken,
+		pool, cfg.MasterKey, artifactValidator, cfg.AIWorkerURL, cfg.InternalServiceToken, cfg.AttachmentRoot,
 		cfg.AllowInsecureProviderHTTP,
 	)
 
@@ -70,6 +70,7 @@ func main() {
 	authService.RegisterRoutes(router)
 	knowledgeService.RegisterRoutes(router, authService)
 	aiService.RegisterRoutes(router, authService)
+	go aiService.RunScheduler(ctx, logger)
 
 	handler := httpapi.RequestID(httpapi.Recover(logger, httpapi.RequestLog(logger, router)))
 	server := &http.Server{
