@@ -58,6 +58,7 @@
 
 ## 前端一致性
 
+- 实现或评审页面、组件、样式与响应式之前，必须读取 `docs/07-DESIGN-HANDOFF.md`，并按其中的规范 Screen ID 获取当前里程碑设计稿；状态板只定义真实页面的状态变体，Stitch 生成 HTML 不能直接作为生产代码。
 - 默认深色，支持浅色；除技术专有名词外统一简体中文。
 - 原始记录与 AI 派生结果必须使用明显不同的标签、来源栏和只读提示。
 - Markdown fenced code block 与 AI Artifact 的 `command`、`command_steps`、`code` block 提供逐块复制、复制反馈、换行切换和横向滚动；普通纯文本只按原文展示并提供复制全部，不启发式猜测命令。

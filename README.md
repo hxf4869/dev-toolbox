@@ -30,6 +30,7 @@
 | [docs/05-UX-DESIGN-BASELINE.md](./docs/05-UX-DESIGN-BASELINE.md) | Stitch 视觉方向、布局、组件、状态、可访问性和一致性约束 |
 | [docs/references/STITCH-CRITIQUE.md](./docs/references/STITCH-CRITIQUE.md) | 原始 Stitch 母版的可移植评审记录 |
 | [docs/06-DELIVERY-AND-ACCEPTANCE.md](./docs/06-DELIVERY-AND-ACCEPTANCE.md) | 里程碑、完成定义、测试策略和验收用例 |
+| [docs/07-DESIGN-HANDOFF.md](./docs/07-DESIGN-HANDOFF.md) | Stitch 项目入口、01–33 规范画面 ID、里程碑映射和开发使用规则 |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | 明确推迟到一期之后的能力，防止开发越界 |
 | [AGENTS.md](./AGENTS.md) | 所有编码 Agent 必须遵守的仓库级规则 |
 
