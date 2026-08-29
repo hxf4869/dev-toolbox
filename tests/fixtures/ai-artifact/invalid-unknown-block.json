@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "artifactType": "organized_record",
+  "title": "无效内容块",
+  "summary": "未知 block 必须被服务端拒绝。",
+  "classification": {
+    "contentType": "other",
+    "suggestedFolderPath": [],
+    "suggestedTags": [],
+    "sensitivitySuggestion": "unknown"
+  },
+  "blocks": [
+    {
+      "id": "unsafe",
+      "type": "html",
+      "html": "<script>alert(1)</script>",
+      "sourceFragmentIds": []
+    }
+  ],
+  "warnings": [],
+  "sourceFragmentIds": [],
+  "review": {
+    "status": "model_reviewed",
+    "limitations": ["无效测试样本。"]
+  }
+}

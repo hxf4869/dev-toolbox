@@ -1,16 +1,20 @@
 .DS_Store
-.idea/
-.vscode/
-
 .env
 .env.*
 !.env.example
-
 node_modules/
 dist/
+*.tsbuildinfo
 coverage/
+playwright-report/
+test-results/
 *.log
 
-/deploy/secrets/
-/deploy/data/
-/deploy/backup-staging/
+# Local runtime data and secrets
+deploy/data/
+deploy/secrets/
+deploy/backup-staging/
+
+# Go build/test artifacts
+apps/api/bin/
+apps/api/coverage.out

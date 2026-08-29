@@ -1,0 +1,125 @@
+name: dev-toolbox
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?请在 deploy/.env 配置 APP_DOMAIN}
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./data/caddy:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - frontend
+    logging: &local-logging
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ["sh", "-c", "/app/migrate && exec /app/server"]
+    environment:
+      HTTP_ADDRESS: 0.0.0.0:8080
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:?请配置 POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER:?请配置 POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGSSLMODE: disable
+      ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
+      MIGRATIONS_PATH: /app/migrations
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+    secrets:
+      - postgres_password
+      - internal_service_token
+      - app_master_key
+    volumes:
+      - ./data/attachments:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    logging: *local-logging
+
+  ai-worker:
+    build:
+      context: ..
+      dockerfile: apps/ai-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      WORKER_ADDRESS: 0.0.0.0:3001
+      ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+    secrets:
+      - internal_service_token
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - backend
+    logging: *local-logging
+
+  postgres:
+    image: postgres:18.6-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?请配置 POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?请配置 POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - backend
+    logging: *local-logging
+
+networks:
+  frontend:
+    internal: false
+  backend:
+    internal: true
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  internal_service_token:
+    file: ./secrets/internal_service_token
+  app_master_key:
+    file: ./secrets/app_master_key

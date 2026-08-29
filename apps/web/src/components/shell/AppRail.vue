@@ -1,0 +1,119 @@
+<script setup lang="ts">
+import { RouterLink, useRoute } from 'vue-router'
+
+import { useThemeStore } from '../../app/theme'
+import UiIcon from '../ui/UiIcon.vue'
+
+const route = useRoute()
+const theme = useThemeStore()
+</script>
+
+<template>
+  <nav class="rail" aria-label="全局导航">
+    <div class="rail__brand" aria-label="开发百宝箱">
+      <UiIcon name="wrench" :size="20" />
+    </div>
+
+    <RouterLink
+      class="rail__item"
+      :class="{ 'rail__item--active': route.name === 'workspace' }"
+      to="/"
+      aria-label="工作台"
+      title="工作台"
+    >
+      <UiIcon name="book-open" />
+    </RouterLink>
+
+    <RouterLink
+      class="rail__item"
+      :class="{ 'rail__item--active': route.name === 'appearance-settings' }"
+      to="/settings/appearance"
+      aria-label="设置"
+      title="设置"
+    >
+      <UiIcon name="settings" />
+    </RouterLink>
+
+    <button
+      class="rail__item rail__theme"
+      type="button"
+      :aria-label="theme.resolved === 'dark' ? '切换为浅色主题' : '切换为深色主题'"
+      :title="theme.resolved === 'dark' ? '切换为浅色主题' : '切换为深色主题'"
+      @click="theme.toggle"
+    >
+      <UiIcon :name="theme.resolved === 'dark' ? 'sun' : 'moon'" />
+    </button>
+  </nav>
+</template>
+
+<style scoped>
+.rail {
+  display: flex;
+  width: var(--rail-width);
+  min-height: 100dvh;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+}
+
+.rail__brand,
+.rail__item {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.rail__brand {
+  margin-bottom: var(--space-2);
+  color: var(--text-primary);
+}
+
+.rail__item {
+  cursor: pointer;
+  background: transparent;
+}
+
+.rail__item:hover,
+.rail__item--active {
+  border-color: var(--border-subtle);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.rail__item--active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.rail__theme {
+  margin-top: auto;
+}
+
+@media (max-width: 599px) {
+  .rail {
+    width: 100%;
+    min-height: 56px;
+    flex-direction: row;
+    justify-content: flex-start;
+    padding: var(--space-2) var(--space-3);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .rail__brand {
+    margin: 0 auto 0 0;
+  }
+
+  .rail__theme {
+    margin-top: 0;
+  }
+}
+</style>

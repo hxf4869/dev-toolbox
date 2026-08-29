@@ -1,0 +1,15 @@
+FROM node:24.20.0-alpine3.23 AS web-build
+
+RUN corepack enable
+WORKDIR /src
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps/web/package.json apps/web/package.json
+COPY apps/ai-worker/package.json apps/ai-worker/package.json
+RUN pnpm install --frozen-lockfile --filter @dev-toolbox/web...
+COPY apps/web apps/web
+RUN pnpm --filter @dev-toolbox/web build
+
+FROM caddy:2.11.3-alpine
+
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=web-build /src/apps/web/dist /srv

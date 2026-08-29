@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "artifactType": "organized_record",
+  "title": "Linux 新磁盘挂载",
+  "summary": "记录新磁盘分区、格式化与挂载步骤。",
+  "classification": {
+    "contentType": "operations_guide",
+    "suggestedFolderPath": ["服务器运维", "磁盘"],
+    "suggestedTags": ["Linux", "ext4"],
+    "sensitivitySuggestion": "normal"
+  },
+  "blocks": [
+    {
+      "id": "steps",
+      "type": "command_steps",
+      "title": "挂载步骤",
+      "steps": [
+        {
+          "title": "查看磁盘",
+          "commands": [
+            {
+              "shell": "bash",
+              "command": "lsblk"
+            }
+          ],
+          "sourceFragmentIds": ["7484e4f8-6ebc-51c1-9e42-8b4cecff2b4f"]
+        }
+      ],
+      "sourceFragmentIds": ["7484e4f8-6ebc-51c1-9e42-8b4cecff2b4f"]
+    }
+  ],
+  "warnings": [],
+  "sourceFragmentIds": ["7484e4f8-6ebc-51c1-9e42-8b4cecff2b4f"],
+  "review": {
+    "status": "model_reviewed",
+    "limitations": ["模型没有连接目标服务器验证命令。"]
+  }
+}

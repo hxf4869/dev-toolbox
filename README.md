@@ -2,7 +2,7 @@
 
 开发百宝箱是一个面向个人开发与运维工作的自托管工具集合。它从“快速保存、快速找到、保留原始事实、让 AI 生成可重建的整理结果”起步，后续可以继续容纳彼此独立的小工具，但不会在一期建设动态插件平台。
 
-一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前仓库仍处于**实现尚未开始**阶段：这里只包含产品、技术、交互、安全和验收基线，尚未创建业务代码、依赖或部署镜像。
+一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前 **M0 工程骨架与契约已经完成并验证**；M1–M5 尚未完成，仓库中的占位状态不代表对应业务能力已经可用。
 
 ## 一期核心闭环
 
@@ -15,6 +15,30 @@
   → 可选提交 AI 整理/检查
   → 保存版本化派生结果
 ```
+
+## 本地开发
+
+本机需提供 `make`、`openssl` 和 OrbStack 的 Docker 兼容运行时。首次启动与后续启动使用同一条命令：
+
+```bash
+make up
+```
+
+该命令会在已忽略的 `deploy/.env`、`deploy/secrets/` 和 `deploy/data/` 下创建本地配置、随机 Secret 与持久化目录，构建并启动 Caddy、API、AI worker、PostgreSQL 四个服务。启动后访问 <http://localhost:8080>，API 就绪检查为 <http://localhost:8080/health/ready>。
+
+常用开发命令：
+
+```bash
+make install      # 安装锁定的本地 Node 依赖
+make check        # Web/worker 类型检查 + Go 测试
+make test         # Web/worker/Go 单元与契约测试
+make build        # Web/worker 构建 + 四服务镜像构建
+make migrate      # 重复执行顺序迁移；无新迁移时不改变数据库
+make down         # 停止本地服务
+make reset-dev    # 停止服务并清空本地开发数据，保留配置与 Secret
+```
+
+`make reset-dev` 只用于本地开发数据。执行后再次运行 `make up`，即可从空 PostgreSQL 数据目录重新迁移。
 
 ## 文档入口
 

@@ -1,0 +1,53 @@
+{
+	admin off
+}
+
+{$APP_DOMAIN} {
+	log {
+		output stdout
+		format filter {
+			request>uri regexp "[?].*$" ""
+			request>remote_ip delete
+			request>remote_port delete
+			request>client_ip delete
+			request>proto delete
+			request>host delete
+			request>headers delete
+			request>tls delete
+			bytes_read delete
+			user_id delete
+			size delete
+			resp_headers delete
+			uuid delete
+			wrap json
+		}
+	}
+	log_append request_id {http.request.uuid}
+	request_header X-Request-ID {http.request.uuid}
+
+	request_body {
+		max_size 110MB
+	}
+
+	header {
+		X-Request-ID {http.request.uuid}
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	}
+
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	handle /health/* {
+		reverse_proxy api:8080
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

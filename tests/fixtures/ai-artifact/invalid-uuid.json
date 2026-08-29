@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "artifactType": "organized_record",
+  "title": "无效 UUID",
+  "summary": "来源 UUID 不合法。",
+  "classification": {
+    "contentType": "other",
+    "suggestedFolderPath": [],
+    "suggestedTags": [],
+    "sensitivitySuggestion": "unknown"
+  },
+  "blocks": [
+    {
+      "id": "note",
+      "type": "markdown",
+      "markdown": "测试",
+      "sourceFragmentIds": ["not-a-uuid"]
+    }
+  ],
+  "warnings": [],
+  "sourceFragmentIds": ["not-a-uuid"],
+  "review": {
+    "status": "model_reviewed",
+    "limitations": ["无效测试样本。"]
+  }
+}
