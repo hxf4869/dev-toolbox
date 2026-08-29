@@ -28,7 +28,7 @@ import ModuleNav from './ModuleNav.vue'
   background: var(--bg-surface);
 }
 
-@media (max-width: 1279px) {
+@media (max-width: 1099px) {
   .shell {
     grid-template-columns: var(--rail-width) minmax(0, 1fr);
   }

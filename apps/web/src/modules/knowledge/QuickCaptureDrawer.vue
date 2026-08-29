@@ -5,6 +5,7 @@ import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { ApiError, apiRequest, jsonRequest } from '../../lib/api'
+import { type FolderEntry, useLibraryStore } from './library'
 
 interface CreatedItem {
   id: string
@@ -24,10 +25,13 @@ const emit = defineEmits<{
 }>()
 
 const auth = useAuthStore()
+const library = useLibraryStore()
 const body = ref('')
 const contentFormat = ref<'plain_text' | 'markdown'>('plain_text')
 const sensitive = ref(false)
 const title = ref('')
+const folderId = ref('')
+const tagIds = ref<string[]>([])
 const files = ref<File[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const editor = ref<HTMLTextAreaElement | null>(null)
@@ -39,12 +43,15 @@ const savedMessage = ref('')
 const confirmDiscard = ref(false)
 const submissionKey = ref('')
 const submissionSignature = ref('')
+const flatFolders = computed(() => flattenFolders(library.folders))
 
 const dirty = computed(
   () =>
     body.value !== '' ||
     files.value.length > 0 ||
     title.value !== '' ||
+    folderId.value !== '' ||
+    tagIds.value.length > 0 ||
     sensitive.value ||
     contentFormat.value !== 'plain_text',
 )
@@ -57,6 +64,7 @@ watch(
   () => props.open,
   (open) => {
     if (open) {
+      savedMessage.value = ''
       previousFocus.value = document.activeElement as HTMLElement | null
       void focusEditor()
     } else {
@@ -66,6 +74,12 @@ watch(
     }
   },
 )
+
+watch(confirmDiscard, async (open) => {
+  await nextTick()
+  if (open) drawer.value?.querySelector<HTMLElement>('.discard-state button')?.focus()
+  else if (props.open) editor.value?.focus()
+})
 
 async function focusEditor() {
   await nextTick()
@@ -92,6 +106,8 @@ function resetForm() {
   contentFormat.value = 'plain_text'
   sensitive.value = false
   title.value = ''
+  folderId.value = ''
+  tagIds.value = []
   files.value = []
   errorMessage.value = ''
   submissionKey.value = ''
@@ -180,8 +196,8 @@ async function save() {
     contentFormat: contentFormat.value,
     sensitivity: sensitive.value ? 'sensitive' : 'normal',
     title: title.value.trim() || null,
-    folderId: null,
-    tagIds: [],
+    folderId: folderId.value || null,
+    tagIds: tagIds.value,
   }
   const signature = JSON.stringify({
     ...metadata,
@@ -238,6 +254,13 @@ function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 }
+
+function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & { depth: number }> {
+  return entries.flatMap((entry) => [
+    { ...entry, depth },
+    ...flattenFolders(entry.children, depth + 1),
+  ])
+}
 </script>
 
 <template>
@@ -282,7 +305,7 @@ function formatBytes(bytes: number) {
             />
           </label>
 
-          <div class="capture-toolbar" aria-label="内容格式">
+          <div class="capture-toolbar" role="group" aria-label="内容格式">
             <button type="button" :class="{ active: contentFormat === 'plain_text' }" @click="contentFormat = 'plain_text'">
               纯文本
             </button>
@@ -299,7 +322,7 @@ function formatBytes(bytes: number) {
                 <p>最多 10 个；单文件 20 MiB，合计 100 MiB。</p>
               </div>
               <UiButton variant="secondary" @click="chooseFiles"><UiIcon name="paperclip" /> 添加文件</UiButton>
-              <input ref="fileInput" class="sr-only" type="file" multiple @change="onFileSelection" />
+              <input ref="fileInput" class="sr-only" type="file" multiple aria-label="选择记录附件" @change="onFileSelection" />
             </header>
             <ul v-if="files.length">
               <li v-for="(file, index) in files" :key="`${file.name}-${file.lastModified}-${index}`">
@@ -320,6 +343,19 @@ function formatBytes(bytes: number) {
               <span>自定义标题 <small>可选，最多 200 字符</small></span>
               <input v-model="title" maxlength="200" placeholder="留空时按原文确定性生成" />
             </label>
+            <label>
+              <span>目录 <small>可选</small></span>
+              <select v-model="folderId">
+                <option value="">原始收件箱</option>
+                <option v-for="folder in flatFolders" :key="folder.id" :value="folder.id">{{ '　'.repeat(folder.depth) }}{{ folder.name }}</option>
+              </select>
+            </label>
+            <fieldset v-if="library.tags.length">
+              <legend>标签 <small>最多 30 个</small></legend>
+              <label v-for="tag in library.tags" :key="tag.id" class="capture-tag">
+                <input v-model="tagIds" type="checkbox" :value="tag.id" :disabled="!tagIds.includes(tag.id) && tagIds.length >= 30" /> {{ tag.name }}
+              </label>
+            </fieldset>
           </details>
 
           <label class="sensitive-toggle">
@@ -381,7 +417,7 @@ function formatBytes(bytes: number) {
 .editor-field, .capture-options label { display: grid; gap: var(--space-2); }
 .editor-field > span, .capture-options label > span { display: flex; justify-content: space-between; color: var(--text-secondary); font-size: 12px; font-weight: 700; }
 .editor-field small, .capture-options small { color: var(--text-muted); font-weight: 400; }
-textarea, .capture-options input { width: 100%; padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); }
+textarea, .capture-options input, .capture-options select { width: 100%; padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); }
 textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.65; }
 .capture-toolbar { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-2) 0 var(--space-4); border-bottom: 1px solid var(--border-subtle); }
 .capture-toolbar button { padding: 5px var(--space-2); border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; }
@@ -402,6 +438,10 @@ textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); f
 .attachments__total { margin-top: var(--space-2) !important; text-align: right; }
 .capture-options { padding: var(--space-4) 0; border-bottom: 1px solid var(--border-subtle); }
 .capture-options summary { margin-bottom: var(--space-3); cursor: pointer; color: var(--text-secondary); font-size: 12px; font-weight: 700; }
+.capture-options fieldset { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); }
+.capture-options legend { color: var(--text-muted); font-size: 11px; }
+.capture-tag { display: inline-flex !important; align-items: center; gap: var(--space-1) !important; color: var(--text-secondary); font-size: 11px; }
+.capture-tag input { width: auto; padding: 0; }
 .sensitive-toggle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-elevated); cursor: pointer; }
 .sensitive-toggle > span { display: flex; align-items: flex-start; gap: var(--space-2); }
 .sensitive-toggle strong, .sensitive-toggle small { display: block; }

@@ -15,11 +15,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/knowledge"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/config"
 )
 
 func main() {
-	if len(os.Args) < 3 || os.Args[1] != "admin" {
+	if len(os.Args) < 3 || (os.Args[1] != "admin" && os.Args[1] != "maintenance") {
 		usage()
 		os.Exit(2)
 	}
@@ -35,11 +36,21 @@ func main() {
 	}
 	defer database.Close()
 
+	if os.Args[1] == "admin" {
+		switch os.Args[2] {
+		case "init-owner":
+			runInitOwner(ctx, database, os.Args[3:])
+		case "reset-auth":
+			runResetAuth(ctx, database, os.Args[3:])
+		default:
+			usage()
+			os.Exit(2)
+		}
+		return
+	}
 	switch os.Args[2] {
-	case "init-owner":
-		runInitOwner(ctx, database, os.Args[3:])
-	case "reset-auth":
-		runResetAuth(ctx, database, os.Args[3:])
+	case "rebuild-search":
+		runRebuildSearch(ctx, database, os.Args[3:])
 	default:
 		usage()
 		os.Exit(2)
@@ -81,6 +92,20 @@ func runResetAuth(ctx context.Context, database *pgxpool.Pool, arguments []strin
 	fmt.Println("认证已重置；知识记录未修改，下次登录必须重新绑定 TOTP")
 }
 
+func runRebuildSearch(ctx context.Context, database *pgxpool.Pool, arguments []string) {
+	flags := flag.NewFlagSet("rebuild-search", flag.ExitOnError)
+	_ = flags.Parse(arguments)
+	if flags.NArg() != 0 {
+		usage()
+		os.Exit(2)
+	}
+	result, err := knowledge.RebuildSearch(ctx, database, time.Now())
+	if err != nil {
+		fail("搜索索引重建失败")
+	}
+	fmt.Printf("搜索索引重建完成：%d 条记录，%d 个原始记录，%d 个当前片段\n", result.Items, result.RawRecords, result.Fragments)
+}
+
 func readAndConfirmPassword(path string) (string, error) {
 	if path != "" {
 		content, err := os.ReadFile(path)
@@ -115,6 +140,7 @@ func trimOneLineEnding(value string) string {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法: dev-toolbox admin init-owner|reset-auth [--password-file PATH]")
+	fmt.Fprintln(os.Stderr, "      dev-toolbox maintenance rebuild-search")
 }
 
 func fail(message string) {

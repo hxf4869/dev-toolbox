@@ -1,21 +1,64 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps<{ source: string }>()
-const renderer = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: false,
-  breaks: true,
+const copiedIndex = ref<number | null>(null)
+const copyErrorIndex = ref<number | null>(null)
+
+const rendered = computed(() => {
+  const codeBlocks: string[] = []
+  const renderer = new MarkdownIt({
+    html: false,
+    linkify: true,
+    typographer: false,
+    breaks: true,
+  })
+  const defaultLinkOpen = renderer.renderer.rules.link_open ?? ((tokens, index, options, _environment, self) => self.renderToken(tokens, index, options))
+  renderer.renderer.rules.link_open = (tokens, index, options, environment, self) => {
+    const href = String(tokens[index]?.attrGet('href') ?? '')
+    if (/^https?:\/\//iu.test(href)) {
+      tokens[index]?.attrSet('target', '_blank')
+      tokens[index]?.attrSet('rel', 'noopener noreferrer')
+    }
+    return defaultLinkOpen(tokens, index, options, environment, self)
+  }
+  renderer.renderer.rules.fence = (tokens, index) => {
+    const token = tokens[index]
+    const blockIndex = codeBlocks.push(token.content) - 1
+    const language = renderer.utils.escapeHtml(token.info.trim().split(/\s+/u)[0] ?? '')
+    const className = language ? ` class="language-${language}"` : ''
+    const copyLabel = copiedIndex.value === blockIndex ? '已复制' : copyErrorIndex.value === blockIndex ? '复制失败，重试' : '复制代码块'
+    return `<section class="safe-code-block"><header><span>${language || '代码'} · 来自原始记录</span><button type="button" data-code-index="${blockIndex}">${copyLabel}</button></header><pre tabindex="0"><code${className}>${renderer.utils.escapeHtml(token.content)}</code></pre></section>`
+  }
+  return { html: renderer.render(props.source), codeBlocks }
 })
 
-const rendered = computed(() => renderer.render(props.source))
+async function onContentClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  const button = target?.closest<HTMLButtonElement>('button[data-code-index]')
+  if (!button) return
+  const index = Number(button.dataset.codeIndex)
+  const content = rendered.value.codeBlocks[index]
+  if (content === undefined) return
+  copyErrorIndex.value = null
+  try {
+    await navigator.clipboard.writeText(content)
+    copiedIndex.value = index
+    window.setTimeout(() => {
+      if (copiedIndex.value === index) copiedIndex.value = null
+    }, 1600)
+  } catch {
+    copiedIndex.value = null
+    copyErrorIndex.value = index
+  }
+}
 </script>
 
 <template>
   <!-- markdown-it escapes raw HTML because html=false. -->
-  <div class="safe-markdown" v-html="rendered" />
+  <div class="safe-markdown" @click="onContentClick" v-html="rendered.html" />
+  <span class="sr-only" role="status">{{ copiedIndex !== null ? '代码块已精确复制' : copyErrorIndex !== null ? '复制失败，请重试' : '' }}</span>
 </template>
 
 <style scoped>
@@ -35,6 +78,38 @@ const rendered = computed(() => renderer.render(props.source))
   font-family: var(--font-mono);
   font-size: 13px;
   white-space: pre;
+}
+
+.safe-markdown :deep(.safe-code-block) {
+  margin: var(--space-4) 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  background: var(--bg-code);
+}
+
+.safe-markdown :deep(.safe-code-block > header) {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.safe-markdown :deep(.safe-code-block button) {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.safe-markdown :deep(.safe-code-block pre) {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
 }
 
 .safe-markdown :deep(code) {

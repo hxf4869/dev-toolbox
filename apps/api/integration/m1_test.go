@@ -53,6 +53,7 @@ type apiResponse struct {
 		DisplayName string    `json:"displayName"`
 		MediaType   string    `json:"mediaType"`
 		SizeBytes   int64     `json:"sizeBytes"`
+		ContentURL  string    `json:"contentUrl"`
 	} `json:"attachments"`
 }
 

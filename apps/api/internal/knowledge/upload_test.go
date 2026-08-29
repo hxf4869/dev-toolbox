@@ -78,3 +78,12 @@ func TestPrepareFileEnforcesExactTwentyMiBBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestActualFileTotalAllowsExactHundredMiB(t *testing.T) {
+	if !totalUploadAllowed(100 * 1024 * 1024) {
+		t.Fatal("exactly 100 MiB should be accepted independent of multipart framing")
+	}
+	if totalUploadAllowed(100*1024*1024 + 1) {
+		t.Fatal("100 MiB plus one byte should be rejected")
+	}
+}

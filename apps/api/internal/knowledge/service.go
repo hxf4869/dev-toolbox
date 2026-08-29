@@ -20,12 +20,15 @@ import (
 )
 
 type Service struct {
-	database *pgxpool.Pool
-	root     string
-	tempRoot string
-	blobRoot string
-	timezone *time.Location
-	now      func() time.Time
+	database       *pgxpool.Pool
+	root           string
+	tempRoot       string
+	blobRoot       string
+	derivativeRoot string
+	quarantineRoot string
+	timezone       *time.Location
+	auth           *auth.Service
+	now            func() time.Time
 }
 
 type createInput struct {
@@ -56,14 +59,19 @@ type rawRecordSummary struct {
 }
 
 type attachmentEntry struct {
-	ID          uuid.UUID `json:"id"`
-	Kind        string    `json:"kind"`
-	DisplayName string    `json:"displayName"`
-	MediaType   string    `json:"mediaType"`
-	SizeBytes   int64     `json:"sizeBytes"`
-	Width       *int      `json:"width"`
-	Height      *int      `json:"height"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID              uuid.UUID `json:"id"`
+	Kind            string    `json:"kind"`
+	OriginalName    string    `json:"originalName"`
+	DisplayName     string    `json:"displayName"`
+	ClientMediaType *string   `json:"clientMediaType"`
+	MediaType       string    `json:"mediaType"`
+	SizeBytes       int64     `json:"sizeBytes"`
+	Width           *int      `json:"width"`
+	Height          *int      `json:"height"`
+	PreviewAllowed  bool      `json:"previewAllowed"`
+	ContentURL      string    `json:"contentUrl"`
+	ThumbnailURL    *string   `json:"thumbnailUrl"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type storedFile struct {
@@ -77,39 +85,64 @@ func NewService(database *pgxpool.Pool, root string, timezone *time.Location) (*
 	root = filepath.Clean(root)
 	tempRoot := filepath.Join(root, "tmp")
 	blobRoot := filepath.Join(root, "blobs")
-	for _, path := range []string{root, tempRoot, blobRoot} {
+	derivativeRoot := filepath.Join(root, "derivatives")
+	quarantineRoot := filepath.Join(root, "quarantine")
+	for _, path := range []string{root, tempRoot, blobRoot, derivativeRoot, quarantineRoot} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return nil, fmt.Errorf("create attachment directory: %w", err)
 		}
 	}
 	return &Service{
-		database: database,
-		root:     root,
-		tempRoot: tempRoot,
-		blobRoot: blobRoot,
-		timezone: timezone,
-		now:      time.Now,
+		database:       database,
+		root:           root,
+		tempRoot:       tempRoot,
+		blobRoot:       blobRoot,
+		derivativeRoot: derivativeRoot,
+		quarantineRoot: quarantineRoot,
+		timezone:       timezone,
+		now:            time.Now,
 	}, nil
 }
 
 func (service *Service) RegisterRoutes(router *http.ServeMux, authService *auth.Service) {
+	service.auth = authService
 	router.Handle("GET /api/v1/items", authService.Authenticate(http.HandlerFunc(service.listItems)))
 	router.Handle("POST /api/v1/items", authService.AuthenticateMutation(http.HandlerFunc(service.createJSON)))
 	router.Handle("POST /api/v1/items:multipart", authService.AuthenticateMutation(http.HandlerFunc(service.createMultipart)))
 	router.Handle("GET /api/v1/items/{itemId}", authService.Authenticate(http.HandlerFunc(service.getItem)))
 	router.Handle("PATCH /api/v1/items/{itemId}", authService.AuthenticateMutation(http.HandlerFunc(service.patchItem)))
+	router.Handle("DELETE /api/v1/items/{itemId}", authService.AuthenticateMutation(http.HandlerFunc(service.trashItem)))
+	router.Handle("POST /api/v1/items/{itemId}/restore", authService.AuthenticateMutation(http.HandlerFunc(service.restoreItem)))
+	router.Handle("DELETE /api/v1/items/{itemId}/purge", authService.AuthenticateMutation(http.HandlerFunc(service.purgeItem)))
+	router.Handle("POST /api/v1/items/{itemId}/raw-records", authService.AuthenticateMutation(http.HandlerFunc(service.createSupplementJSON)))
+	router.Handle("POST /api/v1/items/{itemId}/raw-records:multipart", authService.AuthenticateMutation(http.HandlerFunc(service.createSupplementMultipart)))
 	router.Handle("GET /api/v1/items/{itemId}/raw-records/{rawRecordId}", authService.Authenticate(http.HandlerFunc(service.getRawRecord)))
 	router.Handle("GET /api/v1/attachments/{id}/metadata", authService.Authenticate(http.HandlerFunc(service.getAttachmentMetadata)))
 	router.Handle("GET /api/v1/attachments/{id}/content", authService.Authenticate(http.HandlerFunc(service.getAttachmentContent)))
+	router.Handle("GET /api/v1/attachments/{id}/thumbnail", authService.Authenticate(http.HandlerFunc(service.getAttachmentThumbnail)))
+	router.Handle("POST /api/v1/search", authService.AuthenticateMutation(http.HandlerFunc(service.searchItems)))
+	router.Handle("GET /api/v1/folders/tree", authService.Authenticate(http.HandlerFunc(service.listFolderTree)))
+	router.Handle("POST /api/v1/folders", authService.AuthenticateMutation(http.HandlerFunc(service.createFolder)))
+	router.Handle("PATCH /api/v1/folders/{id}", authService.AuthenticateMutation(http.HandlerFunc(service.renameFolder)))
+	router.Handle("POST /api/v1/folders/{id}/move", authService.AuthenticateMutation(http.HandlerFunc(service.moveFolder)))
+	router.Handle("DELETE /api/v1/folders/{id}", authService.AuthenticateMutation(http.HandlerFunc(service.deleteFolder)))
+	router.Handle("GET /api/v1/tags", authService.Authenticate(http.HandlerFunc(service.listTags)))
+	router.Handle("POST /api/v1/tags", authService.AuthenticateMutation(http.HandlerFunc(service.createTag)))
+	router.Handle("PATCH /api/v1/tags/{id}", authService.AuthenticateMutation(http.HandlerFunc(service.renameTag)))
+	router.Handle("DELETE /api/v1/tags/{id}", authService.AuthenticateMutation(http.HandlerFunc(service.deleteTag)))
 }
 
 func (service *Service) createItem(ctx context.Context, session auth.Session, input createInput, files []preparedFile, idempotencyKey string) (createResult, error) {
 	if err := validateCreateInput(input, files); err != nil {
 		return createResult{}, err
 	}
+	folderID, tagIDs, err := parseCreateOrganization(input)
+	if err != nil {
+		return createResult{}, errInvalidInput
+	}
 	if idempotencyKey != "" {
-		if result, found, err := service.findIdempotentResult(ctx, session.ID, idempotencyKey); err != nil || found {
-			return result, err
+		if result, found, lookupErr := service.findIdempotentResult(ctx, session.ID, idempotencyKey); lookupErr != nil || found {
+			return result, lookupErr
 		}
 	}
 
@@ -158,13 +191,30 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 			return createResult{}, err
 		}
 	}
+	if folderID != nil {
+		var exists bool
+		if err := tx.QueryRow(ctx, "SELECT true FROM folders WHERE id = $1", *folderID).Scan(&exists); err != nil {
+			return createResult{}, errInvalidInput
+		}
+	}
+	if len(tagIDs) > 0 {
+		var count int
+		if err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM tags WHERE id = ANY($1)", tagIDs).Scan(&count); err != nil || count != len(tagIDs) {
+			return createResult{}, errInvalidInput
+		}
+	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO knowledge_items (
-			id, title, title_origin, sensitivity, favorite, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, false, $5, $5)
-	`, itemID, title, titleOrigin, input.Sensitivity, now); err != nil {
+			id, title, title_origin, folder_id, sensitivity, favorite, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, false, $6, $6)
+	`, itemID, title, titleOrigin, folderID, input.Sensitivity, now); err != nil {
 		return createResult{}, err
+	}
+	for _, tagID := range tagIDs {
+		if _, err := tx.Exec(ctx, "INSERT INTO item_tags (item_id, tag_id, created_at) VALUES ($1, $2, $3)", itemID, tagID, now); err != nil {
+			return createResult{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO raw_records (
@@ -179,7 +229,7 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 		INSERT INTO search_fragments (
 			id, item_id, source_kind, ordinal, content, normalized_content, weight, active, created_at
 		) VALUES ($1, $2, 'title', 0, $3, $4, 4, true, $5)
-	`, uuid.New(), itemID, title, normalizeSearch(title), now); err != nil {
+	`, uuid.NewSHA1(fragmentNS, []byte(itemID.String()+":title")), itemID, title, normalizeSearch(title), now); err != nil {
 		return createResult{}, err
 	}
 	for _, fragment := range splitTextFragments(rawRecordID, input.Body) {
@@ -190,6 +240,11 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 3, true, $11)
 		`, fragment.ID, itemID, rawRecordID, fragment.Kind, fragment.Ordinal, fragmentVersion,
 			fragment.StartByte, fragment.EndByte, fragment.Content, fragment.Normalized, now); err != nil {
+			return createResult{}, err
+		}
+	}
+	if folderID != nil || len(tagIDs) > 0 {
+		if err := service.rebuildItemMetadata(ctx, tx, itemID, now, false); err != nil {
 			return createResult{}, err
 		}
 	}
@@ -209,13 +264,10 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 			INSERT INTO search_fragments (
 				id, item_id, source_kind, ordinal, content, normalized_content, weight, active, created_at
 			) VALUES ($1, $2, 'filename', $3, $4, $5, 2, true, $6)
-		`, uuid.New(), itemID, ordinal, file.DisplayName, normalizeSearch(file.DisplayName), now); err != nil {
+		`, uuid.NewSHA1(fragmentNS, []byte(file.ID.String()+":filename")), itemID, ordinal, file.DisplayName, normalizeSearch(file.DisplayName), now); err != nil {
 			return createResult{}, err
 		}
-		attachments = append(attachments, attachmentEntry{
-			ID: file.ID, Kind: file.Kind, DisplayName: file.DisplayName, MediaType: file.MediaType,
-			SizeBytes: file.SizeBytes, Width: file.Width, Height: file.Height, CreatedAt: now,
-		})
+		attachments = append(attachments, attachmentEntryFromStoredFile(file, now))
 	}
 	if idempotencyKey != "" {
 		if _, err := tx.Exec(ctx, `
@@ -284,10 +336,35 @@ func validateCreateInput(input createInput, files []preparedFile) error {
 			return errInvalidInput
 		}
 	}
-	if input.FolderID != nil || len(input.TagIDs) > 0 {
+	if len(input.TagIDs) > 30 {
 		return errInvalidInput
 	}
 	return nil
+}
+
+func parseCreateOrganization(input createInput) (*uuid.UUID, []uuid.UUID, error) {
+	var folderID *uuid.UUID
+	if input.FolderID != nil {
+		parsed, err := uuid.Parse(*input.FolderID)
+		if err != nil {
+			return nil, nil, err
+		}
+		folderID = &parsed
+	}
+	tagIDs := make([]uuid.UUID, 0, len(input.TagIDs))
+	seen := make(map[uuid.UUID]struct{}, len(input.TagIDs))
+	for _, value := range input.TagIDs {
+		parsed, err := uuid.Parse(value)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, exists := seen[parsed]; exists {
+			return nil, nil, errInvalidInput
+		}
+		seen[parsed] = struct{}{}
+		tagIDs = append(tagIDs, parsed)
+	}
+	return folderID, tagIDs, nil
 }
 
 func inferContentKind(body string, files []preparedFile) string {
@@ -316,6 +393,32 @@ func hasImage(files []preparedFile) bool {
 func removeFiles(paths []string) {
 	for _, path := range paths {
 		_ = os.Remove(path)
+	}
+}
+
+func attachmentEntryFromStoredFile(file storedFile, createdAt time.Time) attachmentEntry {
+	var clientMediaType *string
+	if file.ClientMedia != "" {
+		value := file.ClientMedia
+		clientMediaType = &value
+	}
+	entry := attachmentEntry{
+		ID: file.ID, Kind: file.Kind, OriginalName: file.OriginalName, DisplayName: file.DisplayName,
+		ClientMediaType: clientMediaType, MediaType: file.MediaType, SizeBytes: file.SizeBytes,
+		Width: file.Width, Height: file.Height, CreatedAt: createdAt,
+	}
+	populateAttachmentLinks(&entry)
+	return entry
+}
+
+func populateAttachmentLinks(entry *attachmentEntry) {
+	entry.PreviewAllowed = previewAllowed(entry.Kind, entry.MediaType, entry.Width, entry.Height)
+	entry.ContentURL = "/api/v1/attachments/" + entry.ID.String() + "/content"
+	if entry.PreviewAllowed {
+		value := "/api/v1/attachments/" + entry.ID.String() + "/thumbnail"
+		entry.ThumbnailURL = &value
+	} else {
+		entry.ThumbnailURL = nil
 	}
 }
 
@@ -348,7 +451,8 @@ func (service *Service) loadCreateResult(ctx context.Context, itemID, rawRecordI
 	}
 	result.RawRecord = rawRecordSummary{ID: rawRecordID, ReadOnly: true}
 	rows, err := service.database.Query(ctx, `
-		SELECT id, kind, display_name, media_type, size_bytes, width, height, created_at
+		SELECT id, kind, original_name, display_name, client_media_type, media_type,
+		       size_bytes, width, height, created_at
 		FROM attachments WHERE raw_record_id = $1 AND status = 'ready'
 		ORDER BY created_at, id
 	`, rawRecordID)
@@ -358,9 +462,11 @@ func (service *Service) loadCreateResult(ctx context.Context, itemID, rawRecordI
 	defer rows.Close()
 	for rows.Next() {
 		var entry attachmentEntry
-		if err := rows.Scan(&entry.ID, &entry.Kind, &entry.DisplayName, &entry.MediaType, &entry.SizeBytes, &entry.Width, &entry.Height, &entry.CreatedAt); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.Kind, &entry.OriginalName, &entry.DisplayName,
+			&entry.ClientMediaType, &entry.MediaType, &entry.SizeBytes, &entry.Width, &entry.Height, &entry.CreatedAt); err != nil {
 			return createResult{}, err
 		}
+		populateAttachmentLinks(&entry)
 		result.Attachments = append(result.Attachments, entry)
 	}
 	return result, rows.Err()

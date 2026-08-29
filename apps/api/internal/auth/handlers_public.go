@@ -512,3 +512,8 @@ func (service *Service) insertSecurityEvent(ctx context.Context, tx pgx.Tx, even
 	`, uuid.New(), eventType, nullableIP(ip), truncateRunes(userAgent, 512), string(encoded), service.now().UTC())
 	return err
 }
+
+// InsertRequestSecurityEvent records a content-free security event in the caller's transaction.
+func (service *Service) InsertRequestSecurityEvent(ctx context.Context, tx pgx.Tx, request *http.Request, eventType string, details map[string]any) error {
+	return service.insertSecurityEvent(ctx, tx, eventType, clientIP(request, service.trustedProxies), request.UserAgent(), details)
+}

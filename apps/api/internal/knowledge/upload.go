@@ -157,3 +157,7 @@ func safeImageMediaType(value string) bool {
 		return false
 	}
 }
+
+func totalUploadAllowed(actualFileBytes int64) bool {
+	return actualFileBytes <= maxTotalBytes
+}

@@ -47,7 +47,7 @@
 |---|---|---|
 | M0 | 已完成并验证 | 四服务骨架、共享 Artifact 契约、顺序迁移、安全日志、主题与响应式应用壳已落地 |
 | M1 | 已完成并验证 | 登录/TOTP/恢复码、可信设备与会话、不可变原始记录、附件基础录入及安全详情已通过集成与浏览器验证 |
-| M2 | 未开始 | 检索、组织与完整附件能力尚未交付 |
+| M2 | 已完成并验证 | 字面/模糊检索、固定视图、目录标签、补充原始记录、附件安全下载/缩略图与回收站已通过单元、集成和浏览器验证 |
 | M3 | 未开始 | 外部 Agent、PAT 与 Provider 尚未交付 |
 | M4 | 未开始 | 内置 AI 任务引擎尚未交付 |
 | M5 | 未开始 | 备份恢复、生产发布与全量验收尚未交付 |
@@ -163,30 +163,30 @@
 
 ### 6.3 退出条件
 
-- [ ] `lsblk`、`mount`、`挂载`、`/dev/sdb1`、`Docker` 等示例查询能命中预期记录。
-- [ ] 搜索按字面处理；`%`、`_`、`\` 不成为 SQL 通配符或转义语法，查询中的引号、减号和路径字符不被解释成 DSL。
-- [ ] 相关性排序中标题精确命中优先；时间排序严格按有效采集时间倒序。
-- [ ] `match_class` 按 `title_exact > fact_literal > human_metadata_literal > fuzzy > ai_derived` 固定映射；trigram 最低相似度只有一处代码常量，排名 fixture 锁定其行为。
-- [ ] 每个 item 只保留按 `matchClass/similarity/matchedFragmentId` 选出的最佳片段；非模糊命中 similarity 固定 1.0，相关性与时间游标编码完整 item 排序元组，同分/同时间多页结果无重复、无遗漏且顺序稳定。
-- [ ] 同版本重建后原始片段边界、UUID 和搜索结果稳定；升级分片版本后，历史 artifact 引用的旧片段仍可定位。
-- [ ] emoji、中文和组合字符命中由无 HTML 分段高亮，不发生错位、截断或脚本注入。
-- [ ] 搜索 Token 样例时，原始查询词不出现在 URL、Caddy/API 日志或持久化浏览器存储；非敏感固定视图、过滤器和排序仍可通过 URL 恢复，搜索响应带 `Cache-Control: no-store`。
-- [ ] 敏感记录可被本人搜索，但服务端返回遮挡摘要，列表 DOM 与复制遵循遮挡状态，不先下发原文再由前端隐藏。
-- [ ] 固定视图严格按删除状态、目录、收藏、敏感状态和 ready 附件集合计算；有效采集时间按来源时间与可信度回退规则确定并显示来源。
-- [ ] 目录删除不级联删记录；AI 不存在时目录和标签完整可用。
-- [ ] 回收站不出现在普通搜索；恢复后重新可见；永久删除有清晰确认。
-- [ ] 已有条目可追加 image-only、file-only 和 mixed supplement；每次均创建新 immutable raw record，不能给旧 raw record 追加附件或创建第二个 primary。
-- [ ] `supplements`/`supersedes` 关系不能跨 item，`migration_duplicate` 可以跨 item，非法关联在事务提交前被拒绝。
-- [ ] normal 条目添加 sensitive/unknown supplement 后在同一事务自动升级并安全化系统标题；sensitive/unknown 条目添加 normal supplement 不自动降级。
-- [ ] raw `content_kind` 按实际正文与附件组合由服务端准确派生，客户端提交该派生字段时被拒绝。
-- [ ] 上传原图字节与下载字节一致，缩略图删除后可重建。
-- [ ] 上传同时记录客户端声明 MIME、服务端检测 MIME 和流式计算的 SHA-256；内联预览、响应类型和图片处理只使用服务端 MIME。
-- [ ] 20 MiB 恰好允许，超过 1 字节拒绝；中断上传不留下正式数据库引用。
-- [ ] 恰好 100 MiB 的实际附件总字节不会因 multipart 边界开销被 Caddy 提前拒绝，API 仍按实际文件字节执行上限。
-- [ ] 路径穿越文件名、重复文件名、超长文件名和控制字符不影响磁盘路径。
-- [ ] SVG/HTML/未知文件按附件下载而不内联执行。
-- [ ] 每个命令块复制内容精确，不含 UI 标签或行号；长命令可横向滚动。
-- [ ] 普通 `plain_text` 原文只提供复制全部和浏览器原生局部复制，不被正则、语言识别或 Shell parser 拆成伪命令块。
+- [x] `lsblk`、`mount`、`挂载`、`/dev/sdb1`、`Docker` 等示例查询能命中预期记录。
+- [x] 搜索按字面处理；`%`、`_`、`\` 不成为 SQL 通配符或转义语法，查询中的引号、减号和路径字符不被解释成 DSL。
+- [x] 相关性排序中标题精确命中优先；时间排序严格按有效采集时间倒序。
+- [x] `match_class` 按 `title_exact > fact_literal > human_metadata_literal > fuzzy > ai_derived` 固定映射；trigram 最低相似度只有一处代码常量，排名 fixture 锁定其行为。
+- [x] 每个 item 只保留按 `matchClass/similarity/matchedFragmentId` 选出的最佳片段；非模糊命中 similarity 固定 1.0，相关性与时间游标编码完整 item 排序元组，同分/同时间多页结果无重复、无遗漏且顺序稳定。
+- [x] 同版本重建后原始片段边界、UUID 和搜索结果稳定；升级分片版本后，历史 artifact 引用的旧片段仍可定位。
+- [x] emoji、中文和组合字符命中由无 HTML 分段高亮，不发生错位、截断或脚本注入。
+- [x] 搜索 Token 样例时，原始查询词不出现在 URL、Caddy/API 日志或持久化浏览器存储；非敏感固定视图、过滤器和排序仍可通过 URL 恢复，搜索响应带 `Cache-Control: no-store`。
+- [x] 敏感记录可被本人搜索，但服务端返回遮挡摘要，列表 DOM 与复制遵循遮挡状态，不先下发原文再由前端隐藏。
+- [x] 固定视图严格按删除状态、目录、收藏、敏感状态和 ready 附件集合计算；有效采集时间按来源时间与可信度回退规则确定并显示来源。
+- [x] 目录删除不级联删记录；AI 不存在时目录和标签完整可用。
+- [x] 回收站不出现在普通搜索；恢复后重新可见；永久删除有清晰确认。
+- [x] 已有条目可追加 image-only、file-only 和 mixed supplement；每次均创建新 immutable raw record，不能给旧 raw record 追加附件或创建第二个 primary。
+- [x] `supplements`/`supersedes` 关系不能跨 item，`migration_duplicate` 可以跨 item，非法关联在事务提交前被拒绝。
+- [x] normal 条目添加 sensitive/unknown supplement 后在同一事务自动升级并安全化系统标题；sensitive/unknown 条目添加 normal supplement 不自动降级。
+- [x] raw `content_kind` 按实际正文与附件组合由服务端准确派生，客户端提交该派生字段时被拒绝。
+- [x] 上传原图字节与下载字节一致，缩略图删除后可重建。
+- [x] 上传同时记录客户端声明 MIME、服务端检测 MIME 和流式计算的 SHA-256；内联预览、响应类型和图片处理只使用服务端 MIME。
+- [x] 20 MiB 恰好允许，超过 1 字节拒绝；中断上传不留下正式数据库引用。
+- [x] 恰好 100 MiB 的实际附件总字节不会因 multipart 边界开销被 Caddy 提前拒绝，API 仍按实际文件字节执行上限。
+- [x] 路径穿越文件名、重复文件名、超长文件名和控制字符不影响磁盘路径。
+- [x] SVG/HTML/未知文件按附件下载而不内联执行。
+- [x] 每个命令块复制内容精确，不含 UI 标签或行号；长命令可横向滚动。
+- [x] 普通 `plain_text` 原文只提供复制全部和浏览器原生局部复制，不被正则、语言识别或 Shell parser 拆成伪命令块。
 
 ## 7. M3：外部 Agent 与 Provider
 

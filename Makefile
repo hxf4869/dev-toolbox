@@ -1,4 +1,4 @@
-.PHONY: install check test build init-dev up down logs migrate init-owner reset-auth reset-dev api-test m1-integration-test web-test worker-test
+.PHONY: install check test build init-dev up down logs migrate init-owner reset-auth rebuild-search reset-dev api-test m1-integration-test m2-integration-test web-test worker-test
 
 install:
 	pnpm install --frozen-lockfile
@@ -36,6 +36,9 @@ init-owner:
 reset-auth:
 	docker compose --env-file deploy/.env -f deploy/compose.yaml exec api /app/dev-toolbox admin reset-auth
 
+rebuild-search:
+	docker compose --env-file deploy/.env -f deploy/compose.yaml exec api /app/dev-toolbox maintenance rebuild-search
+
 reset-dev:
 	CONFIRM_RESET=dev-toolbox ./deploy/scripts/reset-dev.sh
 
@@ -45,6 +48,10 @@ api-test:
 m1-integration-test: init-dev
 	docker compose --env-file deploy/.env -f deploy/compose.yaml build api
 	./deploy/scripts/test-m1-integration.sh
+
+m2-integration-test: init-dev
+	docker compose --env-file deploy/.env -f deploy/compose.yaml build api
+	./deploy/scripts/test-m2-integration.sh
 
 web-test:
 	pnpm --filter @dev-toolbox/web test

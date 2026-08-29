@@ -23,7 +23,7 @@ async function logout() {
 
 <template>
   <nav class="rail" aria-label="全局导航">
-    <div class="rail__brand" aria-label="开发百宝箱">
+    <div class="rail__brand" role="img" aria-label="开发百宝箱">
       <UiIcon name="wrench" :size="20" />
     </div>
 
