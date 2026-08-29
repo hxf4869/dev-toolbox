@@ -1,5 +1,7 @@
 # 开发百宝箱一期系统架构
 
+状态：**已确认，受 `00-V1-BASELINE.md` 约束**
+
 ## 1. 架构目标
 
 一期架构只为当前闭环服务：单用户、自托管、快速记录与搜索、附件、受控 AI 任务、外部 Agent API 和可恢复部署。
@@ -36,6 +38,7 @@ flowchart LR
     API --> DB[(PostgreSQL)]
     API --> Files[(附件数据卷)]
     Worker[TypeScript AI worker] -->|内部任务 API| API
+    API -->|内部 provider-test RPC| Worker
     Worker -->|HTTPS| Providers[外部模型 Provider]
 
     Backup[备份任务] --> DB
@@ -85,8 +88,11 @@ Caddy 在配置有效域名后负责自动证书和 HTTP→HTTPS 重定向。参
 | API → PostgreSQL | 受控内部 | 参数化 SQL、迁移管理、最小数据库账号 |
 | API → 附件卷 | 受控内部 | 生成存储名、拒绝路径穿越、下载强制安全头 |
 | worker → API | 受控服务 | 内部 token、仅内部网络、固定内部接口 |
+| API → worker | 受控服务 | 同一内部凭据、仅单用途 Provider 连接测试 RPC、严格超时 |
 | worker → Provider | 第三方服务 | TLS、超时、限额、敏感策略、响应 Schema 校验 |
 | 模型输出 → 系统 | 永远不可信 | JSON 解析、Schema 校验、引用校验、无 HTML/脚本执行 |
+
+每个独立信任边界执行一次完整校验：公共 HTTP/PAT、双向的窄内部 worker API、Provider 响应、文件上传和数据库持久化分别建立自己的不变量。边界通过后，模块内部依赖明确类型和已建立的不变量，不在 handler、service、repository 等每一层机械重复同一套业务校验；数据库约束仍独立保护真实数据完整性。
 
 ## 4. Go API：模块化单体
 
@@ -160,7 +166,7 @@ apps/web/src/
 
 - API client 使用浏览器原生 `fetch` + `AbortController` 和模块级 composable；一期不引入 Axios、TanStack Query 或另一套请求缓存框架。
 - 只缓存页面确有复用的字典/设置数据；记录详情和搜索结果由路由/查询状态驱动，失效后明确重新请求，不自制通用归一化实体缓存。
-- 只把跨页面且确实需要的客户端状态放入 Pinia：主题、布局宽度、当前搜索会话等。
+- 只把跨页面且确实需要的客户端状态放入 Pinia：主题、布局宽度和当前标签页内的临时搜索会话等。原始搜索词不持久化，也不进入 URL；只有非敏感视图、过滤器和排序进入路由状态。
 - 表单局部状态留在组件内。
 - 不把整个服务端实体树复制到一个全局 Store。
 
@@ -202,6 +208,7 @@ Agent 运行层
 - 不使用 `pi-coding-agent`、TUI、orchestrator 或其 Shell/read/edit/write 工具。
 - 开发百宝箱自己的接口只暴露 `ModelGateway`、`TaskRunner`、`TaskEvent` 和领域工具；业务代码不依赖 Pi 的全量类型。
 - 如果实现期发现指定版本无法满足三个冻结协议，先报告具体不兼容，再决定补丁或薄适配；不得未经确认重写通用 Agent SDK。
+- Provider 连接测试不是 AI 任务，不进入 Agent Loop；它通过 worker 的同一个 `ModelGateway` 只发送一次固定最小请求，不创建 task、event 或 artifact，也不在 Go API 重复实现协议 adapter。
 
 ### 6.2 一期领域工具白名单
 
@@ -268,7 +275,7 @@ token 级 delta 不需要全部写数据库。UI 一期关注任务阶段而不�
 5. API 校验 Schema、来源引用和任务状态，创建不可变 artifact 版本。
 6. worker 确认结束。心跳租约过期的任务最多重新排队一次；再次过期则失败。用户手动重试创建新任务并引用旧任务，不改写旧任务历史。
 
-内部 API 不通过 gateway 暴露。Provider Key 只在任务生命周期内存在于 worker 内存，不记录日志。
+内部 API 不通过 gateway 暴露。所有 Provider 出站请求只由 worker 发出。Provider Key 明文仅在 API 组装 task claim 或 provider-test 内部请求、以及 worker 执行对应调用的短暂内存中存在，不写任务事件、日志或其他持久化位置。
 
 ## 7. 搜索架构
 
@@ -282,7 +289,9 @@ PostgreSQL 启用 `pg_trgm`，以 GIN 索引支持相似度和 `LIKE/ILIKE` 类�
 - `pg_trgm`：标题、文件名和片段的子串/模糊匹配。
 - `to_tsvector('simple', ...)`：英文、数字和可拆分 token。
 - 结构化过滤：目录、标签、类型、敏感状态、时间。
-- 应用层合并权重与高亮。
+- 应用层合并权重，并返回纯文本 `snippetParts` 高亮分段，前端不拼接服务端 HTML。
+
+一期查询按字面文本解释，没有布尔表达式、字段语法、引号/减号语法、正则或 Lucene DSL。进入 `LIKE/ILIKE` 前转义 `%`、`_` 和转义字符本身；规范化不能删除路径、命令和配置常见标点。相关性分页使用与排序完全相同的离散匹配等级、相似度、有效采集时间和 item ID 元组，cursor 只做不透明 Base64URL 编码与结构校验，不加密、签名或持久化。
 
 ### 7.2 不做向量检索
 
@@ -313,7 +322,7 @@ PostgreSQL 启用 `pg_trgm`，以 GIN 索引支持相似度和 `LIKE/ILIKE` 类�
 
 - 存储名只使用系统 UUID，不使用用户文件名。
 - 原始文件名只存在数据库元数据中。
-- 临时上传进入同一文件系统的 `/data/tmp`，完成流式大小/MIME 校验并关闭文件。
+- 临时上传进入同一文件系统的 `/data/tmp`，完成流式大小/MIME 校验并同步计算 SHA-256 后关闭文件。
 - 开启数据库事务并写入 item/raw record/attachment/search 数据；在事务提交前把临时文件原子移动到最终 blob 路径，移动失败则回滚。
 - 只有最终文件已经落位才提交数据库事务。提交失败或进程在移动后崩溃时最多留下无数据库引用的孤儿文件，不会留下指向缺失文件的已提交记录；受控完整性检查负责报告/清理孤儿。
 

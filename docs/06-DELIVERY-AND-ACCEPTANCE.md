@@ -1,6 +1,6 @@
 # 一期交付与验收基线
 
-状态：一期冻结候选
+状态：**已确认，受 `00-V1-BASELINE.md` 约束**
 
 目标：把产品范围转成可分阶段实现、可验证、可停止的交付计划
 
@@ -34,7 +34,7 @@
 |---|---|---|
 | M0 工程骨架与契约 | 四容器开发环境可启动，迁移与测试入口固定 | 架构、契约、日志、健康检查 |
 | M1 身份与原始事实层 | 所有者可安全登录并保存/读取不可变纯文本 | AUTH、CAP-01/02/05、基础 DETAIL |
-| M2 检索、组织与附件 | 可快速找到、分类、上传、下载和恢复记录 | LIB、SRCH、CAP-03/04、DETAIL |
+| M2 检索、组织与附件 | 可快速找到、分类、上传、下载和恢复记录 | LIB、SRCH、CAP-03/04/06、DETAIL |
 | M3 外部 Agent 与 Provider | PAT 可提交候选 artifact，三种模型协议可配置 | EXT、PROVIDER、Schema |
 | M4 内置 AI 任务引擎 | 受控任务可整理、检查、识图、定期运行 | AI-01..05、动态 blocks |
 | M5 部署、恢复与发布验收 | 公网 HTTPS、备份恢复、UX/性能/安全门禁通过 | 全部 NFR 与发布门禁 |
@@ -113,8 +113,11 @@
 - [ ] 数据库无所有者时只能通过受控 CLI 初始化；Web 没有注册入口。
 - [ ] 密码哈希、TOTP 加密、恢复码哈希和 Cookie 属性符合安全基线。
 - [ ] 无可信设备时密码后要求 TOTP；可信 90 天只跳过 TOTP，不跳过密码。
+- [ ] 同一未过期 enroll challenge 重复请求 TOTP setup 返回同一个 pending secret，不静默轮换导致已扫码设备失效。
 - [ ] 修改密码或重置 TOTP 后，旧会话和可信设备全部失效。
 - [ ] 主机 `reset-auth` 恢复流程只重置认证并强制重新绑定 TOTP，不改变任何知识数据。
+- [ ] TOTP provisioning、恢复码和原文响应带 `Cache-Control: no-store`。
+- [ ] 只有来自已配置可信反向代理的转发头才参与来源地址解析；客户端直接伪造 `X-Forwarded-For` 不改变 API 认定的地址。
 - [ ] 正文 + 敏感状态可只用键盘完成保存；Provider/worker 停止时仍成功。
 - [ ] 保存失败不会出现只有列表元数据而没有原文的半条记录。
 - [ ] API 没有原始正文的 PATCH/PUT；直接数据库约束/测试证明普通业务路径不能覆盖原文。
@@ -126,7 +129,7 @@
 
 ### 6.1 范围
 
-覆盖 `CAP-03..04`、`LIB-01..05`、`SRCH-01..05`、`DETAIL-03..04` 的非 AI 部分：
+覆盖 `CAP-03/04/06`、`LIB-01..05`、`SRCH-01..06`、`DETAIL-03..04` 的非 AI 部分：
 
 - 固定视图、最近、收藏、敏感、图片、文件。
 - 目录树、标签和人工元数据。
@@ -135,7 +138,9 @@
 - 确定性搜索分片、命中片段和定位。
 - 原始图片保留、可重建缩略图。
 - 普通文件单文件 20 MiB、按文件名检索和安全下载。
-- 每个原始命令/代码块独立复制。
+- 向已有条目追加 text、image-only、file-only 和 mixed 补充原始记录，并按新载荷保守升级敏感状态。
+- 服务端派生 raw `content_kind`、固定视图和有效采集时间，不接受客户端提供派生值。
+- Markdown fenced code block 逐块复制，普通纯文本保持整体复制且不做命令启发式识别。
 - 原始记录历史/来源切换的最小实现。
 
 ### 6.2 数据顺序
@@ -148,17 +153,29 @@
 ### 6.3 退出条件
 
 - [ ] `lsblk`、`mount`、`挂载`、`/dev/sdb1`、`Docker` 等示例查询能命中预期记录。
+- [ ] 搜索按字面处理；`%`、`_`、`\` 不成为 SQL 通配符或转义语法，查询中的引号、减号和路径字符不被解释成 DSL。
 - [ ] 相关性排序中标题精确命中优先；时间排序严格按有效采集时间倒序。
+- [ ] `match_class` 按 `title_exact > fact_literal > human_metadata_literal > fuzzy > ai_derived` 固定映射；trigram 最低相似度只有一处代码常量，排名 fixture 锁定其行为。
+- [ ] 每个 item 只保留按 `matchClass/similarity/matchedFragmentId` 选出的最佳片段；非模糊命中 similarity 固定 1.0，相关性与时间游标编码完整 item 排序元组，同分/同时间多页结果无重复、无遗漏且顺序稳定。
 - [ ] 同版本重建后原始片段边界、UUID 和搜索结果稳定；升级分片版本后，历史 artifact 引用的旧片段仍可定位。
-- [ ] 过滤器、排序、查询写入 URL，刷新后恢复。
-- [ ] 敏感记录可被本人搜索，但列表摘要、DOM 与复制遵循遮挡状态。
+- [ ] emoji、中文和组合字符命中由无 HTML 分段高亮，不发生错位、截断或脚本注入。
+- [ ] 搜索 Token 样例时，原始查询词不出现在 URL、Caddy/API 日志或持久化浏览器存储；非敏感固定视图、过滤器和排序仍可通过 URL 恢复，搜索响应带 `Cache-Control: no-store`。
+- [ ] 敏感记录可被本人搜索，但服务端返回遮挡摘要，列表 DOM 与复制遵循遮挡状态，不先下发原文再由前端隐藏。
+- [ ] 固定视图严格按删除状态、目录、收藏、敏感状态和 ready 附件集合计算；有效采集时间按来源时间与可信度回退规则确定并显示来源。
 - [ ] 目录删除不级联删记录；AI 不存在时目录和标签完整可用。
 - [ ] 回收站不出现在普通搜索；恢复后重新可见；永久删除有清晰确认。
+- [ ] 已有条目可追加 image-only、file-only 和 mixed supplement；每次均创建新 immutable raw record，不能给旧 raw record 追加附件或创建第二个 primary。
+- [ ] `supplements`/`supersedes` 关系不能跨 item，`migration_duplicate` 可以跨 item，非法关联在事务提交前被拒绝。
+- [ ] normal 条目添加 sensitive/unknown supplement 后在同一事务自动升级并安全化系统标题；sensitive/unknown 条目添加 normal supplement 不自动降级。
+- [ ] raw `content_kind` 按实际正文与附件组合由服务端准确派生，客户端提交该派生字段时被拒绝。
 - [ ] 上传原图字节与下载字节一致，缩略图删除后可重建。
+- [ ] 上传同时记录客户端声明 MIME、服务端检测 MIME 和流式计算的 SHA-256；内联预览、响应类型和图片处理只使用服务端 MIME。
 - [ ] 20 MiB 恰好允许，超过 1 字节拒绝；中断上传不留下正式数据库引用。
+- [ ] 恰好 100 MiB 的实际附件总字节不会因 multipart 边界开销被 Caddy 提前拒绝，API 仍按实际文件字节执行上限。
 - [ ] 路径穿越文件名、重复文件名、超长文件名和控制字符不影响磁盘路径。
 - [ ] SVG/HTML/未知文件按附件下载而不内联执行。
 - [ ] 每个命令块复制内容精确，不含 UI 标签或行号；长命令可横向滚动。
+- [ ] 普通 `plain_text` 原文只提供复制全部和浏览器原生局部复制，不被正则、语言识别或 Shell parser 拆成伪命令块。
 
 ## 7. M3：外部 Agent 与 Provider
 
@@ -183,8 +200,8 @@
 | 正常文本响应 | 解析为统一模型结果 |
 | 正常工具调用 | 只接受当前任务白名单工具 |
 | 401/403 | 标记凭据错误，不重试、不泄露响应 |
-| 429 | 按策略最多重试 2 次后失败 |
-| 5xx/网络超时 | 有界重试，任务状态可解释 |
+| 网络中断/超时、408、429、500/502/503/504 | 同一 task 内按策略最多重试 2 次，且不突破任务 deadline |
+| 其他 4xx/5xx、Schema 错误、能力不匹配 | 不自动重试，返回稳定协议错误 |
 | 畸形 JSON/缺字段 | 稳定协议错误，不保存 artifact |
 | 超长输出 | 在模型限制和服务端限制处终止 |
 | 不支持图片 | `analyze_image` 在调用前拒绝 |
@@ -196,10 +213,14 @@
 - [ ] API Key 创建后不可读取明文，数据库 dump 中是带版本的密文。
 - [ ] 连接测试错误不会在日志、响应或 UI 暴露 Key/完整上游响应。
 - [ ] 三协议用 mock 完成正常、鉴权、限流、超时和畸形响应测试。
-- [ ] 自定义 Base URL 只使用允许的 HTTPS/明确开发 HTTP 规则，不能写入脚本或插件。
-- [ ] PAT 明文只展示一次，撤销后立即无效，越权 scope 返回稳定错误。
+- [ ] Provider 连接测试只接受属于当前 Provider 的内部 `modelId`，API 只调用一次 worker 的单用途内部 RPC，worker 复用真实 adapter 和固定最小预算发出一次上游请求；无 usage 时返回 `null`，API 不直连 Provider，失败不回显上游正文。
+- [ ] 连接测试上游 401/403 映射为 `AI_PROVIDER_CREDENTIALS_INVALID`，网络错误、408、429、5xx 和畸形响应映射为 `AI_PROVIDER_UNAVAILABLE`，两者都不自动重试。
+- [ ] 自定义 Base URL 表示协议根地址，adapter 只规范化末尾 `/` 并拼接固定 endpoint；带/不带末尾 `/`、自定义路径前缀均通过，userinfo/query/fragment 和重定向被拒绝，HTTP 仅按明确开发/内网规则开放。
+- [ ] Provider 只对网络中断/超时、408、429、500/502/503/504 有界重试；401/403、其他 4xx/5xx、Schema 错误与能力不匹配零重试。
+- [ ] PAT 明文只展示一次，撤销后立即无效；每个外部 Agent 端点按契约 scope 矩阵验证缺失、越权和允许路径，返回稳定错误。
+- [ ] `sensitive:read` 只作为读取 scope 的附加门槛，单独持有时不赋予记录或附件读取能力。
 - [ ] 未授予 `sensitive:read` 的 PAT 只能看到遮挡元数据，无法读取敏感原文/附件或提交敏感 artifact。
-- [ ] `records:write` 只能新增原始记录，不能更新已有原文。
+- [ ] `records:write` 只能新建条目或向已有条目追加新的 supplement，不能更新已有原文或给旧 raw record 追加附件。
 - [ ] 相同 sourceType + namespaced externalId 重跑迁移时返回已有记录，不重复创建也不覆盖。
 - [ ] 外部 artifact 在 Schema 或 source reference 错误时不进入候选列表。
 - [ ] 外部 Agent 不经过 AI worker 也能完成一次性迁移所需的新增原文与提交派生结果。
@@ -236,17 +257,28 @@
 每种任务至少验证：
 
 - 正常完成并生成 Schema 合法 artifact。
+- 同一 item + task type 同时最多一个 queued/running task；不同类型仍可并行，batch 遇到重复分支只记录明确 skip reason。
+- 两个 worker 并发 claim 时只有一个成功，过期 lease 的旧 worker 不能提交结果。
 - Provider 未配置、模型被删除、上下文超限、超时、取消。
 - 上下文不足时不发送静默截断内容，也不自动启动递归总结。
 - 模型请求未知工具、重复工具、超出次数、返回非 JSON。
 - source fragment/attachment 不属于任务记录。
 - 模型返回错误 artifact type、文本结果无来源片段、图片结果漏掉已发送图片。
+- API 拒绝重复 block ID、子结构引用不在顶层来源集、表格行列不等和忽略大小写后重复标签；Go 与 worker 对合法/非法 UUID fixture 结论一致。
 - `block` 对敏感/未知记录零外部请求。
 - `redact` 外发内容是占位副本，原文和 artifact 不被占位映射覆盖。
 - 敏感/未知图片在 `redact` 下零外发并返回可解释状态。
 - `allow` 只有设置明确开启后可外发。
 - worker 在提交成功后崩溃，任务不会创建两个相同的活动版本。
-- worker 租约过期只自动重新领取一次；用户重试产生新任务并保留旧失败历史。
+- queued 取消返回 cancelled，running 取消返回 `202` 且保持 running 并标明 `cancelRequested=true`，重复取消 cancelled 幂等成功，取消 succeeded/failed 固定返回 `AI_TASK_NOT_CANCELLABLE`。
+- complete 先查 `task_run_id` 已有 artifact；成功后的同 lease 重试返回原 artifact/终态，只有不存在 artifact 时才要求 running、有效 lease 且无取消请求。
+- 取消先于首次 complete 事务提交时不创建 artifact；并发 complete 由 `task_run_id` 唯一约束收敛为同一个版本。
+- worker 租约过期只在无取消请求时自动重新领取一次；已有取消请求的失联任务直接 cancelled。用户重试产生新任务并保留旧失败历史。
+- Provider 网络重试留在同一个 task run 内；用户点击“重试”创建带 `retry_of_task_id` 的新任务，不把旧失败任务改回 queued。
+- batch 六种稳定 skip reason 与输入条件逐一匹配，child 状态计数与 created children 一致，skip 总数等于固定 `byReason` 之和；所有分支都有稳定 skip reason 时，以 succeeded 和全 skipped 摘要结束。
+- batch 子任务全部终止后按“父任务取消 > 任一 child failed > 任一 child cancelled > succeeded”聚合；取消 running 父任务传播到 queued/running 子任务，已经成功的子任务与 Artifact 保留。
+- 新增 raw record/ready 图片后 active artifact 返回计算值 `isStale=true` 且继续参与搜索；所有旧版本仍可查看，未作废版本可主动激活，已作废版本只能查看，未激活历史版本不进入普通搜索。
+- 已作废 Artifact 的激活和应用建议请求均被拒绝；作废当前版本时不自动回退到旧版本。
 - worker 离线时，录入、搜索、浏览和下载不受影响。
 
 ### 8.4 正确性文案验收
@@ -257,6 +289,7 @@
 - [ ] 用户可从 warning/AI block 定位原始来源。
 - [ ] 激活 artifact 只改变派生视图，不覆盖原文、人工标题、目录或正式标签。
 - [ ] 重新生成创建新版本；旧版本和生成信息可查看。
+- [ ] stale artifact 激活或应用建议前提示其未覆盖最新原始记录，但不自动删除、停用或从搜索移除。
 
 ### 8.5 退出条件
 
@@ -311,6 +344,7 @@
 - [ ] 生产形态完成一次静默备份，snapshot 含数据库 dump、原始附件和配置清单。
 - [ ] 在空目录/空数据库恢复，不复用原容器数据卷。
 - [ ] 随机抽查至少 20 条文本、5 张原图、5 个普通附件及其字节一致性。
+- [ ] 恢复前逐一验证所有数据库引用附件的存在性、大小和 SHA-256；任一不一致时恢复验收失败且 Caddy 不启动，现场保留供改用已验证 snapshot 或排查。checksum 不承担去重、内容寻址或存储路径职责。
 - [ ] 登录密码、TOTP、可信设备撤销状态、目录、标签、回收站和 AI 版本恢复正确。
 - [ ] 完整性检查能报告缺失附件和孤儿附件，且默认不删除。
 - [ ] 恢复记录包含 snapshot ID、环境、耗时、失败点和修正，不含敏感正文。
@@ -322,6 +356,7 @@
 - [ ] 深色/浅色、200% 缩放、键盘-only、reduced motion 和基础屏幕阅读器检查完成。
 - [ ] 登录、录入、搜索、详情、附件、任务、设置都有加载/空/错误/溢出状态。
 - [ ] 原始/AI 边界、敏感遮挡、逐块复制和危险确认符合 UX 基线。
+- [ ] 搜索与快速记录都有可见入口；快速记录在 M1、搜索在 M2 smoke 后回填的具体快捷键，在 Chrome、Edge、Safari 不触发地址栏、无痕/InPrivate 窗口或其他浏览器常用行为。
 
 ## 10. 需求覆盖矩阵
 
@@ -329,9 +364,9 @@
 |---|---|---|
 | AUTH-01..04 | M1 | API 集成 + 浏览器 E2E + 安全检查 |
 | CAP-01/02/05 | M1 | API 事务 + 剪贴板/键盘 E2E |
-| CAP-03/04 | M2 | 文件集成 + 字节/边界/安全下载 |
+| CAP-03/04/06 | M2 | 文件集成 + 补充记录事务 + 字节/边界/安全下载 |
 | LIB-01..05 | M2 | 数据库集成 + Web E2E |
-| SRCH-01..05 | M2 | 固定排名 fixture + 性能验收 |
+| SRCH-01..06 | M2 | 字面查询/隐私 + 固定排名/游标 fixture + 性能验收 |
 | DETAIL-01..04 | M1/M2/M4 | 组件 + E2E + 来源契约 |
 | PROVIDER-01..03 | M3 | 本地 HTTP mock + 密钥存储检查 |
 | EXT-01..03 | M3 | PAT scope + Schema/引用集成 |

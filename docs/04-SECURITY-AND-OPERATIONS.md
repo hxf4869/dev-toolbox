@@ -1,6 +1,6 @@
 # 一期安全与运维基线
 
-状态：一期冻结候选
+状态：**已确认，受 `00-V1-BASELINE.md` 约束**
 
 适用范围：公网自托管、单所有者、Docker Compose 部署
 
@@ -84,6 +84,7 @@
 - 验证窗口只接受当前时间步及前后各一个时间步，服务器必须启用可靠的时间同步。
 - 同一验证码在同一登录挑战中成功使用后，挑战立即失效。
 - 首次配置只有在密码已验证的限时挑战中输入有效验证码后才启用 TOTP并生成普通会话。
+- 同一未过期、未消费的 enroll challenge 重复调用 setup 时返回同一个 pending secret；不能重新生成导致先前二维码和手动密钥失效。
 - 二维码只在当前已认证页面短时展示；页面不得从第三方加载二维码服务。
 - 一期不允许关闭 TOTP。重置必须重新验证密码与现有 TOTP/恢复码；新 secret 确认后撤销全部旧会话、可信设备和恢复码。
 
@@ -120,7 +121,7 @@ Cookie 约束参考 [OWASP Session Management Cheat Sheet](https://cheatsheetser
 - 登录、TOTP 和恢复码接口使用 API 进程内的有界限流：按来源 IP 与账号标识分别限制，连续失败采用短暂递增等待。
 - 一期单 API 实例下不引入 Redis。进程重启会清空短期限流状态，这是已接受的简化；安全事件仍写数据库。
 - 对外统一返回“凭据无效或已过期”等稳定错误，不区分用户名、密码、TOTP、恢复码哪一项错误。
-- 日志不得记录用户输入的账号密码、验证码、恢复码或完整 IP；安全事件只保留必要的时间、结果、粗粒度来源和请求 ID。
+- 日志不得记录用户输入的账号密码、验证码、恢复码或完整 IP。数据库中的会话与安全事件可以保存按可信代理规则解析的精确 IP，默认最多保留 90 天，供所有者排查登录；IP 不作为设备身份或授权条件。
 
 ## 4. 公共 API 与外部 Agent
 
@@ -131,6 +132,15 @@ Cookie 约束参考 [OWASP Session Management Cheat Sheet](https://cheatsheetser
 - API 对写请求设置 JSON 请求体上限；附件使用专门的流式上传上限。
 - CORS 默认不开放跨域来源。一期 Web 与 API 同源部署。
 - 返回统一安全响应头：HSTS、`X-Content-Type-Options: nosniff`、限制性的 CSP 和 `Referrer-Policy: no-referrer`。
+- 原始搜索词只通过 `POST /api/v1/search` 的 JSON body 发送，不进入 URL、浏览器历史、`localStorage`、`sessionStorage` 或 IndexedDB。非敏感的视图、过滤器和排序可以进入 URL。
+- 搜索、原始正文、Artifact、附件内容与元数据、session bootstrap、TOTP provisioning 和恢复码响应使用 `Cache-Control: no-store`。搜索框设置 `autocomplete="off"`、`autocapitalize="off"`、`spellcheck="false"`，但不能把这些浏览器提示当作唯一防护。
+- Caddy 默认访问日志只记录方法、不含查询串的请求路径、状态、耗时和请求 ID；API 日志使用路由模板而不是原始 URI。两者都不记录请求正文、响应正文或搜索词，调试、Tracing 和错误上报同样遵守这一边界。
+
+可信代理规则：
+
+- Caddy 覆盖客户端自带的 `X-Forwarded-For`、`X-Real-IP` 和 `Forwarded`，不能把伪造链原样透传。
+- API 只有在直接连接来自 Compose 内 gateway 的受信任地址时才读取转发头；其他来源使用连接的 `RemoteAddr`。
+- 登录限流、会话记录和 security event 共用同一个客户端 IP 解析函数；不做 IP 白名单、地理定位、设备指纹或复杂代理链分析。
 
 初始 CSP：
 
@@ -163,6 +173,7 @@ form-action 'self'
 - AI worker 与 API 只通过内部 Docker 网络通信，路由不由 Caddy 转发。
 - 使用部署 Secret 中的固定内部服务凭据进行请求认证；凭据只解决容器间误访问，不伪装成完整服务网格身份系统。
 - worker 只能调用 `03-API-AND-AI-CONTRACTS.md` 定义的任务领取、上下文读取、事件上报和结果提交接口。
+- 公共连接测试请求只接受 API 已保存的 Provider/model 配置 ID；API 解析并校验后，只能调用 worker 的单用途 `provider-test` RPC，传递固定配置快照。worker 不提供通用代理、任意 URL 或任意模型请求接口，并独立复核出站边界。
 - API 再次校验任务归属、状态和 artifact Schema；不能相信“请求来自内部网络”就跳过校验。
 
 ## 5. 原始内容、附件与渲染
@@ -176,10 +187,11 @@ form-action 'self'
 
 ### 5.2 上传
 
-- 单文件最大 20 MiB；Caddy 和 API 都设置略有层次但不冲突的上限，API 以实际流式计数为最终判定。
+- 单文件最大 20 MiB、单次附件实际总字节最大 100 MiB；Caddy 的 multipart 请求上限必须为边界和有界 metadata 预留协议开销，不能直接等于 100 MiB。API 以实际流式文件字节计数为最终业务判定。
 - 上传先写同一附件卷中的随机临时名；完成大小校验后，在创建附件的数据库事务提交前原子移动到正式路径，移动失败则回滚事务。
 - 永远不使用用户文件名作为磁盘路径。客户端报告的 base name 作为有界原始元数据保留；另生成去除控制字符、路径分隔和 Header 语义的 `display_name` 用于 UI 与 `Content-Disposition`。
-- 不按扩展名信任 MIME；记录浏览器声明值和服务端嗅探值，展示以更保守者为准。
+- 不按扩展名信任 MIME；分别记录浏览器声明值和服务端嗅探值，kind、预览、视觉任务和响应 `Content-Type` 只使用服务端值，未知或多义文件按普通附件处理。
+- 在上传流中同步计算 SHA-256 并保存；它只用于完整性检查和恢复时逐项校验，不用于去重、秒传、内容寻址或存储路径。
 - 文件没有可执行权限，附件卷不挂载到 Web 静态目录，也不挂载给 AI worker。
 - 普通文件统一使用 `Content-Disposition: attachment` 下载，并返回 `nosniff`。
 - 只允许确认可安全解码的 JPEG、PNG、WebP、GIF 在受控图片组件中内联预览；SVG、HTML、PDF 和未知类型一期按下载处理。
@@ -190,7 +202,7 @@ form-action 'self'
 
 - “敏感/非敏感”是用户必填决策，“未知”只用于迁移或系统导入。
 - 默认敏感记录列表摘要遮挡，进入详情后需要一次明确揭示；同一页面会话内可保持揭示状态，但刷新后恢复遮挡。
-- 未揭示内容不可通过隐藏 DOM、ARIA 文本、页面源码或复制快捷键泄漏。
+- 未揭示前不请求完整敏感正文，或至少不把正文挂载到 DOM；未揭示内容不可通过隐藏 DOM、ARIA 文本、页面源码或复制快捷键泄漏。
 - 敏感记录仍进入本地 PostgreSQL 搜索，这是产品需求；结果摘要遮挡不等于索引加密。
 - 不实现字段级密码识别或保险库条目结构。包含密码的 Docker 命令仍是一条普通敏感原始记录。
 
@@ -211,15 +223,16 @@ form-action 'self'
 - 默认只发送当前任务需要的原始片段、用户选择的附件和最多 10 条相关记录摘要。
 - `analyze_image` 只有所选模型声明支持图片并且敏感策略允许时才发送原图。
 - 普通文件正文一期不发送给模型。
-- Provider 请求日志只记录 provider ID、model ID、任务 ID、状态、token 用量和耗时；不记录 URL 中可能含凭据的查询参数、请求正文或完整响应。
+- Provider 请求日志只记录 provider ID、model ID、`operationType=task|connection_test`、请求 ID、可空 task ID、状态、token 用量和耗时；不记录 URL 中可能含凭据的查询参数、请求正文或完整响应。
 - Provider Base URL 默认必须为 HTTPS，请求拒绝重定向；只有部署者显式开启不安全 HTTP 后才能连接用户指定的内网网关，界面持续提示传输风险。
 - 模型返回的任何命令都视为不可信文本，必须经 Schema 和业务校验后作为候选 artifact 保存。
 
 ### 6.3 错误与重试
 
-- 鉴权失败、配额不足和不支持模型不自动切换到其他 Provider。
-- 网络超时或明确可重试状态最多自动重试 2 次，使用短指数退避；之后任务失败并由用户决定是否重试。
-- 重试必须复用同一个任务幂等键，避免产生多个被误认为独立的成功版本。
+- 鉴权失败、配额不足、能力不匹配、Schema 错误和普通 4xx 不自动重试，也不切换到其他 Provider。
+- 只有网络连接中断/超时、HTTP 408、429、500、502、503、504 可以在同一 task run 内最多自动重试 2 次，并使用短指数退避。存在 `Retry-After` 时可以遵循，但不能突破 task deadline。
+- Provider 连接测试不属于 task run；公共 API 只调用一次内部 worker RPC，worker 只发起一次外部请求且不自动重试。Key 不持久化到 task/event，只在 API 与 worker 的本次调用内存中短暂存在。
+- Provider 网络重试保持同一个 task row 和任务输入；用户点击“重试”则创建新的 task row 并通过 `retry_of_task_id` 关联旧任务。两者都不能产生重复 Artifact 版本。
 - 不建设多模型投票、自动兜底链、无限循环或“自愈”任务。
 
 ## 7. Docker Compose 部署基线
@@ -267,6 +280,7 @@ dev-toolbox-deploy/
 - 启动时校验必需配置；缺少主密钥、数据库密码或正式域名时快速失败，不生成弱默认值。
 - 日志输出到 stdout/stderr，由 Docker 日志轮转限制大小和保留数量。
 - `GET /health/live` 只表示进程存活；`GET /health/ready` 校验数据库和必要迁移。公网只需代理简单的总体健康状态，不暴露版本、表名、Provider 或错误堆栈。
+- API readiness 不依赖 AI worker 或外部 Provider；它们故障时在设置页显示 degraded 状态，但录入、搜索、浏览和下载仍应可用。
 - worker 健康状态由任务心跳写数据库并在设置页只读显示，不额外开放公网端口。
 
 ## 8. 备份、保留与恢复
@@ -322,7 +336,7 @@ dev-toolbox-deploy/
 3. 从选定 restic snapshot 恢复数据库 dump 和附件目录到新的数据路径。
 4. 先启动 PostgreSQL，创建空库并用 `pg_restore` 恢复；恢复工具版本不得早于 dump 的服务端主版本。
 5. 运行只读迁移预检，确认当前应用镜像兼容，再执行必要迁移。
-6. 启动 API；运行数据库引用与附件文件的完整性检查，报告缺失文件和孤儿文件，不自动删除。
+6. 启动 API；逐一校验数据库引用的每个原始附件是否存在、实际大小及 `content_sha256`，并报告孤儿文件，不自动删除。任一被引用附件缺失、大小或摘要不匹配都会使本次恢复验收失败并阻止进入下一步；保留现场，由所有者改用已验证 snapshot 重新恢复或明确排查修正。
 7. 启动 worker 和 Caddy，验证登录、TOTP、搜索、随机原文、图片下载和一次无费用 mock AI 任务。
 8. 记录恢复日期、snapshot ID、耗时和发现的问题；恢复演练不得使用唯一一份生产备份作为可写仓库。
 
@@ -382,7 +396,10 @@ dev-toolbox-deploy/
 - [ ] 浏览器存储中没有会话或 PAT；Cookie 属性符合本文。
 - [ ] 密码 + TOTP、恢复码、可信设备 90 天、单设备撤销和全撤销均有集成测试。
 - [ ] CSRF、Origin、未授权 PAT scope 和撤销后的 Token 均被拒绝。
+- [ ] 敏感搜索词不出现在 URL、浏览器持久化存储、Caddy/API 日志、Tracing 或错误上报中；相关响应带 `Cache-Control: no-store`。
+- [ ] 客户端伪造转发头不能改变 API 认定的来源 IP；普通日志不记录完整 IP。
 - [ ] 20 MiB 边界、路径穿越文件名、SVG/HTML 下载和中断上传均有测试。
+- [ ] 上传记录客户端/服务端 MIME 与 SHA-256，预览只依据服务端 MIME；恢复后逐一校验所有数据库引用附件，摘要检查能发现字节不一致。
 - [ ] 原始 Markdown、AI Markdown 和文件名不能产生可执行脚本或未净化 HTML。
 - [ ] `block` 不发请求，`redact` 只发占位副本，`allow` 有明确确认；日志无正文。
 - [ ] AI worker 没有 Shell、SSH、SQL、任意 HTTP 或任意文件系统工具。

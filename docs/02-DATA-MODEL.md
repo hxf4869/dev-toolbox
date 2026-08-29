@@ -1,5 +1,7 @@
 # 开发百宝箱一期数据模型
 
+状态：**已确认，受 `00-V1-BASELINE.md` 约束**
+
 ## 1. 建模原则
 
 1. 原始事实和可变展示状态分开。
@@ -43,7 +45,7 @@ erDiagram
 
 ### 3.1 `owner_account`
 
-实例只能有一行。
+实例只能有一行。数据库迁移必须使用唯一表达式索引或等价的简单约束保证这一点，不能只依赖初始化命令先查询再插入，也不为此增加 tenant 或 singleton 状态机。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -73,7 +75,7 @@ erDiagram
 | `consumed_at` | timestamptz nullable | 成功或明确作废后不可复用 |
 | `created_at` | timestamptz | 创建时间 |
 
-挑战只在密码已通过后创建。过期/已消费挑战不可恢复；清理任务可以物理删除 24 小时前的挑战。pending secret 不进入日志或普通 API 响应，只通过一次 provisioning URI/手动密钥展示。
+挑战只在密码已通过后创建。过期/已消费挑战不可恢复；清理任务可以物理删除 24 小时前的挑战。pending secret 不进入日志或普通 API 响应；同一未过期、未消费的 enroll challenge 重复调用 setup 时解密并返回同一个 pending secret，不生成新值。provisioning URI 与手动密钥响应必须使用 `Cache-Control: no-store`。
 
 ### 3.3 `mfa_recovery_codes`
 
@@ -141,11 +143,12 @@ erDiagram
 | `actor_id` | UUID | 对应会话或 PAT ID，由服务层校验 |
 | `route_key` | text | 固定创建路由标识 |
 | `idempotency_key` | text | 客户端每个逻辑操作生成的新键 |
-| `created_item_id` | UUID FK | 第一次成功创建的条目 |
+| `created_item_id` | UUID FK ON DELETE CASCADE | 第一次成功创建或追加的目标条目 |
+| `created_raw_record_id` | UUID nullable FK ON DELETE CASCADE | supplement 路由第一次成功创建的 raw record |
 | `created_at` | timestamptz | 创建时间 |
 | `expires_at` | timestamptz | 24 小时后可清理 |
 
-复合主键 `(actor_type, actor_id, route_key, idempotency_key)`。只保存结果资源 ID，不保存或哈希原始正文/附件；重复键直接返回同一资源，调用者负责不复用逻辑操作键。
+复合主键 `(actor_type, actor_id, route_key, idempotency_key)`。只保存结果资源 ID，不保存或哈希原始正文/附件；创建 item 时由 `created_item_id` 恢复响应，添加 supplement 时同时使用 `created_item_id + created_raw_record_id`。重复键直接返回同一资源，调用者负责不复用逻辑操作键。
 
 ## 4. 知识与原始数据
 
@@ -185,6 +188,7 @@ erDiagram
 | `body` | text | 原始正文；文件-only 记录可为空字符串 |
 | `declared_sensitivity` | enum | 创建时的 `normal` / `sensitive` / `unknown` |
 | `captured_at` | timestamptz | 开发百宝箱接收时间 |
+| `effective_captured_at` | timestamptz | 确定性派生并持久化的有效采集时间，用于索引和排序 |
 | `source_external_id` | text nullable | Notion page ID 等 |
 | `source_path` | text nullable | 原始目录链，纯来源信息 |
 | `source_created_at` | timestamptz nullable | 外部系统创建时间 |
@@ -193,9 +197,20 @@ erDiagram
 | `source_metadata` | jsonb | 有界来源元数据，不用于主业务查询 |
 | `created_at` | timestamptz | 数据库写入时间 |
 
-不可变列：`body`、`content_format`、`captured_at`、来源字段和 `declared_sensitivity` 在产品与迁移工具中都不提供 UPDATE 路径。迁移发现错误时创建新的补充/替代 raw record 并建立关系，不能回写旧记录。`body` 最多 1 MiB UTF-8 字节；文件/图片-only 记录可以为空，其他记录去除首尾空白后必须非空。数据库层不创建阻止管理员灾难恢复操作的复杂触发器，但集成测试必须证明所有正常应用和迁移路径都无法修改这些列。
+不可变列：`record_role`、`content_kind`、`body`、`content_format`、`captured_at`、`effective_captured_at`、来源字段和 `declared_sensitivity` 在产品与迁移工具中都不提供 UPDATE 路径。迁移发现错误时创建新的补充/替代 raw record 并建立关系，不能回写旧记录。`body` 最多 1 MiB UTF-8 字节；文件/图片-only 记录可以为空，其他记录去除首尾空白后必须非空。数据库层不创建阻止管理员灾难恢复操作的复杂触发器，但集成测试必须证明所有正常应用和迁移路径都无法修改这些列。
 
-`knowledge_items.sensitivity` 是当前访问/外发策略值；`raw_records.declared_sensitivity` 只记录采集当时声明。用户改判 item sensitivity 时写入不含正文的 `security_events`，不会修改历史 raw record。
+`effective_captured_at` 在创建时由服务端写死：`source_created_at` 非空且 `source_time_quality` 为 `exact` 或 `estimated` 时取 `source_created_at`，否则取 `captured_at`。条目级“最近”时间取其全部 raw record 的 `effective_captured_at` 最大值；UI 同时展示命中记录的时间来源与可信度，不能把迁移接收时间冒充原始时间。
+
+`content_kind` 不接受客户端指定，由正文和所属附件确定：
+
+- 仅有非空正文：`text`。
+- 正文为空且附件全部为图片：`image`。
+- 正文为空且附件全部为普通文件：`file`。
+- 正文与任意附件并存，或图片与普通文件并存：`mixed`。
+
+每个 item 必须随创建事务产生一个 primary raw record，并使用 `WHERE record_role = 'primary'` 的部分唯一约束或等价数据库约束保证同一 item 至多一个 primary；supplement 与 migration copy 不受该唯一约束影响。
+
+`knowledge_items.sensitivity` 是当前访问/外发策略值；`raw_records.declared_sensitivity` 只记录采集当时声明。新增 supplement 时按 `sensitive > unknown > normal` 与 item 当前值取更严格者，同一事务只允许自动升级、不自动降级；升级时若 `title_origin=generated`，同时换成安全通用标题。用户之后仍可显式改判并写入不含正文的 `security_events`，历史声明不变；AI 只能建议。升级立即作用于展示、PAT 和后续 AI 输入，旧 Artifact 不删除，只按下文规则变为 stale。
 
 `source_metadata` 允许的典型字段：
 
@@ -223,7 +238,7 @@ erDiagram
 | `confirmed` | boolean | AI 建议是否经用户确认 |
 | `created_at` | timestamptz | 建立时间 |
 
-唯一约束：同一 from/to/type 只能有一条；禁止自关联。
+唯一约束：同一 from/to/type 只能有一条；禁止自关联。`supplements` 与 `supersedes` 的两端必须属于同一 item，`migration_duplicate` 可以跨 item；由创建事务校验并用直接数据库约束或集成测试锁定，不扩展为通用知识图谱规则。
 
 ### 4.4 标题生成
 
@@ -237,6 +252,20 @@ erDiagram
 AI 后续可以建议标题，但不能让保存等待模型。
 
 条目从 normal 改为 sensitive/unknown 时，如果 `title_origin=generated`，同一事务把标题换成安全通用标题；用户或用户采纳 AI 后明确设置的标题保持不变。列表可以显示人工标题、目录、标签和时间，正文/AI 摘要仍遮挡。
+
+### 4.5 固定视图与时间
+
+固定视图是服务端查询，不保存额外状态：
+
+- `inbox`：`deleted_at IS NULL` 且 `folder_id IS NULL`。
+- `recent`：`deleted_at IS NULL`，按条目下 raw record 的最大 `effective_captured_at` 倒序，再按 item ID 倒序稳定排序。
+- `favorites`：`deleted_at IS NULL` 且 `favorite = true`。
+- `sensitive`：`deleted_at IS NULL` 且 `sensitivity IN ('sensitive', 'unknown')`。
+- `images`：`deleted_at IS NULL` 且存在 `status=ready` 的图片附件。
+- `files`：`deleted_at IS NULL` 且存在 `status=ready` 的普通文件附件。
+- `trash`：`deleted_at IS NOT NULL`。
+
+同一混合条目可以同时出现在 images 与 files。不得为这些视图增加 `processed`、`archived`、`inbox_status` 或 item 级 `content_kind` 字段。
 
 ## 5. 目录与标签
 
@@ -254,6 +283,7 @@ AI 后续可以建议标题，但不能让保存等待模型。
 约束：
 
 - 同一 parent 下名称忽略大小写唯一。
+- 根目录与非根目录分别使用部分唯一索引表达忽略大小写唯一，避免 `parent_id IS NULL` 绕过普通复合唯一约束。
 - API 检测移动造成的循环。
 - 名称最多 80 个 Unicode 字符，目录最多 8 层。
 - 一期不保存无限物化路径；查询时使用递归 CTE，个人规模足够。
@@ -285,14 +315,16 @@ AI 后续可以建议标题，但不能让保存等待模型。
 | `original_name` | text | 客户端报告的原始 base name，最多 1,024 字符，作为来源事实保留 |
 | `display_name` | text | 去除控制字符/路径语义后的显示下载名，最多 255 字符 |
 | `storage_key` | text unique | 系统生成的卷内相对路径 |
-| `media_type` | text | 服务端检测结果 |
+| `client_media_type` | text nullable | 客户端声明值，只用于来源诊断，不决定行为 |
+| `media_type` | text | 服务端检测结果，决定 kind、预览和响应类型 |
+| `content_sha256` | bytea | 上传流中同步计算的 32 字节内容摘要 |
 | `size_bytes` | bigint | 实际大小，0–20 MiB |
 | `width` | integer nullable | 可解码图片宽度 |
 | `height` | integer nullable | 可解码图片高度 |
 | `status` | enum | `ready` / `missing` / `pending_delete` |
 | `created_at` | timestamptz | 创建时间 |
 
-原始附件没有覆盖接口。替换文件意味着新建补充原始记录和新附件。
+原始附件没有覆盖接口。替换文件意味着新建补充原始记录和新附件。`content_sha256` 只供完整性检查和恢复时逐项校验使用；不用于全局去重、秒传、内容寻址或生成存储路径。
 
 ### 6.2 `attachment_derivatives`
 
@@ -379,11 +411,15 @@ AI 后续可以建议标题，但不能让保存等待模型。
 | `cancel_requested_at` | timestamptz nullable | 用户取消请求 |
 | `error_code` | text nullable | 稳定错误码 |
 | `error_detail` | text nullable | 脱敏诊断摘要 |
-| `batch_summary` | jsonb nullable | 仅 batch 父任务：total/succeeded/failed/cancelled/skipped 计数 |
+| `batch_summary` | jsonb nullable | 仅 batch 父任务：选中 item、子任务状态和按固定原因跳过的计数 |
 | `input_tokens` | bigint nullable | Provider 报告值 |
 | `output_tokens` | bigint nullable | Provider 报告值 |
 
-`input_snapshot` 只保存 ID、版本和任务边界，不复制正文或图片字节。调度器用成功 artifact 所属任务的该快照判断覆盖范围：当前 raw record ID 集合变化时整理结果视为待重建，当前 ready 图片附件 ID 集合变化时图片结果视为待重建。外部 Agent 提交 artifact 时，API 同样创建一条 `trigger_type=external` 的已完成任务来源记录并保存其受控输入快照。
+`input_snapshot` 只保存 ID、版本和任务边界，不复制正文或图片字节。服务端据此计算 Artifact 的 `isStale`，不增加数据库状态字段：`organized_record` 与 `correctness_review` 比较当前 raw record ID 集合，`image_analysis` 比较当前 ready 图片附件 ID 集合。集合变化后旧结果变为 stale，但不自动失效、删除或切换版本；当前激活 Artifact 的搜索片段也不会仅因 stale 被停用。调度器将其视为待重建，API/UI 必须持续标记“未覆盖最新原始记录”。外部 Agent 提交 artifact 时，API 同样创建一条 `trigger_type=external` 的已完成任务来源记录并保存其受控输入快照。
+
+`batch_summary` 使用固定结构：`selectedItems`、`createdChildren`、`childStatusCounts` 和 `skipped`。`childStatusCounts` 仅含五种任务状态且总和等于 `createdChildren`；`skipped.total` 等于 `skipped.byReason` 各值之和。允许的跳过原因只有 `already_covered`、`already_queued_or_running`、`no_supported_content`、`vision_model_unavailable`、`sensitive_blocked`、`sensitive_image_redaction_unsupported`。一个混合 item 可以产生两个子任务，因此 item 数与分支数不要求相等；不把自由文本错误塞入摘要。
+
+batch 有子任务时父任务进入 `running`；每次子任务状态变化时，API 在同一事务更新或从子任务重算 `childStatusCounts`。全部子任务终止后，父任务若自身已有取消请求则 cancelled；否则按 `failed > cancelled > succeeded` 聚合：任一失败则 failed；无失败但任一取消则 cancelled；其余 succeeded。skip 不单独导致失败；零子任务且所有输入均有稳定 skip reason 时直接 succeeded。父任务收到取消后不再创建子任务，queued 子任务立即 cancelled，running 子任务设置 `cancel_requested_at`；全部子任务终止后父任务进入 cancelled，已经成功的子任务与 Artifact 保留。
 
 状态转换：
 
@@ -392,12 +428,17 @@ queued → running → succeeded
              ├──→ failed
              └──→ cancelled
 queued ──────────→ cancelled
-running ──租约过期且只领取过一次──→ queued
+running ──租约过期、无取消请求且只领取过一次──→ queued
+running ──租约过期且已有取消请求──────────→ cancelled
 ```
 
 除 `batch_organize` 父任务外，成功状态必须关联合法 artifact；batch 父任务由 API 创建子任务并根据子任务终态汇总，不产生 artifact，也不由 worker 领取。Schema 校验失败只能是 `failed`。租约过期后最多重新排队一次，第二次租约仍过期则失败。用户点击“重试”创建新的 task row 并填写 `retry_of_task_id`，不把旧失败任务改回 queued。
 
 `schedule_key` 在 scheduled batch 上使用部分唯一约束，API 重启或时钟重复不能为同一日/周时间窗创建第二个 batch。一次定期 batch 最多选择 20 个 item；同一 item 同时有正文和待分析图片时，可以各创建一个 `organize_record` 与 `analyze_image` 子任务。
+
+单条任务使用 PostgreSQL 部分唯一索引保证同一 `item_id + task_type` 同时最多存在一个 `queued`/`running` row；batch 父任务的 `item_id` 为空，不受此约束。lease 恢复只处理 `cancel_requested_at IS NULL` 的任务；已有取消请求的失联任务直接 cancelled，不能重新排队。
+
+worker complete 先按 `task_run_id` 查询已有 Artifact：若存在且任务已 succeeded，验证请求仍对应原成功 lease 后直接返回原 Artifact 和终态。只有 Artifact 不存在时，才在创建事务中校验当前 lease、任务仍为 running 且 `cancel_requested_at IS NULL`，然后分配版本、写 Artifact 并把任务置为 succeeded；取消先发生则不得创建 Artifact。`ai_artifacts.task_run_id UNIQUE` 承担该窄幂等，不建立通用完成框架。
 
 ### 8.2 `ai_task_events`
 
@@ -429,7 +470,7 @@ running ──租约过期且只领取过一次──→ queued
 | `created_at` | timestamptz | 创建时间 |
 | `invalidated_at` | timestamptz nullable | 人工作废，不物理覆盖 |
 
-唯一约束 `(item_id, artifact_type, version_number)`。
+唯一约束 `(item_id, artifact_type, version_number)`。版本号在锁定 item row 或等价的小事务中分配，不创建独立版本服务。
 
 ### 8.4 `item_active_artifacts`
 
@@ -444,7 +485,7 @@ running ──租约过期且只领取过一次──→ queued
 
 复合主键 `(item_id, artifact_type)`。`artifact_id` 必须属于同一 item、同一 type 且未作废；由服务层在事务中校验。内置 `organized_record` 的成功后自动激活遵循用户设置，内置 `image_analysis` 成功后自动激活，`correctness_review` 与所有外部 Agent 结果默认保持候选，直到用户激活。
 
-作废当前 artifact 时，同一事务删除对应 active row 并停用其搜索片段；系统不擅自回退到更旧版本，用户可以明确选择旧版本重新激活。
+作废当前 artifact 时，同一事务删除对应 active row 并停用其搜索片段；系统不擅自回退到更旧版本，用户可以明确选择未作废的旧版本重新激活。已作废版本只能查看。
 
 ### 8.5 `artifact_sources`
 
@@ -502,6 +543,8 @@ running ──租约过期且只领取过一次──→ queued
 
 原始片段 ID 使用固定 namespace 的 UUIDv5，由 `raw_record_id + fragment_version + ordinal` 生成；这里的确定性 ID 是为了让 artifact 引用在同版本重建后仍指向同一证据，不对内容做去重或安全哈希。
 
+标题、人工元数据和 AI 派生搜索片段会随编辑、激活或作废变化，没有稳定证据引用消费者，使用普通随机 UUID 并按来源替换，不扩展 UUIDv5 规则。
+
 分片算法需要版本号。算法升级时为原始记录生成新版本片段并原子切换搜索 active 状态，不改 `raw_records.body`；被历史 artifact 引用的旧版本片段继续保留用于定位。受控重建同一版本时 upsert 相同 ID，不让引用漂移。
 
 ## 10. 设置与安全事件
@@ -529,7 +572,7 @@ running ──租约过期且只领取过一次──→ queued
 
 只记录对用户有实际价值的安全事件：登录成功/失败、MFA 恢复码使用、密码/TOTP 变更、可信设备和 PAT 创建/撤销。
 
-字段：事件类型、时间、请求 IP、User-Agent 摘要和脱敏详情。默认保留 90 天。不记录原始内容或模型 Prompt。
+字段：事件类型、时间、服务端按可信代理规则解析的请求 IP、User-Agent 摘要和脱敏详情。精确 IP 只在数据库会话/安全事件中保留，默认最多 90 天；普通 stdout/stderr HTTP 日志不记录完整 IP。任何位置都不记录原始内容或模型 Prompt。
 
 ## 11. 核心事务
 
@@ -546,15 +589,24 @@ running ──租约过期且只领取过一次──→ queued
 
 ### 11.2 创建带附件记录
 
-1. 在附件卷同一文件系统中流式写临时文件，校验 20 MiB 单文件限制并关闭文件。
-2. 检查媒体类型和图片信息。
+1. 在附件卷同一文件系统中流式写临时文件，同时计算 SHA-256，校验 20 MiB 单文件限制并关闭文件。
+2. 检查服务端媒体类型和图片信息，并保留有界的客户端声明 MIME 供诊断。
 3. 开启数据库事务，创建 item、raw record、attachment 和搜索片段。
 4. 在提交事务前把临时文件原子移动到最终 storage key；移动失败则回滚事务。
 5. 移动成功后提交事务。提交失败或进程在移动后崩溃时，最终文件可能成为无数据库引用的孤儿，由完整性检查报告并由显式运维命令清理。
 
 不把整个文件读入内存，也不让数据库保存大二进制。这个顺序保证正常完成的数据库记录一定已经有最终文件；故障最多产生孤儿文件，不产生已提交但缺少原件的记录。
 
-### 11.3 激活 AI 版本
+向已有 item 添加带附件 supplement 复用同一文件事务，只是不创建新 item，并在数据库事务内同时创建 supplement raw record、relation、附件、搜索片段以及必要的 item sensitivity/title 升级。
+
+### 11.3 添加补充记录
+
+1. 锁定目标 item 并确认未在回收站。
+2. 按纯文本或附件流程创建 immutable supplement raw record；可选 relation 的目标必须符合 4.3 节。
+3. 按 `sensitive > unknown > normal` 合并 sensitivity，并在需要时安全化系统标题。
+4. 提交后旧 Artifact 通过输入集合计算为 stale，不更新或删除其内容。
+
+### 11.4 激活 AI 版本
 
 同一事务：
 
@@ -565,7 +617,7 @@ running ──租约过期且只领取过一次──→ queued
 
 不修改 raw record、目录或正式标签。
 
-### 11.4 永久删除
+### 11.5 永久删除
 
 1. 要求 item 已在回收站，并通过用户明确确认。
 2. 开启数据库事务，把附件移动到卷内隔离删除区，再删除 artifact、任务关联、索引、标签关联、raw record 和 item。
