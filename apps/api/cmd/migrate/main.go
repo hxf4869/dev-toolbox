@@ -13,7 +13,7 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "api-migrate")
-	cfg, err := config.Load()
+	cfg, err := config.LoadMigration()
 	if err != nil {
 		logger.Error("configuration_invalid", "errorType", "configuration")
 		os.Exit(1)

@@ -1,11 +1,24 @@
 <script setup lang="ts">
 import { RouterLink, useRoute } from 'vue-router'
+import { ref } from 'vue'
 
+import { useAuthStore } from '../../app/auth'
 import { useThemeStore } from '../../app/theme'
 import UiIcon from '../ui/UiIcon.vue'
 
 const route = useRoute()
 const theme = useThemeStore()
+const auth = useAuthStore()
+const loggingOut = ref(false)
+
+async function logout() {
+  loggingOut.value = true
+  try {
+    await auth.logout()
+  } finally {
+    loggingOut.value = false
+  }
+}
 </script>
 
 <template>
@@ -16,12 +29,22 @@ const theme = useThemeStore()
 
     <RouterLink
       class="rail__item"
-      :class="{ 'rail__item--active': route.name === 'workspace' }"
+      :class="{ 'rail__item--active': route.name === 'workspace' || route.name === 'item-detail' }"
       to="/"
       aria-label="工作台"
       title="工作台"
     >
       <UiIcon name="book-open" />
+    </RouterLink>
+
+    <RouterLink
+      class="rail__item"
+      :class="{ 'rail__item--active': route.name === 'security-settings' }"
+      to="/settings/security"
+      aria-label="登录安全"
+      title="登录安全"
+    >
+      <UiIcon name="shield-check" />
     </RouterLink>
 
     <RouterLink
@@ -34,8 +57,12 @@ const theme = useThemeStore()
       <UiIcon name="settings" />
     </RouterLink>
 
+    <button class="rail__item rail__logout" type="button" :disabled="loggingOut" aria-label="退出登录" title="退出登录" @click="logout">
+      <UiIcon name="log-out" />
+    </button>
+
     <button
-      class="rail__item rail__theme"
+      class="rail__item"
       type="button"
       :aria-label="theme.resolved === 'dark' ? '切换为浅色主题' : '切换为深色主题'"
       :title="theme.resolved === 'dark' ? '切换为浅色主题' : '切换为深色主题'"
@@ -93,7 +120,7 @@ const theme = useThemeStore()
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.rail__theme {
+.rail__logout {
   margin-top: auto;
 }
 
@@ -112,8 +139,9 @@ const theme = useThemeStore()
     margin: 0 auto 0 0;
   }
 
-  .rail__theme {
+  .rail__logout {
     margin-top: 0;
+    margin-left: auto;
   }
 }
 </style>

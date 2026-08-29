@@ -209,11 +209,16 @@
 - `POST /api/v1/auth/totp/reset`
 - `POST /api/v1/auth/totp/recovery-codes/regenerate`
 - `GET /api/v1/auth/trusted-devices`
+- `PATCH /api/v1/auth/trusted-devices/{id}`
 - `DELETE /api/v1/auth/trusted-devices/{id}`
+- `GET /api/v1/auth/sessions`
+- `DELETE /api/v1/auth/sessions/{id}`
 
 首次 `totp/setup` 需要密码登录返回的 `mfa_setup_required` challenge；第一次调用为该 challenge 生成并加密保存 pending secret，同一未过期、未消费 challenge 重复调用时返回同一个 provisioning URI 与手动密钥，不重新生成。`totp/confirm` 接受 challenge、TOTP code、`trustDevice` 和可选 `deviceName`，原子启用 MFA、按选择创建可信设备、生成 10 个恢复码、签发普通会话并消费 challenge；成功响应丢失后不得通过重复 confirm 再次取得恢复码明文。
 
 已绑定后的 `totp/reset` 要求当前会话、密码以及当前 TOTP 或未使用恢复码，创建新的 5 分钟 enroll challenge；旧 TOTP 在新 secret 确认前仍有效。确认新 secret 后撤销全部旧会话、可信设备和恢复码，并返回新恢复码。`recovery-codes/regenerate` 同样要求密码 + 当前 TOTP/恢复码，旧恢复码全部失效。
+
+可信设备只允许修改显示名或撤销；会话只允许列出或撤销。撤销当前会话后当前 Cookie 立即失效，撤销其他会话不影响当前会话。
 
 一期不提供关闭 TOTP 的端点。
 

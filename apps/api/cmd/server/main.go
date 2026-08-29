@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	artifactcontract "github.com/hxf4869/dev-toolbox/apps/api/internal/ai/schema"
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/knowledge"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/operations"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/config"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
@@ -46,8 +48,21 @@ func main() {
 	}
 	defer pool.Close()
 
+	authService, err := auth.NewService(pool, cfg.MasterKey, cfg.AppOrigin, cfg.TrustedProxyCIDRs)
+	if err != nil {
+		logger.Error("auth_service_invalid", "errorType", "configuration")
+		os.Exit(1)
+	}
+	knowledgeService, err := knowledge.NewService(pool, cfg.AttachmentRoot, cfg.AppTimezone)
+	if err != nil {
+		logger.Error("attachment_storage_unavailable", "errorType", "filesystem")
+		os.Exit(1)
+	}
+
 	router := http.NewServeMux()
 	operations.RegisterRoutes(router, pool)
+	authService.RegisterRoutes(router)
+	knowledgeService.RegisterRoutes(router, authService)
 
 	handler := httpapi.RequestID(httpapi.Recover(logger, httpapi.RequestLog(logger, router)))
 	server := &http.Server{

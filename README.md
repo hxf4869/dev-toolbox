@@ -2,7 +2,7 @@
 
 开发百宝箱是一个面向个人开发与运维工作的自托管工具集合。它从“快速保存、快速找到、保留原始事实、让 AI 生成可重建的整理结果”起步，后续可以继续容纳彼此独立的小工具，但不会在一期建设动态插件平台。
 
-一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前 **M0 工程骨架与契约已经完成并验证**；M1–M5 尚未完成，仓库中的占位状态不代表对应业务能力已经可用。
+一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前 **M0 工程骨架与契约、M1 身份与原始事实层已经完成并验证**；M2–M5 尚未完成，仓库中的占位状态不代表对应业务能力已经可用。
 
 ## 一期核心闭环
 
@@ -26,6 +26,14 @@ make up
 
 该命令会在已忽略的 `deploy/.env`、`deploy/secrets/` 和 `deploy/data/` 下创建本地配置、随机 Secret 与持久化目录，构建并启动 Caddy、API、AI worker、PostgreSQL 四个服务。启动后访问 <http://localhost:8080>，API 就绪检查为 <http://localhost:8080/health/ready>。
 
+首次启动后在终端创建唯一所有者，随后打开 Web 完成 TOTP 绑定并保存一次性恢复码：
+
+```bash
+make init-owner
+```
+
+如果所有登录因素均丢失，可在主机终端运行 `make reset-auth`。该命令只重置密码、TOTP、恢复码、会话和可信设备，不修改知识记录或附件；下次登录必须重新绑定 TOTP。
+
 常用开发命令：
 
 ```bash
@@ -34,6 +42,9 @@ make check        # Web/worker 类型检查 + Go 测试
 make test         # Web/worker/Go 单元与契约测试
 make build        # Web/worker 构建 + 四服务镜像构建
 make migrate      # 重复执行顺序迁移；无新迁移时不改变数据库
+make init-owner   # 一次性创建所有者；重复执行不会覆盖
+make reset-auth   # 主机侧重置认证，不修改知识数据
+make m1-integration-test # 在隔离测试库验证 M1 认证与录入闭环
 make down         # 停止本地服务
 make reset-dev    # 停止服务并清空本地开发数据，保留配置与 Secret
 ```

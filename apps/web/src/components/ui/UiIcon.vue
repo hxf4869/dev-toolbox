@@ -4,16 +4,35 @@ import {
   Boxes,
   Check,
   ChevronLeft,
+  ChevronRight,
   CircleHelp,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  FileText,
   Folder,
+  Image,
   Inbox,
+  KeyRound,
+  LockKeyhole,
+  LogOut,
   Menu,
+  Monitor,
   Moon,
+  Paperclip,
   Plus,
+  RotateCcw,
+  Save,
   Search,
   Settings,
   ShieldAlert,
+  ShieldCheck,
+  Smartphone,
   Sun,
+  Trash2,
+  TriangleAlert,
+  Upload,
   Wrench,
   X,
 } from 'lucide-vue-next'
@@ -26,16 +45,35 @@ const props = withDefaults(
       | 'boxes'
       | 'check'
       | 'chevron-left'
+      | 'chevron-right'
       | 'circle-help'
+      | 'copy'
+      | 'download'
+      | 'eye'
+      | 'eye-off'
+      | 'file-text'
       | 'folder'
+      | 'image'
       | 'inbox'
+      | 'key-round'
+      | 'lock-keyhole'
+      | 'log-out'
       | 'menu'
+      | 'monitor'
       | 'moon'
+      | 'paperclip'
       | 'plus'
+      | 'rotate-ccw'
+      | 'save'
       | 'search'
       | 'settings'
       | 'shield-alert'
+      | 'shield-check'
+      | 'smartphone'
       | 'sun'
+      | 'trash-2'
+      | 'triangle-alert'
+      | 'upload'
       | 'wrench'
       | 'x'
     size?: number
@@ -48,16 +86,35 @@ const icons = {
   boxes: Boxes,
   check: Check,
   'chevron-left': ChevronLeft,
+  'chevron-right': ChevronRight,
   'circle-help': CircleHelp,
+  copy: Copy,
+  download: Download,
+  eye: Eye,
+  'eye-off': EyeOff,
+  'file-text': FileText,
   folder: Folder,
+  image: Image,
   inbox: Inbox,
+  'key-round': KeyRound,
+  'lock-keyhole': LockKeyhole,
+  'log-out': LogOut,
   menu: Menu,
+  monitor: Monitor,
   moon: Moon,
+  paperclip: Paperclip,
   plus: Plus,
+  'rotate-ccw': RotateCcw,
+  save: Save,
   search: Search,
   settings: Settings,
   'shield-alert': ShieldAlert,
+  'shield-check': ShieldCheck,
+  smartphone: Smartphone,
   sun: Sun,
+  'trash-2': Trash2,
+  'triangle-alert': TriangleAlert,
+  upload: Upload,
   wrench: Wrench,
   x: X,
 } as const

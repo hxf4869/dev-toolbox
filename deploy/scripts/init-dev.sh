@@ -22,7 +22,7 @@ if [ ! -f "$postgres_password_file" ]; then
   unset postgres_password
 fi
 
-for secret_name in internal_service_token app_master_key; do
+for secret_name in internal_service_token; do
   secret_file="$secrets_dir/$secret_name"
   if [ ! -f "$secret_file" ]; then
     openssl rand -base64 48 | tr -d '\n' >"$secret_file"
@@ -30,3 +30,10 @@ for secret_name in internal_service_token app_master_key; do
     chmod 600 "$secret_file"
   fi
 done
+
+app_master_key_file="$secrets_dir/app_master_key"
+if [ ! -f "$app_master_key_file" ]; then
+  openssl rand -base64 32 | tr -d '\n' >"$app_master_key_file"
+  printf '\n' >>"$app_master_key_file"
+  chmod 600 "$app_master_key_file"
+fi

@@ -38,6 +38,10 @@ services:
       PGUSER: ${POSTGRES_USER:?请配置 POSTGRES_USER}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       PGSSLMODE: disable
+      APP_ORIGIN: ${APP_ORIGIN:?请配置 APP_ORIGIN}
+      APP_TIMEZONE: Asia/Shanghai
+      TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+      ATTACHMENT_ROOT: /data
       ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
       MIGRATIONS_PATH: /app/migrations
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
@@ -47,7 +51,7 @@ services:
       - internal_service_token
       - app_master_key
     volumes:
-      - ./data/attachments:/data
+      - ./data/attachments:/data:rw
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/ready"]
       interval: 10s
