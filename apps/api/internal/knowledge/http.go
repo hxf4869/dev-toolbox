@@ -60,15 +60,16 @@ type attachmentMetadata struct {
 	ItemID      uuid.UUID `json:"itemId"`
 	RawRecordID uuid.UUID `json:"rawRecordId"`
 	StorageKey  string    `json:"-"`
+	Sensitivity string    `json:"-"`
 }
 
 func (service *Service) createJSON(response http.ResponseWriter, request *http.Request) {
-	session, _ := auth.SessionFromContext(request.Context())
+	actor, _ := auth.ActorFromContext(request.Context())
 	idempotencyKey, ok := parseIdempotencyKey(response, request)
 	if !ok {
 		return
 	}
-	if service.writeExistingIdempotent(response, request, session, idempotencyKey) {
+	if service.writeExistingIdempotent(response, request, actor, idempotencyKey) {
 		return
 	}
 
@@ -77,7 +78,7 @@ func (service *Service) createJSON(response http.ResponseWriter, request *http.R
 		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "录入内容无效")
 		return
 	}
-	result, err := service.createItem(request.Context(), session, input, nil, idempotencyKey)
+	result, err := service.createItem(request.Context(), actor, input, nil, idempotencyKey)
 	if err != nil {
 		writeCreateError(response, request, err)
 		return
@@ -87,12 +88,12 @@ func (service *Service) createJSON(response http.ResponseWriter, request *http.R
 }
 
 func (service *Service) createMultipart(response http.ResponseWriter, request *http.Request) {
-	session, _ := auth.SessionFromContext(request.Context())
+	actor, _ := auth.ActorFromContext(request.Context())
 	idempotencyKey, ok := parseIdempotencyKey(response, request)
 	if !ok {
 		return
 	}
-	if service.writeExistingIdempotent(response, request, session, idempotencyKey) {
+	if service.writeExistingIdempotent(response, request, actor, idempotencyKey) {
 		return
 	}
 
@@ -162,7 +163,7 @@ func (service *Service) createMultipart(response http.ResponseWriter, request *h
 		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "metadata 和 files[] 均为必填")
 		return
 	}
-	result, err := service.createItem(request.Context(), session, input, files, idempotencyKey)
+	result, err := service.createItem(request.Context(), actor, input, files, idempotencyKey)
 	if err != nil {
 		writeCreateError(response, request, err)
 		return
@@ -171,11 +172,11 @@ func (service *Service) createMultipart(response http.ResponseWriter, request *h
 	httpapi.WriteJSON(response, http.StatusCreated, result)
 }
 
-func (service *Service) writeExistingIdempotent(response http.ResponseWriter, request *http.Request, session auth.Session, key string) bool {
+func (service *Service) writeExistingIdempotent(response http.ResponseWriter, request *http.Request, actor auth.Actor, key string) bool {
 	if key == "" {
 		return false
 	}
-	result, found, err := service.findIdempotentResult(request.Context(), session.ID, key)
+	result, found, err := service.findIdempotentResult(request.Context(), actor, key)
 	if err != nil {
 		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
 		return true
@@ -350,6 +351,17 @@ func (service *Service) getRawRecord(response http.ResponseWriter, request *http
 		httpapi.WriteError(response, request, http.StatusNotFound, "NOT_FOUND", "原始记录不存在")
 		return
 	}
+	if allowed, err := service.canReadItemContent(request, itemID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpapi.WriteError(response, request, http.StatusNotFound, "NOT_FOUND", "原始记录不存在")
+		} else {
+			httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "原始记录暂时不可用")
+		}
+		return
+	} else if !allowed {
+		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感原文")
+		return
+	}
 	var record rawRecordEntry
 	var body string
 	var externalID, sourcePath *string
@@ -414,6 +426,10 @@ func (service *Service) getAttachmentMetadata(response http.ResponseWriter, requ
 		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "附件暂时不可用")
 		return
 	}
+	if !requestActorCanReadSensitivity(request, metadata.Sensitivity) {
+		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感附件")
+		return
+	}
 	httpapi.WriteJSON(response, http.StatusOK, metadata)
 }
 
@@ -426,6 +442,10 @@ func (service *Service) getAttachmentContent(response http.ResponseWriter, reque
 	}
 	if err != nil {
 		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "附件暂时不可用")
+		return
+	}
+	if !requestActorCanReadSensitivity(request, metadata.Sensitivity) {
+		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感附件")
 		return
 	}
 	path, err := service.storagePath(metadata.StorageKey)
@@ -464,7 +484,7 @@ func (service *Service) loadAttachmentMetadata(request *http.Request, rawID stri
 	err = service.database.QueryRow(request.Context(), `
 		SELECT a.id, a.kind, a.original_name, a.display_name, a.client_media_type,
 		       a.media_type, a.size_bytes, a.width, a.height, a.created_at,
-		       r.item_id, a.raw_record_id, a.storage_key
+		       r.item_id, a.raw_record_id, a.storage_key, i.sensitivity
 		FROM attachments a
 		JOIN raw_records r ON r.id = a.raw_record_id
 		JOIN knowledge_items i ON i.id = r.item_id
@@ -473,12 +493,27 @@ func (service *Service) loadAttachmentMetadata(request *http.Request, rawID stri
 		&metadata.ID, &metadata.Kind, &metadata.OriginalName, &metadata.DisplayName,
 		&metadata.ClientMediaType, &metadata.MediaType, &metadata.SizeBytes,
 		&metadata.Width, &metadata.Height, &metadata.CreatedAt, &metadata.ItemID,
-		&metadata.RawRecordID, &metadata.StorageKey,
+		&metadata.RawRecordID, &metadata.StorageKey, &metadata.Sensitivity,
 	)
 	if err == nil {
 		populateAttachmentLinks(&metadata.attachmentEntry)
 	}
 	return metadata, err
+}
+
+func (service *Service) canReadItemContent(request *http.Request, itemID uuid.UUID) (bool, error) {
+	var sensitivity string
+	if err := service.database.QueryRow(request.Context(), `
+		SELECT sensitivity FROM knowledge_items WHERE id = $1 AND deleted_at IS NULL
+	`, itemID).Scan(&sensitivity); err != nil {
+		return false, err
+	}
+	return requestActorCanReadSensitivity(request, sensitivity), nil
+}
+
+func requestActorCanReadSensitivity(request *http.Request, sensitivity string) bool {
+	actor, ok := auth.ActorFromContext(request.Context())
+	return !ok || actor.Type != "pat" || sensitivity == "normal" || actor.HasScope("sensitive:read")
 }
 
 func (service *Service) storagePath(storageKey string) (string, error) {

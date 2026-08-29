@@ -29,6 +29,7 @@ type supplementInput struct {
 	ContentFormat string              `json:"contentFormat"`
 	Sensitivity   string              `json:"sensitivity"`
 	Relation      *supplementRelation `json:"relation"`
+	Source        *sourceInput        `json:"source"`
 }
 
 func (service *Service) createSupplementJSON(response http.ResponseWriter, request *http.Request) {
@@ -37,9 +38,9 @@ func (service *Service) createSupplementJSON(response http.ResponseWriter, reque
 		writeItemNotFound(response, request)
 		return
 	}
-	session, _ := auth.SessionFromContext(request.Context())
+	actor, _ := auth.ActorFromContext(request.Context())
 	key, ok := parseIdempotencyKey(response, request)
-	if !ok || service.writeExistingSupplement(response, request, session, itemID, key) {
+	if !ok || service.writeExistingSupplement(response, request, actor, itemID, key) {
 		return
 	}
 	var input supplementInput
@@ -47,7 +48,7 @@ func (service *Service) createSupplementJSON(response http.ResponseWriter, reque
 		writeSupplementValidation(response, request)
 		return
 	}
-	result, err := service.createSupplement(request.Context(), session, itemID, input, nil, key)
+	result, err := service.createSupplement(request.Context(), actor, itemID, input, nil, key)
 	if err != nil {
 		writeSupplementError(response, request, err)
 		return
@@ -62,9 +63,9 @@ func (service *Service) createSupplementMultipart(response http.ResponseWriter, 
 		writeItemNotFound(response, request)
 		return
 	}
-	session, _ := auth.SessionFromContext(request.Context())
+	actor, _ := auth.ActorFromContext(request.Context())
 	key, ok := parseIdempotencyKey(response, request)
-	if !ok || service.writeExistingSupplement(response, request, session, itemID, key) {
+	if !ok || service.writeExistingSupplement(response, request, actor, itemID, key) {
 		return
 	}
 	input, files, err := service.readSupplementMultipart(request)
@@ -73,7 +74,7 @@ func (service *Service) createSupplementMultipart(response http.ResponseWriter, 
 		return
 	}
 	defer removePreparedFiles(files)
-	result, err := service.createSupplement(request.Context(), session, itemID, input, files, key)
+	result, err := service.createSupplement(request.Context(), actor, itemID, input, files, key)
 	if err != nil {
 		writeSupplementError(response, request, err)
 		return
@@ -151,18 +152,27 @@ func removePreparedFiles(files []preparedFile) {
 	}
 }
 
-func (service *Service) createSupplement(ctx context.Context, session auth.Session, itemID uuid.UUID, input supplementInput, files []preparedFile, key string) (createResult, error) {
+func (service *Service) createSupplement(ctx context.Context, actor auth.Actor, itemID uuid.UUID, input supplementInput, files []preparedFile, key string) (createResult, error) {
 	if err := validateSupplementInput(input, files); err != nil {
 		return createResult{}, err
 	}
+	now := service.now().UTC()
+	source, err := resolveSource(actor, input.Source, now)
+	if err != nil {
+		return createResult{}, errInvalidInput
+	}
+	if source.ExternalID != nil {
+		if result, found, err := service.findSourceResult(ctx, source.Type, *source.ExternalID); err != nil || found {
+			return result, err
+		}
+	}
 	routeKey := supplementRouteKey(itemID)
 	if key != "" {
-		if result, found, err := service.findSupplementResult(ctx, session.ID, routeKey, key); err != nil || found {
+		if result, found, err := service.findSupplementResult(ctx, actor, routeKey, key); err != nil || found {
 			return result, err
 		}
 	}
 
-	now := service.now().UTC()
 	rawRecordID := uuid.New()
 	storedFiles := make([]storedFile, 0, len(files))
 	for _, file := range files {
@@ -184,9 +194,9 @@ func (service *Service) createSupplement(ctx context.Context, session auth.Sessi
 		var existingItemID, existingRawRecordID uuid.UUID
 		err := tx.QueryRow(ctx, `
 			SELECT created_item_id, created_raw_record_id FROM idempotency_records
-			WHERE actor_type = 'session' AND actor_id = $1 AND route_key = $2
-			  AND idempotency_key = $3 AND expires_at > $4
-		`, session.ID, routeKey, key, now).Scan(&existingItemID, &existingRawRecordID)
+			WHERE actor_type = $1 AND actor_id = $2 AND route_key = $3
+			  AND idempotency_key = $4 AND expires_at > $5
+		`, actor.Type, actor.ID, routeKey, key, now).Scan(&existingItemID, &existingRawRecordID)
 		if err == nil {
 			_ = tx.Rollback(ctx)
 			return service.loadCreateResult(ctx, existingItemID, existingRawRecordID)
@@ -222,10 +232,20 @@ func (service *Service) createSupplement(ctx context.Context, session auth.Sessi
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO raw_records (
 			id, item_id, record_role, source_type, content_kind, content_format, body,
-			declared_sensitivity, captured_at, effective_captured_at, source_time_quality,
+			declared_sensitivity, captured_at, effective_captured_at, source_external_id,
+			source_path, source_created_at, source_updated_at, source_time_quality,
 			source_metadata, created_at
-		) VALUES ($1, $2, 'supplement', 'web_capture', $3, $4, $5, $6, $7, $7, 'unknown', '{}'::jsonb, $7)
-	`, rawRecordID, itemID, inferContentKind(input.Body, files), input.ContentFormat, input.Body, input.Sensitivity, now); err != nil {
+		) VALUES ($1, $2, 'supplement', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $8)
+	`, rawRecordID, itemID, source.Type, inferContentKind(input.Body, files), input.ContentFormat,
+		input.Body, input.Sensitivity, now, source.EffectiveCapturedAt, source.ExternalID,
+		source.Path, source.CreatedAt, source.UpdatedAt, source.TimeQuality, source.MetadataJSON); err != nil {
+		var databaseError *pgconn.PgError
+		if source.ExternalID != nil && errors.As(err, &databaseError) && databaseError.Code == "23505" && databaseError.ConstraintName == "raw_records_source_external_id" {
+			_ = tx.Rollback(ctx)
+			if result, found, lookupErr := service.findSourceResult(ctx, source.Type, *source.ExternalID); lookupErr != nil || found {
+				return result, lookupErr
+			}
+		}
 		return createResult{}, err
 	}
 	for _, fragment := range splitTextFragments(rawRecordID, input.Body) {
@@ -286,13 +306,13 @@ func (service *Service) createSupplement(ctx context.Context, session auth.Sessi
 			INSERT INTO idempotency_records (
 				actor_type, actor_id, route_key, idempotency_key, created_item_id,
 				created_raw_record_id, created_at, expires_at
-			) VALUES ('session', $1, $2, $3, $4, $5, $6, $7)
-		`, session.ID, routeKey, key, itemID, rawRecordID, now, now.Add(24*time.Hour))
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, actor.Type, actor.ID, routeKey, key, itemID, rawRecordID, now, now.Add(24*time.Hour))
 		if err != nil {
 			var databaseError *pgconn.PgError
 			if errors.As(err, &databaseError) && databaseError.Code == "23505" {
 				_ = tx.Rollback(ctx)
-				result, found, lookupErr := service.findSupplementResult(ctx, session.ID, routeKey, key)
+				result, found, lookupErr := service.findSupplementResult(ctx, actor, routeKey, key)
 				if lookupErr != nil {
 					return createResult{}, lookupErr
 				}
@@ -359,13 +379,13 @@ func supplementRouteKey(itemID uuid.UUID) string {
 	return "supplement_item:" + itemID.String()
 }
 
-func (service *Service) findSupplementResult(ctx context.Context, sessionID uuid.UUID, routeKey, key string) (createResult, bool, error) {
+func (service *Service) findSupplementResult(ctx context.Context, actor auth.Actor, routeKey, key string) (createResult, bool, error) {
 	var itemID, rawRecordID uuid.UUID
 	err := service.database.QueryRow(ctx, `
 		SELECT created_item_id, created_raw_record_id FROM idempotency_records
-		WHERE actor_type = 'session' AND actor_id = $1 AND route_key = $2
-		  AND idempotency_key = $3 AND expires_at > $4
-	`, sessionID, routeKey, key, service.now().UTC()).Scan(&itemID, &rawRecordID)
+		WHERE actor_type = $1 AND actor_id = $2 AND route_key = $3
+		  AND idempotency_key = $4 AND expires_at > $5
+	`, actor.Type, actor.ID, routeKey, key, service.now().UTC()).Scan(&itemID, &rawRecordID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return createResult{}, false, nil
 	}
@@ -376,11 +396,11 @@ func (service *Service) findSupplementResult(ctx context.Context, sessionID uuid
 	return result, err == nil, err
 }
 
-func (service *Service) writeExistingSupplement(response http.ResponseWriter, request *http.Request, session auth.Session, itemID uuid.UUID, key string) bool {
+func (service *Service) writeExistingSupplement(response http.ResponseWriter, request *http.Request, actor auth.Actor, itemID uuid.UUID, key string) bool {
 	if key == "" {
 		return false
 	}
-	result, found, err := service.findSupplementResult(request.Context(), session.ID, supplementRouteKey(itemID), key)
+	result, found, err := service.findSupplementResult(request.Context(), actor, supplementRouteKey(itemID), key)
 	if err != nil {
 		writeItemInternal(response, request)
 		return true

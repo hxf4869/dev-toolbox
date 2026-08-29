@@ -55,6 +55,15 @@ function viewActive(view: string) {
     <section v-if="settingsMode" aria-labelledby="settings-nav-heading">
       <h2 id="settings-nav-heading">设置</h2>
       <nav>
+        <RouterLink to="/settings/providers" :class="{ active: route.name === 'provider-settings' }">
+          <UiIcon name="boxes" /> Provider 与模型
+        </RouterLink>
+        <RouterLink to="/settings/tokens" :class="{ active: route.name === 'token-settings' }">
+          <UiIcon name="key-round" /> 外部 Agent
+        </RouterLink>
+        <RouterLink to="/settings/ai-security" :class="{ active: route.name === 'ai-security-settings' }">
+          <UiIcon name="shield-alert" /> AI 与敏感数据
+        </RouterLink>
         <RouterLink to="/settings/security" :class="{ active: route.name === 'security-settings' }">
           <UiIcon name="shield-check" /> 安全与会话
         </RouterLink>

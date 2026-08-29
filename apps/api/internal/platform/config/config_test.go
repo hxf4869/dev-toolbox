@@ -22,6 +22,7 @@ func TestLoadUsesNarrowDefaults(t *testing.T) {
 	}
 	t.Setenv("DATABASE_URL", "postgres://example.invalid/dev_toolbox")
 	t.Setenv("APP_MASTER_KEY_FILE", masterKeyPath)
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "0123456789abcdef0123456789abcdef")
 	t.Setenv("HTTP_ADDRESS", "")
 	t.Setenv("APP_ORIGIN", "")
 	t.Setenv("APP_TIMEZONE", "")
@@ -51,6 +52,7 @@ func TestLoadRejectsOriginWithPath(t *testing.T) {
 	}
 	t.Setenv("DATABASE_URL", "postgres://example.invalid/dev_toolbox")
 	t.Setenv("APP_MASTER_KEY_FILE", masterKeyPath)
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "0123456789abcdef0123456789abcdef")
 	t.Setenv("APP_ORIGIN", "https://toolbox.example.com/path")
 
 	if _, err := Load(); err == nil {

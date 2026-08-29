@@ -1,19 +1,16 @@
 package auth
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"strings"
-)
 
-const encryptedSecretVersion byte = 1
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/secretbox"
+)
 
 func randomToken() (string, error) {
 	random := make([]byte, 32)
@@ -36,43 +33,11 @@ func csrfToken(masterKey []byte, sessionToken string) string {
 }
 
 func encryptSecret(masterKey []byte, plaintext string) ([]byte, error) {
-	block, err := aes.NewCipher(masterKey)
-	if err != nil {
-		return nil, fmt.Errorf("create cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("create GCM: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("generate nonce: %w", err)
-	}
-	output := make([]byte, 1, 1+len(nonce)+len(plaintext)+gcm.Overhead())
-	output[0] = encryptedSecretVersion
-	output = append(output, nonce...)
-	output = gcm.Seal(output, nonce, []byte(plaintext), []byte("dev-toolbox:secret:v1"))
-	return output, nil
+	return secretbox.Seal(masterKey, plaintext)
 }
 
 func decryptSecret(masterKey, ciphertext []byte) (string, error) {
-	block, err := aes.NewCipher(masterKey)
-	if err != nil {
-		return "", fmt.Errorf("create cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("create GCM: %w", err)
-	}
-	if len(ciphertext) < 1+gcm.NonceSize()+gcm.Overhead() || ciphertext[0] != encryptedSecretVersion {
-		return "", errors.New("invalid encrypted secret")
-	}
-	nonce := ciphertext[1 : 1+gcm.NonceSize()]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext[1+gcm.NonceSize():], []byte("dev-toolbox:secret:v1"))
-	if err != nil {
-		return "", errors.New("decrypt secret")
-	}
-	return string(plaintext), nil
+	return secretbox.Open(masterKey, ciphertext)
 }
 
 func generateRecoveryCodes(count int) ([]string, []string, error) {

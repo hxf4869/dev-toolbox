@@ -14,15 +14,18 @@ import (
 )
 
 type Config struct {
-	HTTPAddress        string
-	DatabaseURL        string
-	AppOrigin          string
-	AppTimezone        *time.Location
-	MasterKey          []byte
-	AttachmentRoot     string
-	TrustedProxyCIDRs  string
-	ArtifactSchemaPath string
-	MigrationsPath     string
+	HTTPAddress               string
+	DatabaseURL               string
+	AppOrigin                 string
+	AppTimezone               *time.Location
+	MasterKey                 []byte
+	AttachmentRoot            string
+	TrustedProxyCIDRs         string
+	ArtifactSchemaPath        string
+	MigrationsPath            string
+	AIWorkerURL               string
+	InternalServiceToken      string
+	AllowInsecureProviderHTTP bool
 }
 
 type MigrationConfig struct {
@@ -47,16 +50,27 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("load APP_TIMEZONE: %w", err)
 	}
+	internalToken, err := loadTextSecret("INTERNAL_SERVICE_TOKEN", "INTERNAL_SERVICE_TOKEN_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+	workerURL := valueOrDefault("AI_WORKER_URL", "http://ai-worker:3001")
+	if err := validateInternalServiceURL(workerURL); err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
-		HTTPAddress:        valueOrDefault("HTTP_ADDRESS", "0.0.0.0:8080"),
-		DatabaseURL:        databaseURL,
-		AppOrigin:          appOrigin,
-		AppTimezone:        appTimezone,
-		MasterKey:          masterKey,
-		AttachmentRoot:     filepath.Clean(valueOrDefault("ATTACHMENT_ROOT", "../../deploy/data/attachments")),
-		TrustedProxyCIDRs:  os.Getenv("TRUSTED_PROXY_CIDRS"),
-		ArtifactSchemaPath: valueOrDefault("ARTIFACT_SCHEMA_PATH", "../../docs/contracts/ai-artifact.schema.json"),
-		MigrationsPath:     valueOrDefault("MIGRATIONS_PATH", "migrations"),
+		HTTPAddress:               valueOrDefault("HTTP_ADDRESS", "0.0.0.0:8080"),
+		DatabaseURL:               databaseURL,
+		AppOrigin:                 appOrigin,
+		AppTimezone:               appTimezone,
+		MasterKey:                 masterKey,
+		AttachmentRoot:            filepath.Clean(valueOrDefault("ATTACHMENT_ROOT", "../../deploy/data/attachments")),
+		TrustedProxyCIDRs:         os.Getenv("TRUSTED_PROXY_CIDRS"),
+		ArtifactSchemaPath:        valueOrDefault("ARTIFACT_SCHEMA_PATH", "../../docs/contracts/ai-artifact.schema.json"),
+		MigrationsPath:            valueOrDefault("MIGRATIONS_PATH", "migrations"),
+		AIWorkerURL:               strings.TrimRight(workerURL, "/"),
+		InternalServiceToken:      internalToken,
+		AllowInsecureProviderHTTP: strings.EqualFold(os.Getenv("ALLOW_INSECURE_PROVIDER_HTTP"), "true"),
 	}
 	return cfg, nil
 }
@@ -122,10 +136,38 @@ func loadMasterKey() ([]byte, error) {
 	return key, nil
 }
 
+func loadTextSecret(valueKey, fileKey string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(valueKey))
+	if value == "" {
+		path := os.Getenv(fileKey)
+		if path == "" {
+			return "", fmt.Errorf("%s or %s is required", valueKey, fileKey)
+		}
+		encoded, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", fileKey, err)
+		}
+		value = strings.TrimSpace(string(encoded))
+	}
+	if len(value) < 32 || len(value) > 512 {
+		return "", fmt.Errorf("%s must contain 32 to 512 characters", valueKey)
+	}
+	return value, nil
+}
+
 func validateOrigin(value string) error {
 	origin, err := url.Parse(value)
 	if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.User != nil {
 		return errors.New("APP_ORIGIN must be an HTTP(S) origin without path, query, fragment or userinfo")
+	}
+	return nil
+}
+
+func validateInternalServiceURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("AI_WORKER_URL must be an HTTP origin without path, query, fragment or userinfo")
 	}
 	return nil
 }

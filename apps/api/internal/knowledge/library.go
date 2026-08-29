@@ -205,6 +205,10 @@ func (service *Service) listItems(response http.ResponseWriter, request *http.Re
 			writeLibraryInternal(response, request)
 			return
 		}
+		if !requestActorCanReadSensitivity(request, items[index].Sensitivity) {
+			items[index].Attachments = []attachmentEntry{}
+			continue
+		}
 		items[index].Attachments, err = service.attachmentsForItem(request, items[index].ID)
 		if err != nil {
 			writeLibraryInternal(response, request)
@@ -249,6 +253,17 @@ func (service *Service) getItem(response http.ResponseWriter, request *http.Requ
 	}
 	if err != nil {
 		writeLibraryInternal(response, request)
+		return
+	}
+	if !requestActorCanReadSensitivity(request, sensitivity) {
+		note = nil
+		httpapi.WriteJSON(response, http.StatusOK, map[string]any{
+			"id": itemID, "title": title, "titleOrigin": titleOrigin, "note": note,
+			"folder": nil, "tags": []any{}, "sensitivity": sensitivity, "favorite": favorite,
+			"createdAt": createdAt, "updatedAt": updatedAt, "rawRecords": []any{},
+			"attachments": []any{}, "artifacts": []any{}, "availableVersions": []any{},
+			"contentMasked": true,
+		})
 		return
 	}
 	rawRecords, err := service.rawRecordSummaries(request, itemID)

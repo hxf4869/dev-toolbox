@@ -42,7 +42,7 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 	err = tx.QueryRow(request.Context(), `
 		SELECT a.id, a.kind, a.original_name, a.display_name, a.client_media_type,
 		       a.media_type, a.size_bytes, a.width, a.height, a.created_at,
-		       r.item_id, a.raw_record_id, a.storage_key
+		       r.item_id, a.raw_record_id, a.storage_key, i.sensitivity
 		FROM attachments a
 		JOIN raw_records r ON r.id = a.raw_record_id
 		JOIN knowledge_items i ON i.id = r.item_id
@@ -52,7 +52,7 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 		&metadata.ID, &metadata.Kind, &metadata.OriginalName, &metadata.DisplayName,
 		&metadata.ClientMediaType, &metadata.MediaType, &metadata.SizeBytes,
 		&metadata.Width, &metadata.Height, &metadata.CreatedAt, &metadata.ItemID,
-		&metadata.RawRecordID, &metadata.StorageKey,
+		&metadata.RawRecordID, &metadata.StorageKey, &metadata.Sensitivity,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeAttachmentNotFound(response, request)
@@ -60,6 +60,10 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 	}
 	if err != nil {
 		writeThumbnailInternal(response, request)
+		return
+	}
+	if !requestActorCanReadSensitivity(request, metadata.Sensitivity) {
+		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感附件")
 		return
 	}
 	if !previewAllowed(metadata.Kind, metadata.MediaType, metadata.Width, metadata.Height) {

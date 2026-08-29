@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useThemeStore, type ThemePreference } from '../../app/theme'
+import SettingsSubnav from './SettingsSubnav.vue'
 
 const theme = useThemeStore()
 
@@ -12,6 +13,7 @@ const choices: Array<{ value: ThemePreference; label: string; detail: string }> 
 
 <template>
   <section class="settings" aria-labelledby="appearance-heading">
+    <SettingsSubnav />
     <header>
       <p>设置</p>
       <h2 id="appearance-heading">外观</h2>

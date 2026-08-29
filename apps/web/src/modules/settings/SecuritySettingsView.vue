@@ -5,6 +5,7 @@ import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { apiRequest, jsonRequest } from '../../lib/api'
+import SettingsSubnav from './SettingsSubnav.vue'
 
 interface TrustedDevice {
   id: string
@@ -265,6 +266,7 @@ function messageFor(error: unknown) {
 
 <template>
   <section class="security" aria-labelledby="security-title">
+    <SettingsSubnav />
     <header class="security__header">
       <div>
         <p>设置 · 登录安全</p>

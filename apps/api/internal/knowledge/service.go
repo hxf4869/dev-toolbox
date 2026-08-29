@@ -32,12 +32,13 @@ type Service struct {
 }
 
 type createInput struct {
-	Body          string   `json:"body"`
-	ContentFormat string   `json:"contentFormat"`
-	Sensitivity   string   `json:"sensitivity"`
-	Title         *string  `json:"title"`
-	FolderID      *string  `json:"folderId"`
-	TagIDs        []string `json:"tagIds"`
+	Body          string       `json:"body"`
+	ContentFormat string       `json:"contentFormat"`
+	Sensitivity   string       `json:"sensitivity"`
+	Title         *string      `json:"title"`
+	FolderID      *string      `json:"folderId"`
+	TagIDs        []string     `json:"tagIds"`
+	Source        *sourceInput `json:"source"`
 }
 
 type createResult struct {
@@ -106,21 +107,21 @@ func NewService(database *pgxpool.Pool, root string, timezone *time.Location) (*
 
 func (service *Service) RegisterRoutes(router *http.ServeMux, authService *auth.Service) {
 	service.auth = authService
-	router.Handle("GET /api/v1/items", authService.Authenticate(http.HandlerFunc(service.listItems)))
-	router.Handle("POST /api/v1/items", authService.AuthenticateMutation(http.HandlerFunc(service.createJSON)))
-	router.Handle("POST /api/v1/items:multipart", authService.AuthenticateMutation(http.HandlerFunc(service.createMultipart)))
-	router.Handle("GET /api/v1/items/{itemId}", authService.Authenticate(http.HandlerFunc(service.getItem)))
+	router.Handle("GET /api/v1/items", authService.Authorize("records:read")(http.HandlerFunc(service.listItems)))
+	router.Handle("POST /api/v1/items", authService.AuthorizeMutation("records:write")(http.HandlerFunc(service.createJSON)))
+	router.Handle("POST /api/v1/items:multipart", authService.AuthorizeMutation("records:write")(http.HandlerFunc(service.createMultipart)))
+	router.Handle("GET /api/v1/items/{itemId}", authService.Authorize("records:read")(http.HandlerFunc(service.getItem)))
 	router.Handle("PATCH /api/v1/items/{itemId}", authService.AuthenticateMutation(http.HandlerFunc(service.patchItem)))
 	router.Handle("DELETE /api/v1/items/{itemId}", authService.AuthenticateMutation(http.HandlerFunc(service.trashItem)))
 	router.Handle("POST /api/v1/items/{itemId}/restore", authService.AuthenticateMutation(http.HandlerFunc(service.restoreItem)))
 	router.Handle("DELETE /api/v1/items/{itemId}/purge", authService.AuthenticateMutation(http.HandlerFunc(service.purgeItem)))
-	router.Handle("POST /api/v1/items/{itemId}/raw-records", authService.AuthenticateMutation(http.HandlerFunc(service.createSupplementJSON)))
-	router.Handle("POST /api/v1/items/{itemId}/raw-records:multipart", authService.AuthenticateMutation(http.HandlerFunc(service.createSupplementMultipart)))
-	router.Handle("GET /api/v1/items/{itemId}/raw-records/{rawRecordId}", authService.Authenticate(http.HandlerFunc(service.getRawRecord)))
-	router.Handle("GET /api/v1/attachments/{id}/metadata", authService.Authenticate(http.HandlerFunc(service.getAttachmentMetadata)))
-	router.Handle("GET /api/v1/attachments/{id}/content", authService.Authenticate(http.HandlerFunc(service.getAttachmentContent)))
-	router.Handle("GET /api/v1/attachments/{id}/thumbnail", authService.Authenticate(http.HandlerFunc(service.getAttachmentThumbnail)))
-	router.Handle("POST /api/v1/search", authService.AuthenticateMutation(http.HandlerFunc(service.searchItems)))
+	router.Handle("POST /api/v1/items/{itemId}/raw-records", authService.AuthorizeMutation("records:write")(http.HandlerFunc(service.createSupplementJSON)))
+	router.Handle("POST /api/v1/items/{itemId}/raw-records:multipart", authService.AuthorizeMutation("records:write")(http.HandlerFunc(service.createSupplementMultipart)))
+	router.Handle("GET /api/v1/items/{itemId}/raw-records/{rawRecordId}", authService.Authorize("records:read")(http.HandlerFunc(service.getRawRecord)))
+	router.Handle("GET /api/v1/attachments/{id}/metadata", authService.Authorize("records:read", "attachments:read")(http.HandlerFunc(service.getAttachmentMetadata)))
+	router.Handle("GET /api/v1/attachments/{id}/content", authService.Authorize("records:read", "attachments:read")(http.HandlerFunc(service.getAttachmentContent)))
+	router.Handle("GET /api/v1/attachments/{id}/thumbnail", authService.Authorize("records:read", "attachments:read")(http.HandlerFunc(service.getAttachmentThumbnail)))
+	router.Handle("POST /api/v1/search", authService.AuthorizeMutation("records:read")(http.HandlerFunc(service.searchItems)))
 	router.Handle("GET /api/v1/folders/tree", authService.Authenticate(http.HandlerFunc(service.listFolderTree)))
 	router.Handle("POST /api/v1/folders", authService.AuthenticateMutation(http.HandlerFunc(service.createFolder)))
 	router.Handle("PATCH /api/v1/folders/{id}", authService.AuthenticateMutation(http.HandlerFunc(service.renameFolder)))
@@ -132,21 +133,30 @@ func (service *Service) RegisterRoutes(router *http.ServeMux, authService *auth.
 	router.Handle("DELETE /api/v1/tags/{id}", authService.AuthenticateMutation(http.HandlerFunc(service.deleteTag)))
 }
 
-func (service *Service) createItem(ctx context.Context, session auth.Session, input createInput, files []preparedFile, idempotencyKey string) (createResult, error) {
+func (service *Service) createItem(ctx context.Context, actor auth.Actor, input createInput, files []preparedFile, idempotencyKey string) (createResult, error) {
 	if err := validateCreateInput(input, files); err != nil {
 		return createResult{}, err
+	}
+	now := service.now().UTC()
+	source, err := resolveSource(actor, input.Source, now)
+	if err != nil {
+		return createResult{}, errInvalidInput
+	}
+	if source.ExternalID != nil {
+		if result, found, err := service.findSourceResult(ctx, source.Type, *source.ExternalID); err != nil || found {
+			return result, err
+		}
 	}
 	folderID, tagIDs, err := parseCreateOrganization(input)
 	if err != nil {
 		return createResult{}, errInvalidInput
 	}
 	if idempotencyKey != "" {
-		if result, found, lookupErr := service.findIdempotentResult(ctx, session.ID, idempotencyKey); lookupErr != nil || found {
+		if result, found, lookupErr := service.findIdempotentResult(ctx, actor, idempotencyKey); lookupErr != nil || found {
 			return result, lookupErr
 		}
 	}
 
-	now := service.now().UTC()
 	itemID := uuid.New()
 	rawRecordID := uuid.New()
 	titleOrigin := "generated"
@@ -178,9 +188,9 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 		err := tx.QueryRow(ctx, `
 			SELECT created_item_id, created_raw_record_id
 			FROM idempotency_records
-			WHERE actor_type = 'session' AND actor_id = $1 AND route_key = 'create_item'
-			  AND idempotency_key = $2 AND expires_at > $3
-		`, session.ID, idempotencyKey, now).Scan(&existingItemID, &existingRawRecordID)
+			WHERE actor_type = $1 AND actor_id = $2 AND route_key = 'create_item'
+			  AND idempotency_key = $3 AND expires_at > $4
+		`, actor.Type, actor.ID, idempotencyKey, now).Scan(&existingItemID, &existingRawRecordID)
 		if err == nil {
 			if err := tx.Rollback(ctx); err != nil {
 				return createResult{}, err
@@ -219,10 +229,20 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO raw_records (
 			id, item_id, record_role, source_type, content_kind, content_format, body,
-			declared_sensitivity, captured_at, effective_captured_at, source_time_quality,
+			declared_sensitivity, captured_at, effective_captured_at, source_external_id,
+			source_path, source_created_at, source_updated_at, source_time_quality,
 			source_metadata, created_at
-		) VALUES ($1, $2, 'primary', 'web_capture', $3, $4, $5, $6, $7, $7, 'unknown', '{}'::jsonb, $7)
-	`, rawRecordID, itemID, contentKind, input.ContentFormat, input.Body, input.Sensitivity, now); err != nil {
+		) VALUES ($1, $2, 'primary', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $8)
+	`, rawRecordID, itemID, source.Type, contentKind, input.ContentFormat, input.Body,
+		input.Sensitivity, now, source.EffectiveCapturedAt, source.ExternalID, source.Path,
+		source.CreatedAt, source.UpdatedAt, source.TimeQuality, source.MetadataJSON); err != nil {
+		var databaseError *pgconn.PgError
+		if source.ExternalID != nil && errors.As(err, &databaseError) && databaseError.Code == "23505" && databaseError.ConstraintName == "raw_records_source_external_id" {
+			_ = tx.Rollback(ctx)
+			if result, found, lookupErr := service.findSourceResult(ctx, source.Type, *source.ExternalID); lookupErr != nil || found {
+				return result, lookupErr
+			}
+		}
 		return createResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -274,14 +294,14 @@ func (service *Service) createItem(ctx context.Context, session auth.Session, in
 			INSERT INTO idempotency_records (
 				actor_type, actor_id, route_key, idempotency_key, created_item_id,
 				created_raw_record_id, created_at, expires_at
-			) VALUES ('session', $1, 'create_item', $2, $3, $4, $5, $6)
-		`, session.ID, idempotencyKey, itemID, rawRecordID, now, now.Add(24*time.Hour)); err != nil {
+			) VALUES ($1, $2, 'create_item', $3, $4, $5, $6, $7)
+		`, actor.Type, actor.ID, idempotencyKey, itemID, rawRecordID, now, now.Add(24*time.Hour)); err != nil {
 			var databaseError *pgconn.PgError
 			if errors.As(err, &databaseError) && databaseError.Code == "23505" && databaseError.ConstraintName == "idempotency_records_pkey" {
 				if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
 					return createResult{}, rollbackErr
 				}
-				result, found, lookupErr := service.findIdempotentResult(ctx, session.ID, idempotencyKey)
+				result, found, lookupErr := service.findIdempotentResult(ctx, actor, idempotencyKey)
 				if lookupErr != nil {
 					return createResult{}, lookupErr
 				}
@@ -422,14 +442,14 @@ func populateAttachmentLinks(entry *attachmentEntry) {
 	}
 }
 
-func (service *Service) findIdempotentResult(ctx context.Context, sessionID uuid.UUID, key string) (createResult, bool, error) {
+func (service *Service) findIdempotentResult(ctx context.Context, actor auth.Actor, key string) (createResult, bool, error) {
 	var itemID, rawRecordID uuid.UUID
 	err := service.database.QueryRow(ctx, `
 		SELECT created_item_id, created_raw_record_id
 		FROM idempotency_records
-		WHERE actor_type = 'session' AND actor_id = $1 AND route_key = 'create_item'
-		  AND idempotency_key = $2 AND expires_at > $3
-	`, sessionID, key, service.now().UTC()).Scan(&itemID, &rawRecordID)
+		WHERE actor_type = $1 AND actor_id = $2 AND route_key = 'create_item'
+		  AND idempotency_key = $3 AND expires_at > $4
+	`, actor.Type, actor.ID, key, service.now().UTC()).Scan(&itemID, &rawRecordID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return createResult{}, false, nil
 	}

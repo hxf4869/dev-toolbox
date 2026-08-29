@@ -49,8 +49,15 @@ async function logout() {
 
     <RouterLink
       class="rail__item"
-      :class="{ 'rail__item--active': route.name === 'appearance-settings' }"
-      to="/settings/appearance"
+      :class="{
+        'rail__item--active': [
+          'appearance-settings',
+          'provider-settings',
+          'token-settings',
+          'ai-security-settings',
+        ].includes(String(route.name)),
+      }"
+      to="/settings/providers"
       aria-label="设置"
       title="设置"
     >

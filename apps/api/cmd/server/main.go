@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/ai"
 	artifactcontract "github.com/hxf4869/dev-toolbox/apps/api/internal/ai/schema"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/knowledge"
@@ -33,7 +34,8 @@ func main() {
 		logger.Error("artifact_schema_unavailable", "errorType", "filesystem")
 		os.Exit(1)
 	}
-	if _, err := artifactcontract.New(schemaBytes); err != nil {
+	artifactValidator, err := artifactcontract.New(schemaBytes)
+	if err != nil {
 		logger.Error("artifact_schema_invalid", "errorType", "schema")
 		os.Exit(1)
 	}
@@ -58,11 +60,16 @@ func main() {
 		logger.Error("attachment_storage_unavailable", "errorType", "filesystem")
 		os.Exit(1)
 	}
+	aiService := ai.NewService(
+		pool, cfg.MasterKey, artifactValidator, cfg.AIWorkerURL, cfg.InternalServiceToken,
+		cfg.AllowInsecureProviderHTTP,
+	)
 
 	router := http.NewServeMux()
 	operations.RegisterRoutes(router, pool)
 	authService.RegisterRoutes(router)
 	knowledgeService.RegisterRoutes(router, authService)
+	aiService.RegisterRoutes(router, authService)
 
 	handler := httpapi.RequestID(httpapi.Recover(logger, httpapi.RequestLog(logger, router)))
 	server := &http.Server{

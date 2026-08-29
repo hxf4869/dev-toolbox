@@ -45,6 +45,8 @@ services:
       ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
       MIGRATIONS_PATH: /app/migrations
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      ALLOW_INSECURE_PROVIDER_HTTP: ${ALLOW_INSECURE_PROVIDER_HTTP:-false}
+      AI_WORKER_URL: http://ai-worker:3001
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
     secrets:
       - postgres_password
@@ -75,6 +77,7 @@ services:
       WORKER_ADDRESS: 0.0.0.0:3001
       ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      ALLOW_INSECURE_PROVIDER_HTTP: ${ALLOW_INSECURE_PROVIDER_HTTP:-false}
     secrets:
       - internal_service_token
     healthcheck:

@@ -48,7 +48,7 @@
 | M0 | 已完成并验证 | 四服务骨架、共享 Artifact 契约、顺序迁移、安全日志、主题与响应式应用壳已落地 |
 | M1 | 已完成并验证 | 登录/TOTP/恢复码、可信设备与会话、不可变原始记录、附件基础录入及安全详情已通过集成与浏览器验证 |
 | M2 | 已完成并验证 | 字面/模糊检索、固定视图、目录标签、补充原始记录、附件安全下载/缩略图与回收站已通过单元、集成和浏览器验证 |
-| M3 | 未开始 | 外部 Agent、PAT 与 Provider 尚未交付 |
+| M3 | 已完成并验证 | 三协议 Provider 网关、加密密钥、PAT scope/生命周期、外部录入与候选 Artifact 已通过本地 mock、集成和浏览器验证 |
 | M4 | 未开始 | 内置 AI 任务引擎尚未交付 |
 | M5 | 未开始 | 备份恢复、生产发布与全量验收尚未交付 |
 
@@ -221,20 +221,20 @@
 
 ### 7.3 退出条件
 
-- [ ] API Key 创建后不可读取明文，数据库 dump 中是带版本的密文。
-- [ ] 连接测试错误不会在日志、响应或 UI 暴露 Key/完整上游响应。
-- [ ] 三协议用 mock 完成正常、鉴权、限流、超时和畸形响应测试。
-- [ ] Provider 连接测试只接受属于当前 Provider 的内部 `modelId`，API 只调用一次 worker 的单用途内部 RPC，worker 复用真实 adapter 和固定最小预算发出一次上游请求；无 usage 时返回 `null`，API 不直连 Provider，失败不回显上游正文。
-- [ ] 连接测试上游 401/403 映射为 `AI_PROVIDER_CREDENTIALS_INVALID`，网络错误、408、429、5xx 和畸形响应映射为 `AI_PROVIDER_UNAVAILABLE`，两者都不自动重试。
-- [ ] 自定义 Base URL 表示协议根地址，adapter 只规范化末尾 `/` 并拼接固定 endpoint；带/不带末尾 `/`、自定义路径前缀均通过，userinfo/query/fragment 和重定向被拒绝，HTTP 仅按明确开发/内网规则开放。
-- [ ] Provider 只对网络中断/超时、408、429、500/502/503/504 有界重试；401/403、其他 4xx/5xx、Schema 错误与能力不匹配零重试。
-- [ ] PAT 明文只展示一次，撤销后立即无效；每个外部 Agent 端点按契约 scope 矩阵验证缺失、越权和允许路径，返回稳定错误。
-- [ ] `sensitive:read` 只作为读取 scope 的附加门槛，单独持有时不赋予记录或附件读取能力。
-- [ ] 未授予 `sensitive:read` 的 PAT 只能看到遮挡元数据，无法读取敏感原文/附件或提交敏感 artifact。
-- [ ] `records:write` 只能新建条目或向已有条目追加新的 supplement，不能更新已有原文或给旧 raw record 追加附件。
-- [ ] 相同 sourceType + namespaced externalId 重跑迁移时返回已有记录，不重复创建也不覆盖。
-- [ ] 外部 artifact 在 Schema 或 source reference 错误时不进入候选列表。
-- [ ] 外部 Agent 不经过 AI worker 也能完成一次性迁移所需的新增原文与提交派生结果。
+- [x] API Key 创建后不可读取明文，数据库 dump 中是带版本的密文。
+- [x] 连接测试错误不会在日志、响应或 UI 暴露 Key/完整上游响应。
+- [x] 三协议用 mock 完成正常、鉴权、限流、超时和畸形响应测试。
+- [x] Provider 连接测试只接受属于当前 Provider 的内部 `modelId`，API 只调用一次 worker 的单用途内部 RPC，worker 复用真实 adapter 和固定最小预算发出一次上游请求；无 usage 时返回 `null`，API 不直连 Provider，失败不回显上游正文。
+- [x] 连接测试上游 401/403 映射为 `AI_PROVIDER_CREDENTIALS_INVALID`，网络错误、408、429、5xx 和畸形响应映射为 `AI_PROVIDER_UNAVAILABLE`，两者都不自动重试。
+- [x] 自定义 Base URL 表示协议根地址，adapter 只规范化末尾 `/` 并拼接固定 endpoint；带/不带末尾 `/`、自定义路径前缀均通过，userinfo/query/fragment 和重定向被拒绝，HTTP 仅按明确开发/内网规则开放。
+- [x] Provider 只对网络中断/超时、408、429、500/502/503/504 有界重试；401/403、其他 4xx/5xx、Schema 错误与能力不匹配零重试。
+- [x] PAT 明文只展示一次，撤销后立即无效；每个外部 Agent 端点按契约 scope 矩阵验证缺失、越权和允许路径，返回稳定错误。
+- [x] `sensitive:read` 只作为读取 scope 的附加门槛，单独持有时不赋予记录或附件读取能力。
+- [x] 未授予 `sensitive:read` 的 PAT 只能看到遮挡元数据，无法读取敏感原文/附件或提交敏感 artifact。
+- [x] `records:write` 只能新建条目或向已有条目追加新的 supplement，不能更新已有原文或给旧 raw record 追加附件。
+- [x] 相同 sourceType + namespaced externalId 重跑迁移时返回已有记录，不重复创建也不覆盖。
+- [x] 外部 artifact 在 Schema 或 source reference 错误时不进入候选列表。
+- [x] 外部 Agent 不经过 AI worker 也能完成一次性迁移所需的新增原文与提交派生结果。
 
 ## 8. M4：内置 AI 任务引擎
 

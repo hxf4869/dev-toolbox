@@ -64,6 +64,9 @@ func (service *Service) RegisterRoutes(router *http.ServeMux) {
 	router.Handle("DELETE /api/v1/auth/trusted-devices/{id}", service.AuthenticateMutation(http.HandlerFunc(service.revokeTrustedDevice)))
 	router.Handle("GET /api/v1/auth/sessions", service.Authenticate(http.HandlerFunc(service.listSessions)))
 	router.Handle("DELETE /api/v1/auth/sessions/{id}", service.AuthenticateMutation(http.HandlerFunc(service.revokeSession)))
+	router.Handle("GET /api/v1/tokens", service.Authenticate(http.HandlerFunc(service.listTokens)))
+	router.Handle("POST /api/v1/tokens", service.AuthenticateMutation(http.HandlerFunc(service.createToken)))
+	router.Handle("DELETE /api/v1/tokens/{id}", service.AuthenticateMutation(http.HandlerFunc(service.revokeToken)))
 }
 
 type issuedSession struct {
