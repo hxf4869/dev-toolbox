@@ -12,7 +12,7 @@ write_env() {
   edge_mode=$2
   {
     printf '%s\n' 'APP_DOMAIN=toolbox.example.net'
-    printf '%s\n' 'APP_VERSION=v1.0-baseline'
+    printf '%s\n' 'APP_VERSION=v1.0.0'
     printf '%s\n' 'APP_TIMEZONE=Asia/Shanghai'
     printf '%s\n' 'POSTGRES_DB=dev_toolbox'
     printf '%s\n' 'POSTGRES_USER=dev_toolbox'

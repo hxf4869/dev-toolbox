@@ -82,7 +82,7 @@ async function mountWithRouter(component: object, path: string) {
 
 function statusFixture(): OperationsStatus {
   return {
-    checkedAt: '2026-08-30T01:00:00Z', version: 'v1.0-baseline', schemaVersion: 6,
+    checkedAt: '2026-08-30T01:00:00Z', version: 'v1.0.0', schemaVersion: 6,
     overall: 'degraded', coreAvailable: true,
     components: [
       { id: 'api', label: 'API', status: 'healthy', summary: '进程正在响应' },
@@ -96,7 +96,7 @@ function statusFixture(): OperationsStatus {
     backup: { state: 'failed', lastAttemptAt: '2026-08-30T00:30:00Z', lastSuccessAt: null, snapshotId: '', targetLabel: '测试仓库', resticCheckAt: null, errorCode: 'BACKUP_FAILED' },
     restore: { state: 'not_run', verifiedAt: null, snapshotId: '', referencedAttachments: 0, verifiedAttachments: 0, orphanAttachments: 0, errorCode: '' },
     release: {
-      candidateVersion: 'v1.0-baseline', generatedAt: '2026-08-30T00:40:00Z',
+      candidateVersion: 'v1.0.0', generatedAt: '2026-08-30T00:40:00Z',
       checks: [
         { id: 'data_integrity', label: '原始数据与附件', status: 'passed', summary: '完整性检查通过', checkedAt: '2026-08-30T00:40:00Z' },
         { id: 'browser_accessibility', label: '浏览器与可访问性', status: 'not_run', summary: '等待浏览器矩阵', checkedAt: null },

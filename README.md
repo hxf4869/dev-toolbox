@@ -2,7 +2,7 @@
 
 开发百宝箱是一个面向个人开发与运维工作的自托管工具集合。它从“快速保存、快速找到、保留原始事实、让 AI 生成可重建的整理结果”起步，后续可以继续容纳彼此独立的小工具，但不会在一期建设动态插件平台。
 
-一期 `v1.0-baseline` 已确认，可直接约束设计与开发。当前 **M0–M5 已完成并验证，生产候选已部署到正式域名，八项发布门禁全部通过**。目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及京东云 OSS 异地加密备份与回读均已有真实证据，详见 [一期验收记录](./docs/08-V1-ACCEPTANCE-REPORT.md)。Edge、Firefox 不属于一期发布验收范围，不安装、不宣称已验证兼容。
+一期 `v1.0.0` 已正式发布。当前 **M0–M5 已完成并验证，`v1.0-baseline` 生产候选已在八项发布门禁全部通过后原样晋级为正式版**。目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及京东云 OSS 异地加密备份与回读均已有真实证据，详见 [一期验收记录](./docs/08-V1-ACCEPTANCE-REPORT.md)。Edge、Firefox 不属于一期发布验收范围，不安装、不宣称已验证兼容。
 
 ## 一期核心闭环
 
@@ -145,7 +145,7 @@ REHEARSAL_REPORT_FILE=/absolute/path/to/restore-report.json \
 | [docs/references/STITCH-CRITIQUE.md](./docs/references/STITCH-CRITIQUE.md) | 原始 Stitch 母版的可移植评审记录 |
 | [docs/06-DELIVERY-AND-ACCEPTANCE.md](./docs/06-DELIVERY-AND-ACCEPTANCE.md) | 里程碑、完成定义、测试策略和验收用例 |
 | [docs/07-DESIGN-HANDOFF.md](./docs/07-DESIGN-HANDOFF.md) | Stitch 项目入口、01–33 规范画面 ID、里程碑映射和开发使用规则 |
-| [docs/08-V1-ACCEPTANCE-REPORT.md](./docs/08-V1-ACCEPTANCE-REPORT.md) | 当前候选版的门禁证据、实测结果与未解除阻塞 |
+| [docs/08-V1-ACCEPTANCE-REPORT.md](./docs/08-V1-ACCEPTANCE-REPORT.md) | `v1.0.0` 的门禁证据、实测结果与正式发布结论 |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | 明确推迟到一期之后的能力，防止开发越界 |
 | [AGENTS.md](./AGENTS.md) | 所有编码 Agent 必须遵守的仓库级规则 |
 

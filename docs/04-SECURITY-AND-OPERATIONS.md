@@ -1,6 +1,6 @@
 # 一期安全与运维基线
 
-状态：**已确认，受 `00-V1-BASELINE.md` 约束**
+状态：**已完成并关闭，作为 `v1.0.0` 的冻结安全与运维基线**
 
 适用范围：公网自托管、单所有者、Docker Compose 部署
 
@@ -399,7 +399,7 @@ dev-toolbox-deploy/
 
 以下全部通过才允许公网使用：
 
-当前候选版证据见 `08-V1-ACCEPTANCE-REPORT.md`。正式域名与公网边缘、目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及异地加密备份与回读均已通过。
+`v1.0.0` 正式发布证据见 `08-V1-ACCEPTANCE-REPORT.md`。正式域名与公网边缘、目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及异地加密备份与回读均已通过。
 
 - [x] 公网边缘只监听 TCP 80/443；API、worker、PostgreSQL 与 gateway 无宿主机映射端口。
 - [x] HTTP 自动跳转 HTTPS，正式证书与既有续期路径已验证。

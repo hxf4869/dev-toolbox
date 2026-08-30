@@ -144,7 +144,7 @@ func TestM5OperationsMigrationAndIntegrity(t *testing.T) {
 	_ = readResponse(t, providerTest)
 
 	status := readM5OperationsStatus(t, client, server.URL)
-	if status.Version != "v1.0-baseline" || status.SchemaVersion != operations.RequiredSchemaVersion || !status.CoreAvailable ||
+	if status.Version != "v1.0.0" || status.SchemaVersion != operations.RequiredSchemaVersion || !status.CoreAvailable ||
 		status.Overall != "healthy" || !status.Storage.Writable || status.Backup.State != "succeeded" ||
 		status.Backup.SnapshotID != "m5-snapshot" || status.Backup.TargetLabel != "异地测试仓库" || len(status.Release.Checks) != 8 {
 		t.Fatalf("unexpected healthy operations status: %+v", status)
@@ -399,7 +399,7 @@ func newAuthenticatedM5Server(
 	authService.RegisterRoutes(router)
 	knowledgeService.RegisterRoutes(router, authService)
 	aiService.RegisterRoutes(router, authService)
-	operations.NewStatusService(database, attachmentRoot, statusRoot, workerURL, "v1.0-baseline").RegisterRoutes(router, authService)
+	operations.NewStatusService(database, attachmentRoot, statusRoot, workerURL, "v1.0.0").RegisterRoutes(router, authService)
 	server := httptest.NewTLSServer(router)
 	jar, err := cookiejar.New(nil)
 	if err != nil {
