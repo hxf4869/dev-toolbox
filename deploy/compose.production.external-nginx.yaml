@@ -1,0 +1,15 @@
+services:
+  gateway:
+    environment:
+      APP_DOMAIN: http://${APP_DOMAIN:?请配置正式域名}
+      CADDY_TRUSTED_PROXY_CIDRS: ${EDGE_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+    ports: !override []
+    networks:
+      frontend: {}
+      edge:
+        aliases: [dev-toolbox-gateway]
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK_NAME:?外置 Nginx 模式必须配置 EDGE_NETWORK_NAME}

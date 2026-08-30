@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/knowledge"
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/operations"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/config"
 )
 
@@ -51,8 +53,38 @@ func main() {
 	switch os.Args[2] {
 	case "rebuild-search":
 		runRebuildSearch(ctx, database, os.Args[3:])
+	case "check-integrity":
+		runCheckIntegrity(ctx, database, cfg.AttachmentRoot, os.Args[3:])
 	default:
 		usage()
+		os.Exit(2)
+	}
+}
+
+func runCheckIntegrity(ctx context.Context, database *pgxpool.Pool, attachmentRoot string, arguments []string) {
+	flags := flag.NewFlagSet("check-integrity", flag.ExitOnError)
+	jsonOutput := flags.Bool("json", false, "输出机器可读 JSON")
+	_ = flags.Parse(arguments)
+	if flags.NArg() != 0 {
+		usage()
+		os.Exit(2)
+	}
+	report, err := operations.CheckIntegrity(ctx, database, attachmentRoot, time.Now())
+	if err != nil {
+		fail("附件完整性检查失败")
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetEscapeHTML(false)
+		if encoder.Encode(report) != nil {
+			fail("附件完整性报告输出失败")
+		}
+	} else {
+		fmt.Printf("附件完整性：%s；引用 %d，验证 %d，缺失 %d，大小不一致 %d，摘要不一致 %d，孤儿 %d\n",
+			report.State, report.ReferencedAttachments, report.VerifiedAttachments, report.MissingAttachments,
+			report.SizeMismatches, report.ChecksumMismatches, len(report.OrphanAttachments))
+	}
+	if report.State != "succeeded" {
 		os.Exit(2)
 	}
 }
@@ -140,7 +172,7 @@ func trimOneLineEnding(value string) string {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法: dev-toolbox admin init-owner|reset-auth [--password-file PATH]")
-	fmt.Fprintln(os.Stderr, "      dev-toolbox maintenance rebuild-search")
+	fmt.Fprintln(os.Stderr, "      dev-toolbox maintenance rebuild-search|check-integrity [--json]")
 }
 
 func fail(message string) {

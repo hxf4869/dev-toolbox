@@ -53,7 +53,7 @@
 | AI 模型 | 用户配置外部 API | 本地 LLM、本地 OCR、本地 embedding 模型 |
 | AI 协议 | OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、自定义兼容地址 | 任意脚本式 Provider 插件 |
 | 原始数据 | 明文存储、不可被普通更新或 AI 覆盖 | E2EE、数据库字段级全文加密 |
-| 网络 | Caddy 暴露 80/443，其余服务仅内部网络 | 直接暴露 API、worker、PostgreSQL |
+| 网络 | 单一 TLS 边缘暴露 80/443；默认 Caddy，已有受控 Nginx 时 gateway 无宿主机端口；其余服务仅内部网络 | 直接暴露 API、worker、PostgreSQL |
 | 身份验证 | 密码 + TOTP、恢复码、90 天可信设备 | 邮箱找回、短信、Passkey、SSO |
 | 迁移 | 后续由开发 Agent 执行一次性 Notion 迁移 | 一期产品内 Notion/企业微信导入器 |
 | 扩展方式 | 编译期模块 | 动态插件市场、用户上传插件 |
@@ -521,11 +521,11 @@ Web 快速录入必须要求用户在 `sensitive` 与 `normal` 之间选择；`u
 
 ### NFR-04 兼容性
 
-- 首要支持当前 Chrome、Edge 和 Safari 的桌面版本。
-- Firefox 作为兼容目标，但不为其实现专属功能。
+- 一期首要支持当前 Chrome 和 Safari 的桌面版本。
+- Edge 和 Firefox 不进入一期发布验收矩阵，也不承诺经过验证的兼容性；实现不得主动按 User-Agent 阻断它们，后续是否纳入支持范围由实际使用需求决定。
 - 手机浏览器保证登录、搜索和阅读基本可用，不承诺三栏或高效录入。
 - 浏览器扩展、PWA 离线和桌面壳不作为一期验收。
-- 搜索和快速记录必须始终有可见入口；快速记录快捷键在 M1、搜索快捷键在 M2 对当前 Chrome、Edge 和 Safari 完成浏览器 smoke 后分别固定。在固定前契约状态为“待实测”，不得把会触发浏览器常用行为的组合设为发布硬要求。
+- 搜索和快速记录必须始终有可见入口；快速记录快捷键在 M1、搜索快捷键在 M2 对当前 Chrome 和 Safari 完成浏览器 smoke 后分别固定。在固定前契约状态为“待实测”，不得把会触发浏览器常用行为的组合设为发布硬要求。
 
 ### NFR-05 可观测性
 

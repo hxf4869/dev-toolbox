@@ -1,0 +1,14 @@
+[dev-toolbox-auth]
+enabled = true
+filter = dev-toolbox-auth
+logpath = __AUTH_LOG_PATH__
+backend = auto
+port = http,https
+maxretry = 12
+findtime = 10m
+bantime = 1h
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 24h
+banaction = nftables-multiport
+ignoreip = 127.0.0.1/8 ::1

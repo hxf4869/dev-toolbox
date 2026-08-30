@@ -13,9 +13,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
+	"github.com/jackc/pgx/v5"
 )
 
-const fuzzySimilarityThreshold = 0.28
+const fuzzySimilarityThreshold = 0.30
 
 type searchRequest struct {
 	Query        string   `json:"q"`
@@ -213,7 +214,6 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	normalizedQuery := normalizeSearch(input.Query)
 	queryParameter := arguments.add(normalizedQuery)
 	literalParameter := arguments.add("%" + escapeLike(normalizedQuery) + "%")
-	thresholdParameter := arguments.add(float32(fuzzySimilarityThreshold))
 
 	filters := []string{"i.deleted_at IS NULL", "f.active = true"}
 	if input.FolderID != nil {
@@ -242,7 +242,10 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 
 	literal := "f.normalized_content LIKE " + literalParameter + " ESCAPE '\\'"
 	token := "f.search_vector @@ plainto_tsquery('simple'::regconfig, " + queryParameter + ")"
-	fuzzy := "similarity(f.normalized_content, " + queryParameter + ") >= " + thresholdParameter
+	// The semantically neutral concatenation matches the dedicated partial GiST
+	// expression index. GIN remains available for literal LIKE, while fuzzy
+	// matching keeps the single fixed similarity threshold and complete result set.
+	fuzzy := "(f.normalized_content || '') % " + queryParameter
 	matchClass := `CASE
 		WHEN f.source_kind = 'title' AND f.normalized_content = ` + queryParameter + ` THEN 5
 		WHEN f.source_kind IN ('raw_text', 'code', 'filename') AND (` + literal + ` OR ` + token + `) THEN 4
@@ -252,36 +255,39 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	similarityScore := `CASE WHEN (` + literal + ` OR ` + token + `) THEN 1.0::real
 		ELSE similarity(f.normalized_content, ` + queryParameter + `) END`
 
-	cte := `WITH item_times AS (
-		SELECT item_id, MAX(effective_captured_at) AS effective_at
-		FROM raw_records GROUP BY item_id
-	), current_raw AS (
-		SELECT item_id, to_jsonb(array_agg(id::text ORDER BY id)) AS ids
-		FROM raw_records GROUP BY item_id
-	), current_images AS (
-		SELECT record.item_id, to_jsonb(array_agg(attachment.id::text ORDER BY attachment.id)) AS ids
-		FROM attachments attachment JOIN raw_records record ON record.id = attachment.raw_record_id
-		WHERE attachment.status = 'ready' AND attachment.kind = 'image'
-		GROUP BY record.item_id
-	), scored AS (
+	cte := `WITH scored AS (
 		SELECT i.id AS item_id, i.title, i.sensitivity, item_times.effective_at,
 		       f.id AS fragment_id, f.source_kind, f.content,
 		       CASE WHEN f.artifact_id IS NULL THEN NULL
 		         WHEN artifact.artifact_type = 'image_analysis' THEN NOT (
-		           COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) @> COALESCE(current_images.ids, '[]'::jsonb)
-		           AND COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) <@ COALESCE(current_images.ids, '[]'::jsonb)
+		           COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) @> COALESCE((
+		             SELECT to_jsonb(array_agg(candidate.id::text ORDER BY candidate.id))
+		             FROM attachments candidate JOIN raw_records source ON source.id = candidate.raw_record_id
+		             WHERE source.item_id = i.id AND candidate.status = 'ready' AND candidate.kind = 'image'
+		           ), '[]'::jsonb)
+		           AND COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) <@ COALESCE((
+		             SELECT to_jsonb(array_agg(candidate.id::text ORDER BY candidate.id))
+		             FROM attachments candidate JOIN raw_records source ON source.id = candidate.raw_record_id
+		             WHERE source.item_id = i.id AND candidate.status = 'ready' AND candidate.kind = 'image'
+		           ), '[]'::jsonb)
 		         )
 		         ELSE NOT (
-		           COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) @> current_raw.ids
-		           AND COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) <@ current_raw.ids
+		           COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) @> (
+		             SELECT to_jsonb(array_agg(source.id::text ORDER BY source.id)) FROM raw_records source WHERE source.item_id = i.id
+		           )
+		           AND COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) <@ (
+		             SELECT to_jsonb(array_agg(source.id::text ORDER BY source.id)) FROM raw_records source WHERE source.item_id = i.id
+		           )
 		         )
 		       END AS artifact_is_stale,
 		       ` + matchClass + ` AS match_class, ` + similarityScore + ` AS similarity
 		FROM search_fragments f
 		JOIN knowledge_items i ON i.id = f.item_id
-		JOIN item_times ON item_times.item_id = i.id
-		JOIN current_raw ON current_raw.item_id = i.id
-		LEFT JOIN current_images ON current_images.item_id = i.id
+		JOIN LATERAL (
+			SELECT effective_captured_at AS effective_at
+			FROM raw_records WHERE item_id = i.id
+			ORDER BY effective_captured_at DESC, id DESC LIMIT 1
+		) item_times ON true
 		LEFT JOIN ai_artifacts artifact ON artifact.id = f.artifact_id
 		LEFT JOIN ai_task_runs artifact_task ON artifact_task.id = artifact.task_run_id
 		WHERE ` + strings.Join(filters, " AND ") + `
@@ -295,11 +301,20 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 		SELECT * FROM ranked WHERE item_rank = 1
 	)`
 
-	var total int64
-	if input.Cursor == nil {
-		if err := service.database.QueryRow(request.Context(), cte+` SELECT COUNT(*) FROM best`, arguments.values...).Scan(&total); err != nil {
-			return nil, 0, nil, err
-		}
+	tx, err := service.database.BeginTx(request.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer tx.Rollback(request.Context())
+	if _, err := tx.Exec(request.Context(), fmt.Sprintf(`SET LOCAL pg_trgm.similarity_threshold = '%.2f'`, fuzzySimilarityThreshold)); err != nil {
+		return nil, 0, nil, err
+	}
+	// This query's exact total and per-item ranking legitimately cross PostgreSQL's
+	// default JIT cost on the fixed acceptance fixture. Compiling that one-off
+	// expression tree costs more than it saves, so keep JIT disabled only for this
+	// read-only transaction instead of changing the database-wide setting.
+	if _, err := tx.Exec(request.Context(), `SET LOCAL jit = off`); err != nil {
+		return nil, 0, nil, err
 	}
 
 	cursorFilter := ""
@@ -317,21 +332,26 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 		}
 	}
 	limitParameter := arguments.add(input.Limit + 1)
-	rows, err := service.database.Query(request.Context(), cte+`
+	totalExpression := "0::bigint"
+	if input.Cursor == nil {
+		totalExpression = "COUNT(*) OVER()"
+	}
+	rows, err := tx.Query(request.Context(), cte+`
 		SELECT item_id, title, sensitivity, effective_at, fragment_id, source_kind,
-		       content, artifact_is_stale, match_class, similarity
+		       content, artifact_is_stale, match_class, similarity, `+totalExpression+` AS total_count
 		FROM best`+cursorFilter+` ORDER BY `+order+` LIMIT `+limitParameter, arguments.values...)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	defer rows.Close()
 	results := make([]searchResult, 0, input.Limit+1)
+	var total int64
 	for rows.Next() {
 		var result searchResult
 		var content string
 		if err := rows.Scan(&result.ItemID, &result.Title, &result.Sensitivity, &result.EffectiveCapturedAt,
 			&result.MatchedFragmentID, &result.MatchedSource, &content, &result.ArtifactIsStale,
-			&result.matchClass, &result.similarity); err != nil {
+			&result.matchClass, &result.similarity, &total); err != nil {
 			return nil, 0, nil, err
 		}
 		if result.Sensitivity == "normal" {
@@ -344,6 +364,7 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	if err := rows.Err(); err != nil {
 		return nil, 0, nil, err
 	}
+	rows.Close()
 	var nextCursor *string
 	if len(results) > input.Limit {
 		last := results[input.Limit-1]
@@ -356,6 +377,9 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 		}
 		nextCursor = &encoded
 		results = results[:input.Limit]
+	}
+	if err := tx.Commit(request.Context()); err != nil {
+		return nil, 0, nil, err
 	}
 	return results, total, nextCursor, nil
 }

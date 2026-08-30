@@ -70,6 +70,9 @@ func main() {
 	authService.RegisterRoutes(router)
 	knowledgeService.RegisterRoutes(router, authService)
 	aiService.RegisterRoutes(router, authService)
+	operations.NewStatusService(
+		pool, cfg.AttachmentRoot, cfg.OperationsStatusRoot, cfg.AIWorkerURL, cfg.AppVersion,
+	).RegisterRoutes(router, authService)
 	go aiService.RunScheduler(ctx, logger)
 
 	handler := httpapi.RequestID(httpapi.Recover(logger, httpapi.RequestLog(logger, router)))

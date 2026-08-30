@@ -28,7 +28,7 @@
 
 ### 2.1 必须使用准确术语
 
-- 浏览器到 Caddy 使用 HTTPS/TLS，防止传输链路被窃听或篡改。
+- 浏览器到唯一公网边缘（gateway/Caddy，或主机已存在的受控 Nginx）使用 HTTPS/TLS，防止传输链路被窃听或篡改。
 - Caddy 到 API 位于同一 Docker 内部网络，一期允许使用 HTTP；该端口不得映射到宿主机公网。
 - 原始正文和附件按用户决定以明文保存在受控数据库/数据卷中，使其能被 PostgreSQL 搜索，也便于脱离应用恢复。
 - 因为服务端能够读取原文，所以产品文案、README 和设置页都不得称为“端到端加密”。
@@ -120,6 +120,8 @@ Cookie 约束参考 [OWASP Session Management Cheat Sheet](https://cheatsheetser
 - CSRF Token 由会话引导接口返回，前端通过自定义 Header 发送；PAT Bearer 请求不使用 Cookie，也不要求 CSRF Token。
 - 登录、TOTP 和恢复码接口使用 API 进程内的有界限流：按来源 IP 与账号标识分别限制，连续失败采用短暂递增等待。
 - 一期单 API 实例下不引入 Redis。进程重启会清空短期限流状态，这是已接受的简化；安全事件仍写数据库。
+- 外置 Nginx 对 `POST /api/v1/auth/login` 使用独立的每 IP 漏桶：`6r/m`、短突发 5 次，超额统一返回 429。该层在 Argon2id 计算前拒绝洪泛请求，并只使用被 Nginx 重写后的连接来源 IP。
+- 主机已有 Fail2ban 时加载仓库的 `dev-toolbox-auth` filter/jail：同一 IP 在 10 分钟内累计 12 次登录 401/429 后临时封禁 1 小时；重复触发按 2 倍递增，最长 24 小时。不得设置永久 IP 封禁，避免共享出口、移动网络和动态 IP 造成不可恢复的误伤。
 - 对外统一返回“凭据无效或已过期”等稳定错误，不区分用户名、密码、TOTP、恢复码哪一项错误。
 - 日志不得记录用户输入的账号密码、验证码、恢复码或完整 IP。数据库中的会话与安全事件可以保存按可信代理规则解析的精确 IP，默认最多保留 90 天，供所有者排查登录；IP 不作为设备身份或授权条件。
 
@@ -127,8 +129,8 @@ Cookie 约束参考 [OWASP Session Management Cheat Sheet](https://cheatsheetser
 
 ### 4.1 浏览器 API
 
-- 仅 Caddy 的 80/443 端口对公网开放；HTTP 只用于跳转 HTTPS 和证书签发。
-- Caddy 根据正式域名自动申请和续期证书；不手工固定密码套件，除非出现明确兼容或安全要求。官方行为见 [Caddy Automatic HTTPS](https://caddyserver.com/docs/automatic-https)。
+- 仅一个 TLS 边缘的 TCP 80/443 对公网开放；HTTP 只用于跳转 HTTPS 和证书签发。Caddy 直连模式可另用 UDP 443 提供 HTTP/3，外置 Nginx 模式不要求 UDP 443。
+- Caddy 直连模式根据正式域名自动申请和续期证书；外置 Nginx 模式必须复用主机已有、已验证的证书与续期流程。官方行为见 [Caddy Automatic HTTPS](https://caddyserver.com/docs/automatic-https)。
 - API 对写请求设置 JSON 请求体上限；附件使用专门的流式上传上限。
 - CORS 默认不开放跨域来源。一期 Web 与 API 同源部署。
 - 返回统一安全响应头：HSTS、`X-Content-Type-Options: nosniff`、限制性的 CSP 和 `Referrer-Policy: no-referrer`。
@@ -138,9 +140,10 @@ Cookie 约束参考 [OWASP Session Management Cheat Sheet](https://cheatsheetser
 
 可信代理规则：
 
-- Caddy 覆盖客户端自带的 `X-Forwarded-For`、`X-Real-IP` 和 `Forwarded`，不能把伪造链原样透传。
+- Caddy 直连时覆盖客户端自带的 `X-Forwarded-For`、`X-Real-IP` 和 `Forwarded`。外置 Nginx 必须先把 `X-Forwarded-For`/`X-Real-IP` 重写为连接的真实来源地址，Caddy 只信任配置的私有代理网段并按严格的右到左规则解析，不能把客户端伪造链原样透传。
 - API 只有在直接连接来自 Compose 内 gateway 的受信任地址时才读取转发头；其他来源使用连接的 `RemoteAddr`。
 - 登录限流、会话记录和 security event 共用同一个客户端 IP 解析函数；不做 IP 白名单、地理定位、设备指纹或复杂代理链分析。
+- IP 限速和临时封禁只是一层纵深防御，不能替代账号维度限流、强随机密码和必需的 TOTP；分布式来源可能绕过单 IP 阈值，因此应用账号维度等待始终保留。
 
 初始 CSP：
 
@@ -243,12 +246,14 @@ form-action 'self'
 
 | 服务 | 公网端口 | 数据卷 | 说明 |
 |---|---:|---|---|
-| `gateway` | `80`, `443` | Caddy 状态 | TLS、静态 Web、反向代理 |
+| `gateway` | 默认 `80`, `443`；外置 Nginx 模式无映射 | Caddy 状态 | TLS 或受控边缘后的静态 Web、反向代理 |
 | `api` | 无 | 附件卷 | Go API、附件读写与任务调度 |
 | `ai-worker` | 无 | 无原始附件卷 | Node/TS AI 任务执行 |
 | `postgres` | 无 | PostgreSQL 数据卷 | 唯一业务数据库和任务状态源 |
 
 不增加 Redis、消息队列、MinIO、搜索服务、定时器服务或备份常驻容器。定期整理由 API 的单实例调度器按数据库唯一 schedule key 写任务表，每次最多 20 条；备份由宿主机计划任务调用受版本控制的脚本。
+
+主机已有 Nginx 时不把它计为本应用新增的第五个服务。`compose.production.external-nginx.yaml` 会移除 gateway 的全部宿主机端口，只把它以固定别名加入 Nginx 已在使用的外部 Docker 网络；Nginx 仍是宿主机唯一的 80/443 监听者。部署检查必须同时验证 Compose 合并结果与外部网络存在。
 
 ### 7.2 目录映射
 
@@ -308,6 +313,10 @@ dev-toolbox-deploy/
 ### 8.3 备份位置与保留
 
 - restic 仓库必须位于主机故障不会同时丢失的位置，例如另一台家用设备、对象存储或另一服务器。
+- 对象存储使用 restic 原生 S3 后端，不在生产主机增加 FUSE 挂载或常驻同步服务；Endpoint 必须为 HTTPS，Bucket 保持私有，并使用 `Bucket.Endpoint` 的 DNS-style 请求。`RESTIC_REPOSITORY` 仍按 restic 约定写为 `s3:https://Endpoint/Bucket/prefix`；浏览器不直连，因此不配置 CORS。
+- S3 凭据使用专用最小权限身份，并单独保存在 `0600` Secret 文件中；文件只允许 `AWS_ACCESS_KEY_ID` 与 `AWS_SECRET_ACCESS_KEY`，不得进入 Git、备份内容或命令参数。
+- 有免费容量上限时配置十进制字节上限和安全余量。备份脚本在停服前、实际上传前及上传后检查 restic `raw-data`，预计超过门禁时失败并恢复服务，不自动删除已有 snapshot。Bucket/prefix 必须专用于该仓库且关闭会保留旧对象的版本控制，否则脚本无法对账号总计费量作硬保证。
+- 生产机复用宿主机既有 cron，在 Asia/Shanghai 每天 03:17 调用 `deploy/scripts/run-scheduled-backup.sh`。包装脚本使用 `/run/lock/dev-toolbox-backup.lock` 拒绝重叠执行，并把输出写入系统日志；它不引入新的常驻服务。
 - restic 密码不得只保存在被备份主机；至少一份放在离线密码管理器或纸质恢复材料中。
 - 默认保留策略：最近 7 个日备、4 个周备、6 个月备。
 - 清理先运行 `forget --dry-run` 验证，再按固定脚本执行 `forget --prune`；每月运行 `restic check`。
@@ -337,7 +346,7 @@ dev-toolbox-deploy/
 4. 先启动 PostgreSQL，创建空库并用 `pg_restore` 恢复；恢复工具版本不得早于 dump 的服务端主版本。
 5. 运行只读迁移预检，确认当前应用镜像兼容，再执行必要迁移。
 6. 启动 API；逐一校验数据库引用的每个原始附件是否存在、实际大小及 `content_sha256`，并报告孤儿文件，不自动删除。任一被引用附件缺失、大小或摘要不匹配都会使本次恢复验收失败并阻止进入下一步；保留现场，由所有者改用已验证 snapshot 重新恢复或明确排查修正。
-7. 启动 worker 和 Caddy，验证登录、TOTP、搜索、随机原文、图片下载和一次无费用 mock AI 任务。
+7. 启动 worker 和 gateway；若使用外置 Nginx，验证其配置后再切换反向代理。验证登录、TOTP、搜索、随机原文、图片下载和一次无费用 mock AI 任务。
 8. 记录恢复日期、snapshot ID、耗时和发现的问题；恢复演练不得使用唯一一份生产备份作为可写仓库。
 
 上线门禁要求至少完成一次空机恢复。之后每季度抽样恢复一次，或在数据库大迁移、备份脚本变更后立即重做。
@@ -390,22 +399,26 @@ dev-toolbox-deploy/
 
 以下全部通过才允许公网使用：
 
-- [ ] 公网扫描只看到 80/443；API、worker、PostgreSQL 无宿主机映射端口。
-- [ ] HTTP 自动跳转 HTTPS，证书自动续期路径已验证。
-- [ ] 数据库中没有明文登录密码、恢复码、PAT、会话、TOTP 密钥或 Provider Key。
-- [ ] 浏览器存储中没有会话或 PAT；Cookie 属性符合本文。
-- [ ] 密码 + TOTP、恢复码、可信设备 90 天、单设备撤销和全撤销均有集成测试。
-- [ ] CSRF、Origin、未授权 PAT scope 和撤销后的 Token 均被拒绝。
-- [ ] 敏感搜索词不出现在 URL、浏览器持久化存储、Caddy/API 日志、Tracing 或错误上报中；相关响应带 `Cache-Control: no-store`。
-- [ ] 客户端伪造转发头不能改变 API 认定的来源 IP；普通日志不记录完整 IP。
-- [ ] 20 MiB 边界、路径穿越文件名、SVG/HTML 下载和中断上传均有测试。
-- [ ] 上传记录客户端/服务端 MIME 与 SHA-256，预览只依据服务端 MIME；恢复后逐一校验所有数据库引用附件，摘要检查能发现字节不一致。
-- [ ] 原始 Markdown、AI Markdown 和文件名不能产生可执行脚本或未净化 HTML。
-- [ ] `block` 不发请求，`redact` 只发占位副本，`allow` 有明确确认；日志无正文。
-- [ ] AI worker 没有 Shell、SSH、SQL、任意 HTTP 或任意文件系统工具。
-- [ ] Docker Secret、`.env` 和数据目录权限经过部署检查，仓库不含真实凭据。
-- [ ] 定时备份失败会告警且恢复服务；保留策略先 dry-run。
-- [ ] 已从独立 restic snapshot 在空环境恢复数据库、原图和随机抽样记录。
+当前候选版证据见 `08-V1-ACCEPTANCE-REPORT.md`。正式域名与公网边缘、目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及异地加密备份与回读均已通过。
+
+- [x] 公网边缘只监听 TCP 80/443；API、worker、PostgreSQL 与 gateway 无宿主机映射端口。
+- [x] HTTP 自动跳转 HTTPS，正式证书与既有续期路径已验证。
+- [x] 数据库中没有明文登录密码、恢复码、PAT、会话、TOTP 密钥或 Provider Key。
+- [x] 浏览器存储中没有会话或 PAT；Cookie 属性符合本文。
+- [x] 密码 + TOTP、恢复码、可信设备 90 天、单设备撤销和全撤销均有集成测试。
+- [x] CSRF、Origin、未授权 PAT scope 和撤销后的 Token 均被拒绝。
+- [x] 敏感搜索词不出现在 URL、浏览器持久化存储、Caddy/API 日志、Tracing 或错误上报中；相关响应带 `Cache-Control: no-store`。
+- [x] 客户端伪造转发头不能改变 API 认定的来源 IP；普通日志不记录完整 IP。
+- [x] 登录端点每 IP 限速与 Fail2ban 临时递增封禁已在正式 Nginx/主机规则上验证，不使用永久 IP 封禁。
+- [x] 20 MiB 边界、路径穿越文件名、SVG/HTML 下载和中断上传均有测试。
+- [x] 上传记录客户端/服务端 MIME 与 SHA-256，预览只依据服务端 MIME；恢复后逐一校验所有数据库引用附件，摘要检查能发现字节不一致。
+- [x] 原始 Markdown、AI Markdown 和文件名不能产生可执行脚本或未净化 HTML。
+- [x] `block` 不发请求，`redact` 只发占位副本，`allow` 有明确确认；日志无正文。
+- [x] AI worker 没有 Shell、SSH、SQL、任意 HTTP 或任意文件系统工具。
+- [x] Docker Secret、`.env` 和数据目录权限经过部署检查，仓库不含真实凭据。
+- [x] 定时备份失败会告警且恢复服务；保留策略先 dry-run。
+- [x] 已在隔离恢复演练中从独立 restic snapshot 向空环境恢复数据库、原图和随机抽样记录。
+- [x] 正式备份仓库位于京东云 OSS 独立故障域；公网 DNS-style Endpoint 的加密 snapshot、`restic check` 与一次性空目录回读已通过。
 
 ## 12. 明确不实现的“安全增强”
 

@@ -76,4 +76,46 @@ describe('QuickCaptureDrawer', () => {
 
     wrapper.unmount()
   })
+
+  it('keeps keyboard focus inside the active dialog in Safari-style tab order', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockReturnValue(document.body)
+    const outside = document.createElement('button')
+    outside.textContent = 'outside'
+    document.body.append(outside)
+
+    const wrapper = mount(QuickCaptureDrawer, {
+      props: { open: true },
+      attachTo: document.body,
+    })
+    await flushPromises()
+
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')
+    const summary = dialog?.querySelector<HTMLElement>('summary')
+    expect(dialog).not.toBeNull()
+    expect(summary).not.toBeNull()
+
+    summary?.focus()
+    summary?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    outside.focus()
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+
+    expect(dialog?.contains(document.activeElement)).toBe(true)
+    expect((document.activeElement as HTMLElement).getAttribute('aria-label')).toBe('关闭快速记录')
+
+    const textarea = dialog?.querySelector('textarea') as HTMLTextAreaElement
+    textarea.value = 'unsaved'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    dialog?.querySelector<HTMLButtonElement>('[aria-label="关闭快速记录"]')?.click()
+    await flushPromises()
+
+    const discard = dialog?.querySelector<HTMLElement>('.discard-state')
+    const discardButtons = Array.from(discard?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+    discardButtons[0]?.focus()
+    discardButtons[0]?.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }),
+    )
+    expect(document.activeElement).toBe(discardButtons[discardButtons.length - 1])
+
+    wrapper.unmount()
+  })
 })

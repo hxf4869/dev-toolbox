@@ -1,0 +1,62 @@
+{
+  "candidateVersion": "v1.0-baseline",
+  "generatedAt": "2026-08-30T08:45:04Z",
+  "checks": [
+    {
+      "id": "data_integrity",
+      "label": "原始数据与附件",
+      "status": "passed",
+      "summary": "迁移、原始记录不可变、附件原字节与 SHA-256、失败原子性和完整性检查均已通过。",
+      "checkedAt": "2026-08-30T00:07:51Z"
+    },
+    {
+      "id": "auth_security",
+      "label": "认证与安全会话",
+      "status": "passed",
+      "summary": "密码、TOTP、恢复码、可信设备、会话撤销、CSRF 与凭据密文/哈希门禁已通过；正式所有者已绑定 TOTP 并离线保存恢复码。",
+      "checkedAt": "2026-08-30T06:12:19Z"
+    },
+    {
+      "id": "search_privacy",
+      "label": "搜索与隐私脱敏",
+      "status": "passed",
+      "summary": "字面与模糊检索、固定排序、敏感遮挡、no-store 和日志/URL/浏览器存储边界已通过。",
+      "checkedAt": "2026-08-29T23:59:22Z"
+    },
+    {
+      "id": "ai_policy",
+      "label": "AI 策略与版本",
+      "status": "passed",
+      "summary": "本地 mock 覆盖三协议、受控工具、block/redact/allow、任务有界停止和 Artifact 版本契约。",
+      "checkedAt": "2026-08-29T23:59:22Z"
+    },
+    {
+      "id": "backup_restore",
+      "label": "备份与灾难恢复",
+      "status": "passed",
+      "summary": "京东云 OSS 公网 Endpoint 的 DNS-style 加密 snapshot、restic check、一次性空目录回读和 PostgreSQL dump 校验均通过；每日单实例调度已启用。",
+      "checkedAt": "2026-08-30T08:45:04Z"
+    },
+    {
+      "id": "browser_accessibility",
+      "label": "浏览器与可访问性",
+      "status": "passed",
+      "summary": "Chrome 与 Safari 正式 HTTPS 核心 E2E、响应式、主题、键盘及 VoiceOver 抽查通过；发现的弹窗焦点逃逸已修复并复测。",
+      "checkedAt": "2026-08-30T07:23:41Z"
+    },
+    {
+      "id": "performance",
+      "label": "目标主机性能",
+      "status": "passed",
+      "summary": "京东云完整固定规模实测通过：搜索 P95 335.915 ms、纯文本保存 P95 4.692 ms，实际执行索引重建。",
+      "checkedAt": "2026-08-30T06:53:38Z"
+    },
+    {
+      "id": "deployment_security",
+      "label": "生产部署与依赖",
+      "status": "passed",
+      "summary": "京东云四容器、零应用宿主机端口、正式 HTTPS、安全头、登录限速、Fail2ban、Secret、日志与依赖门禁已通过。",
+      "checkedAt": "2026-08-30T07:23:41Z"
+    }
+  ]
+}

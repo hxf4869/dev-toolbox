@@ -26,11 +26,14 @@ type Config struct {
 	AIWorkerURL               string
 	InternalServiceToken      string
 	AllowInsecureProviderHTTP bool
+	AppVersion                string
+	OperationsStatusRoot      string
 }
 
 type MigrationConfig struct {
 	DatabaseURL    string
 	MigrationsPath string
+	AttachmentRoot string
 }
 
 func Load() (Config, error) {
@@ -71,6 +74,8 @@ func Load() (Config, error) {
 		AIWorkerURL:               strings.TrimRight(workerURL, "/"),
 		InternalServiceToken:      internalToken,
 		AllowInsecureProviderHTTP: strings.EqualFold(os.Getenv("ALLOW_INSECURE_PROVIDER_HTTP"), "true"),
+		AppVersion:                valueOrDefault("APP_VERSION", "development"),
+		OperationsStatusRoot:      filepath.Clean(valueOrDefault("OPERATIONS_STATUS_ROOT", "../../deploy/data/operations")),
 	}
 	return cfg, nil
 }
@@ -83,6 +88,7 @@ func LoadMigration() (MigrationConfig, error) {
 	return MigrationConfig{
 		DatabaseURL:    databaseURL,
 		MigrationsPath: valueOrDefault("MIGRATIONS_PATH", "migrations"),
+		AttachmentRoot: filepath.Clean(valueOrDefault("ATTACHMENT_ROOT", "../../deploy/data/attachments")),
 	}, nil
 }
 

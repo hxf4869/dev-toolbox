@@ -20,7 +20,7 @@
 
 | 容器 | 职责 | 公网端口 |
 |---|---|---:|
-| `gateway` | Caddy、TLS、静态 Web、反向代理 `/api` | 80、443 |
+| `gateway` | Caddy、静态 Web、反向代理 `/api`；默认同时终止 TLS | 默认 80、443；外置 Nginx 模式无宿主机端口 |
 | `api` | Go HTTP API、认证、业务规则、搜索、数据访问、任务调度 | 无 |
 | `ai-worker` | TypeScript 模型适配、受控 Agent Loop、JSON Schema 结果生成 | 无 |
 | `postgres` | 唯一业务数据库 | 无 |
@@ -70,14 +70,14 @@ AI 任务规模是单用户、低并发。任务记录存 PostgreSQL，worker �
 
 ### 3.1 公网边界
 
-- 只有 Caddy 监听宿主机 80/443。
+- 默认只有 Caddy 监听宿主机 80/443。部署主机已经运行受控 Nginx 时，允许它作为唯一公网 TLS 边缘；gateway 不映射宿主机端口，只加入该 Nginx 已有的 Docker 网络。
 - `/` 提供 Web 静态文件。
 - `/api/v1/*` 转发到 Go API。
 - `/internal/*` 不在 Caddy 路由中，外部无法访问。
 - PostgreSQL 端口只在 Compose 内部网络可见，不映射宿主机端口。
 - AI worker 不提供公网接口。
 
-Caddy 在配置有效域名后负责自动证书和 HTTP→HTTPS 重定向。参考官方文档：<https://caddyserver.com/docs/automatic-https>。
+Caddy 直连模式在配置有效域名后负责自动证书和 HTTP→HTTPS 重定向。外置 Nginx 模式复用主机已经管理的证书与续期路径，Nginx 必须覆盖客户端传入的转发头、把请求交给唯一的 gateway 网络别名，且不得为 API、worker 或 PostgreSQL 增加宿主机端口。Caddy 的可信代理范围只在外置模式中显式开启。Caddy 自动 HTTPS 参考官方文档：<https://caddyserver.com/docs/automatic-https>。
 
 ### 3.2 信任边界
 

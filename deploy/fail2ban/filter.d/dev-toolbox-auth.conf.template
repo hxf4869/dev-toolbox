@@ -1,0 +1,4 @@
+[Definition]
+failregex = ^<HOST>\|#\|.*\|#\|POST\|#\|https://__APP_DOMAIN_REGEX__/api/v1/auth/login\|#\|[^|]*\|#\|(?:401|429)\|#\|
+ignoreregex =
+datepattern = %%d/%%b/%%Y:%%H:%%M:%%S %%z

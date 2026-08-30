@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type fakePinger struct {
@@ -14,6 +16,19 @@ type fakePinger struct {
 
 func (pinger fakePinger) Ping(context.Context) error {
 	return pinger.err
+}
+
+func (pinger fakePinger) QueryRow(context.Context, string, ...any) pgx.Row {
+	return fakeVersionRow{version: RequiredSchemaVersion}
+}
+
+type fakeVersionRow struct {
+	version int
+}
+
+func (row fakeVersionRow) Scan(destinations ...any) error {
+	*(destinations[0].(*int)) = row.version
+	return nil
 }
 
 func TestReadinessReportsDatabaseStateWithoutDetails(t *testing.T) {
@@ -43,6 +58,27 @@ func TestLivenessDoesNotDependOnDatabase(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
+}
+
+func TestReadinessRequiresCurrentSchema(t *testing.T) {
+	router := http.NewServeMux()
+	RegisterRoutes(router, stalePinger{})
+	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+type stalePinger struct{}
+
+func (stalePinger) Ping(context.Context) error { return nil }
+
+func (stalePinger) QueryRow(context.Context, string, ...any) pgx.Row {
+	return fakeVersionRow{version: RequiredSchemaVersion - 1}
 }
 
 func contains(value, fragment string) bool {

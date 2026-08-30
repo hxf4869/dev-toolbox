@@ -10,6 +10,7 @@ const links = [
   { name: 'ai-schedule-settings', to: '/settings/ai-schedule', label: '自动整理' },
   { name: 'security-settings', to: '/settings/security', label: '登录安全' },
   { name: 'appearance-settings', to: '/settings/appearance', label: '外观' },
+  { name: 'operations-settings', to: '/settings/operations', label: '系统状态' },
 ]
 </script>
 

@@ -1,0 +1,6 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Asia/Shanghai host time. backup.sh records a durable failed state and restores
+# API/worker through its exit trap; the wrapper prevents overlapping attempts.
+17 3 * * * root /home/toolbox/deploy/scripts/run-scheduled-backup.sh

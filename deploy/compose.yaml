@@ -48,12 +48,15 @@ services:
       ALLOW_INSECURE_PROVIDER_HTTP: ${ALLOW_INSECURE_PROVIDER_HTTP:-false}
       AI_WORKER_URL: http://ai-worker:3001
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+      APP_VERSION: ${APP_VERSION:-development}
+      OPERATIONS_STATUS_ROOT: /operations
     secrets:
       - postgres_password
       - internal_service_token
       - app_master_key
     volumes:
       - ./data/attachments:/data:rw
+      - ./data/operations:/operations:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/ready"]
       interval: 10s
@@ -96,6 +99,7 @@ services:
       start_period: 5s
     networks:
       - backend
+      - egress
     depends_on:
       api:
         condition: service_healthy
@@ -127,6 +131,8 @@ networks:
     internal: false
   backend:
     internal: true
+  egress:
+    internal: false
 
 secrets:
   postgres_password:

@@ -11,6 +11,7 @@ const library = useLibraryStore()
 const navigationError = ref('')
 const settingsMode = computed(() => String(route.name).includes('settings'))
 const taskMode = computed(() => route.name === 'task-center')
+const helpMode = computed(() => route.name === 'help')
 
 const fixedViews = [
   { id: 'inbox', label: '原始收件箱', icon: 'inbox' as const },
@@ -25,7 +26,7 @@ const fixedViews = [
 const flatFolders = computed(() => flattenFolders(library.folders))
 
 onMounted(async () => {
-  if (settingsMode.value || taskMode.value) return
+  if (settingsMode.value || taskMode.value || helpMode.value) return
   try {
     await library.loadNavigation()
   } catch (error) {
@@ -47,10 +48,10 @@ function viewActive(view: string) {
 </script>
 
 <template>
-  <aside class="module-nav" :aria-label="taskMode ? 'AI 任务导航' : settingsMode ? '设置导航' : '工作台导航'">
+  <aside class="module-nav" :aria-label="taskMode ? 'AI 任务导航' : settingsMode ? '设置导航' : helpMode ? '帮助导航' : '工作台导航'">
     <header class="module-nav__header">
-      <p>{{ taskMode ? '受控 AI 工作流' : settingsMode ? '实例与偏好' : '知识与记录' }}</p>
-      <h1>{{ taskMode ? 'AI 任务' : settingsMode ? '设置' : '资料库' }}</h1>
+      <p>{{ taskMode ? '受控 AI 工作流' : settingsMode ? '实例与偏好' : helpMode ? '产品逻辑与边界' : '知识与记录' }}</p>
+      <h1>{{ taskMode ? 'AI 任务' : settingsMode ? '设置' : helpMode ? '帮助中心' : '资料库' }}</h1>
     </header>
 
     <section v-if="taskMode" aria-labelledby="task-nav-heading">
@@ -90,6 +91,21 @@ function viewActive(view: string) {
         <RouterLink to="/settings/appearance" :class="{ active: route.name === 'appearance-settings' }">
           <UiIcon name="sun" /> 外观
         </RouterLink>
+        <RouterLink to="/settings/operations" :class="{ active: route.name === 'operations-settings' }">
+          <UiIcon name="monitor" /> 系统状态与验收
+        </RouterLink>
+      </nav>
+    </section>
+
+    <section v-else-if="helpMode" aria-labelledby="help-nav-heading">
+      <h2 id="help-nav-heading">帮助主题</h2>
+      <nav>
+        <RouterLink to="/help#capture-search"><UiIcon name="search" /> 快速记录与搜索</RouterLink>
+        <RouterLink to="/help#core-concepts"><UiIcon name="book-open" /> 原始记录与 AI 版本</RouterLink>
+        <RouterLink to="/help#sensitive-provider"><UiIcon name="shield-alert" /> 敏感内容与 Provider</RouterLink>
+        <RouterLink to="/help#tasks"><UiIcon name="clock" /> 任务取消与重试</RouterLink>
+        <RouterLink to="/help#backup-restore"><UiIcon name="download" /> 附件备份与恢复</RouterLink>
+        <RouterLink to="/help#boundaries"><UiIcon name="shield-check" /> 产品边界</RouterLink>
       </nav>
     </section>
 

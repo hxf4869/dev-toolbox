@@ -1,5 +1,10 @@
 {
 	admin off
+	servers {
+		trusted_proxies static {$CADDY_TRUSTED_PROXY_CIDRS:127.0.0.1/8 ::1/128}
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For X-Real-IP
+	}
 }
 
 {$APP_DOMAIN} {
@@ -38,7 +43,13 @@
 	}
 
 	handle /api/* {
-		reverse_proxy api:8080
+		reverse_proxy api:8080 {
+			@maintenance status 502 503 504
+			handle_response @maintenance {
+				header Content-Type "application/json; charset=utf-8"
+				respond `{"error":{"code":"SERVICE_UNAVAILABLE","message":"系统维护中，请稍后重试"}}` 503
+			}
+		}
 	}
 
 	handle /health/* {
@@ -49,5 +60,12 @@
 		root * /srv
 		try_files {path} /index.html
 		file_server
+	}
+
+	handle_errors 502 503 504 {
+		@api_or_health path /api/* /health/*
+		header @api_or_health Content-Type "application/json; charset=utf-8"
+		respond @api_or_health `{"error":{"code":"SERVICE_UNAVAILABLE","message":"系统维护中，请稍后重试"}}` 503
+		respond "Service unavailable" 503
 	}
 }

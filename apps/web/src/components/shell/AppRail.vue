@@ -66,6 +66,7 @@ async function logout() {
           'token-settings',
           'ai-security-settings',
           'ai-schedule-settings',
+          'operations-settings',
         ].includes(String(route.name)),
       }"
       to="/settings/providers"
@@ -73,6 +74,16 @@ async function logout() {
       title="设置"
     >
       <UiIcon name="settings" />
+    </RouterLink>
+
+    <RouterLink
+      class="rail__item"
+      :class="{ 'rail__item--active': route.name === 'help' }"
+      to="/help"
+      aria-label="帮助"
+      title="帮助"
+    >
+      <UiIcon name="circle-help" />
     </RouterLink>
 
     <button class="rail__item rail__logout" type="button" :disabled="loggingOut" aria-label="退出登录" title="退出登录" @click="logout">

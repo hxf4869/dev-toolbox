@@ -8,6 +8,8 @@ import ProviderSettingsView from '../modules/settings/ProviderSettingsView.vue'
 import SecuritySettingsView from '../modules/settings/SecuritySettingsView.vue'
 import TokenSettingsView from '../modules/settings/TokenSettingsView.vue'
 import WorkspaceView from '../modules/knowledge/WorkspaceView.vue'
+import HelpView from '../modules/help/HelpView.vue'
+import OperationsStatusView from '../modules/operations/OperationsStatusView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -15,6 +17,7 @@ export const router = createRouter({
     { path: '/', name: 'workspace', component: WorkspaceView },
     { path: '/items/:itemId', name: 'item-detail', component: WorkspaceView },
     { path: '/ai/tasks', name: 'task-center', component: TaskCenterView },
+    { path: '/help', name: 'help', component: HelpView },
     {
       path: '/settings/appearance',
       name: 'appearance-settings',
@@ -45,6 +48,11 @@ export const router = createRouter({
       name: 'ai-schedule-settings',
       component: AIScheduleView,
     },
+    {
+      path: '/settings/operations',
+      name: 'operations-settings',
+      component: OperationsStatusView,
+    },
   ],
-  scrollBehavior: () => ({ top: 0 }),
+  scrollBehavior: (to) => (to.hash ? { el: to.hash } : { top: 0 }),
 })

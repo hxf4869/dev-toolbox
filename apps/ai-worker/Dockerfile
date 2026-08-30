@@ -12,6 +12,10 @@ RUN pnpm --filter @dev-toolbox/ai-worker build \
 
 FROM node:24.20.0-alpine3.23
 
+ARG APP_VERSION=development
+LABEL org.opencontainers.image.title="dev-toolbox-ai-worker" \
+      org.opencontainers.image.version=$APP_VERSION
+
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=node:node /out ./

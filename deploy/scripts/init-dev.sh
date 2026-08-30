@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 deploy_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 secrets_dir="$deploy_dir/secrets"
 
-mkdir -p "$secrets_dir" "$deploy_dir/data/postgres" "$deploy_dir/data/attachments" "$deploy_dir/data/caddy"
+mkdir -p "$secrets_dir" "$deploy_dir/data/postgres" "$deploy_dir/data/attachments" "$deploy_dir/data/caddy" "$deploy_dir/data/operations"
 chmod 700 "$secrets_dir"
 
 if [ ! -f "$deploy_dir/.env" ]; then
@@ -37,3 +37,5 @@ if [ ! -f "$app_master_key_file" ]; then
   printf '\n' >>"$app_master_key_file"
   chmod 600 "$app_master_key_file"
 fi
+
+RELEASE_STATUS_SKIP_VERSION_CHECK=1 "$script_dir/publish-release-status.sh" >/dev/null

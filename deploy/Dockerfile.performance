@@ -1,0 +1,7 @@
+FROM golang:1.27.0-alpine3.23
+
+WORKDIR /repo/apps/api
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN go mod download
+COPY apps/api ./
+RUN go test -tags=integration ./integration -run '^$'

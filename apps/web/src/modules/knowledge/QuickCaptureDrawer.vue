@@ -122,18 +122,36 @@ function onEscape(event: Event) {
   }
 }
 
+function dialogFocusScope() {
+  if (!drawer.value) return null
+  return confirmDiscard.value
+    ? drawer.value.querySelector<HTMLElement>('.discard-state')
+    : drawer.value
+}
+
+function dialogFocusableElements(scope: HTMLElement) {
+  return Array.from(
+    scope.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter(
+    (element) =>
+      !element.hidden &&
+      element.getAttribute('aria-hidden') !== 'true' &&
+      element.offsetParent !== null,
+  )
+}
+
 function onDialogKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     onEscape(event)
     if (!event.defaultPrevented) requestClose()
     return
   }
-  if (event.key !== 'Tab' || !drawer.value) return
-  const focusable = Array.from(
-    drawer.value.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])',
-    ),
-  ).filter((element) => !element.hidden && element.offsetParent !== null)
+  if (event.key !== 'Tab') return
+  const scope = dialogFocusScope()
+  if (!scope) return
+  const focusable = dialogFocusableElements(scope)
   if (focusable.length === 0) return
   const first = focusable[0]
   const last = focusable[focusable.length - 1]
@@ -143,6 +161,17 @@ function onDialogKeydown(event: KeyboardEvent) {
   } else if (!event.shiftKey && document.activeElement === last) {
     event.preventDefault()
     first?.focus()
+  } else {
+    const moveToEnd = event.shiftKey
+    window.setTimeout(() => {
+      const currentScope = dialogFocusScope()
+      if (!currentScope || currentScope.contains(document.activeElement)) return
+      const currentFocusable = dialogFocusableElements(currentScope)
+      const target = moveToEnd
+        ? currentFocusable[currentFocusable.length - 1]
+        : currentFocusable[0]
+      target?.focus()
+    }, 0)
   }
 }
 
@@ -306,10 +335,10 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
           </label>
 
           <div class="capture-toolbar" role="group" aria-label="内容格式">
-            <button type="button" :class="{ active: contentFormat === 'plain_text' }" @click="contentFormat = 'plain_text'">
+            <button type="button" :class="{ active: contentFormat === 'plain_text' }" :aria-pressed="contentFormat === 'plain_text'" @click="contentFormat = 'plain_text'">
               纯文本
             </button>
-            <button type="button" :class="{ active: contentFormat === 'markdown' }" @click="contentFormat = 'markdown'">
+            <button type="button" :class="{ active: contentFormat === 'markdown' }" :aria-pressed="contentFormat === 'markdown'" @click="contentFormat = 'markdown'">
               Markdown
             </button>
             <span>{{ body.length.toLocaleString('zh-CN') }} 字符</span>
@@ -322,7 +351,7 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
                 <p>最多 10 个；单文件 20 MiB，合计 100 MiB。</p>
               </div>
               <UiButton variant="secondary" @click="chooseFiles"><UiIcon name="paperclip" /> 添加文件</UiButton>
-              <input ref="fileInput" class="sr-only" type="file" multiple aria-label="选择记录附件" @change="onFileSelection" />
+              <input ref="fileInput" class="sr-only" type="file" multiple tabindex="-1" aria-label="选择记录附件" @change="onFileSelection" />
             </header>
             <ul v-if="files.length">
               <li v-for="(file, index) in files" :key="`${file.name}-${file.lastModified}-${index}`">

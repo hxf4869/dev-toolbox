@@ -43,24 +43,29 @@ type modelEntry struct {
 }
 
 type providerEntry struct {
-	ID          uuid.UUID    `json:"id"`
-	ProviderKey string       `json:"providerKey"`
-	DisplayName string       `json:"displayName"`
-	Protocol    string       `json:"protocol"`
-	BaseURL     string       `json:"baseUrl"`
-	HasAPIKey   bool         `json:"hasApiKey"`
-	APIKeyMask  *string      `json:"apiKeyMask"`
-	Enabled     bool         `json:"enabled"`
-	Models      []modelEntry `json:"models"`
-	CreatedAt   time.Time    `json:"createdAt"`
-	UpdatedAt   time.Time    `json:"updatedAt"`
+	ID                      uuid.UUID    `json:"id"`
+	ProviderKey             string       `json:"providerKey"`
+	DisplayName             string       `json:"displayName"`
+	Protocol                string       `json:"protocol"`
+	BaseURL                 string       `json:"baseUrl"`
+	HasAPIKey               bool         `json:"hasApiKey"`
+	APIKeyMask              *string      `json:"apiKeyMask"`
+	Enabled                 bool         `json:"enabled"`
+	Models                  []modelEntry `json:"models"`
+	CreatedAt               time.Time    `json:"createdAt"`
+	UpdatedAt               time.Time    `json:"updatedAt"`
+	LastTestedAt            *time.Time   `json:"lastTestedAt"`
+	LastTestStatus          *string      `json:"lastTestStatus"`
+	LastTestLatencyMS       *int         `json:"lastTestLatencyMs"`
+	LastTestFailureCategory *string      `json:"lastTestFailureCategory"`
 }
 
 func (service *Service) listProviders(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
 	rows, err := service.database.Query(request.Context(), `
 		SELECT id, provider_key, display_name, protocol, base_url,
-		       api_key_ciphertext IS NOT NULL, api_key_tail, enabled, created_at, updated_at
+		       api_key_ciphertext IS NOT NULL, api_key_tail, enabled, created_at, updated_at,
+		       last_tested_at, last_test_status, last_test_latency_ms, last_test_failure_category
 		FROM provider_configs WHERE deleted_at IS NULL ORDER BY display_name, id
 	`)
 	if err != nil {
@@ -72,7 +77,8 @@ func (service *Service) listProviders(response http.ResponseWriter, request *htt
 		var entry providerEntry
 		var tail *string
 		if err := rows.Scan(&entry.ID, &entry.ProviderKey, &entry.DisplayName, &entry.Protocol, &entry.BaseURL,
-			&entry.HasAPIKey, &tail, &entry.Enabled, &entry.CreatedAt, &entry.UpdatedAt); err != nil {
+			&entry.HasAPIKey, &tail, &entry.Enabled, &entry.CreatedAt, &entry.UpdatedAt,
+			&entry.LastTestedAt, &entry.LastTestStatus, &entry.LastTestLatencyMS, &entry.LastTestFailureCategory); err != nil {
 			rows.Close()
 			writeProviderInternal(response, request)
 			return
@@ -258,11 +264,16 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		enabled = *input.Enabled
 	}
 	now := service.now().UTC()
+	connectivityChanged := input.Protocol != nil || input.BaseURL != nil || input.APIKey != nil || input.Enabled != nil
 	if _, err := service.database.Exec(request.Context(), `
 		UPDATE provider_configs SET display_name = $2, protocol = $3, base_url = $4,
-		       api_key_ciphertext = $5, api_key_tail = $6, enabled = $7, updated_at = $8
+		       api_key_ciphertext = $5, api_key_tail = $6, enabled = $7, updated_at = $8,
+		       last_tested_at = CASE WHEN $9 THEN NULL ELSE last_tested_at END,
+		       last_test_status = CASE WHEN $9 THEN NULL ELSE last_test_status END,
+		       last_test_latency_ms = CASE WHEN $9 THEN NULL ELSE last_test_latency_ms END,
+		       last_test_failure_category = CASE WHEN $9 THEN NULL ELSE last_test_failure_category END
 		WHERE id = $1 AND deleted_at IS NULL
-	`, id, displayName, protocol, baseURL, ciphertext, tail, enabled, now); err != nil {
+	`, id, displayName, protocol, baseURL, ciphertext, tail, enabled, now, connectivityChanged); err != nil {
 		writeProviderInternal(response, request)
 		return
 	}
@@ -388,12 +399,14 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 	internalRequest.Header.Set("Authorization", "Bearer "+service.internalServiceToken)
 	workerResponse, err := service.httpClient.Do(internalRequest)
 	if err != nil {
+		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", nil, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
 	defer workerResponse.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(workerResponse.Body, 64*1024+1))
 	if err != nil || len(body) > 64*1024 {
+		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", nil, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
@@ -409,18 +422,41 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.LatencyMS < 0 {
+		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", nil, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
 	if workerResponse.StatusCode == http.StatusUnprocessableEntity && result.FailureCategory == "credentials_invalid" {
+		latency := int(result.LatencyMS)
+		_ = service.recordProviderTest(request.Context(), providerID, "credentials_invalid", &latency, "credentials_invalid")
 		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "AI_PROVIDER_CREDENTIALS_INVALID", "Provider 凭据被拒绝")
 		return
 	}
 	if workerResponse.StatusCode != http.StatusOK || result.Status != "ok" {
+		latency := int(result.LatencyMS)
+		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", &latency, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
+	latency := int(result.LatencyMS)
+	if err := service.recordProviderTest(request.Context(), providerID, "ok", &latency, ""); err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
 	httpapi.WriteJSON(response, http.StatusOK, map[string]any{"status": "ok", "latencyMs": result.LatencyMS, "usage": result.Usage})
+}
+
+func (service *Service) recordProviderTest(ctx context.Context, providerID uuid.UUID, status string, latency *int, failureCategory string) error {
+	var failure *string
+	if failureCategory != "" {
+		failure = &failureCategory
+	}
+	_, err := service.database.Exec(ctx, `
+		UPDATE provider_configs SET last_tested_at = $2, last_test_status = $3,
+		       last_test_latency_ms = $4, last_test_failure_category = $5
+		WHERE id = $1 AND deleted_at IS NULL
+	`, providerID, service.now().UTC(), status, latency, failure)
+	return err
 }
 
 func (service *Service) loadProvider(ctx context.Context, id uuid.UUID) (providerEntry, error) {
@@ -428,10 +464,12 @@ func (service *Service) loadProvider(ctx context.Context, id uuid.UUID) (provide
 	var tail *string
 	err := service.database.QueryRow(ctx, `
 		SELECT id, provider_key, display_name, protocol, base_url,
-		       api_key_ciphertext IS NOT NULL, api_key_tail, enabled, created_at, updated_at
+		       api_key_ciphertext IS NOT NULL, api_key_tail, enabled, created_at, updated_at,
+		       last_tested_at, last_test_status, last_test_latency_ms, last_test_failure_category
 		FROM provider_configs WHERE id = $1 AND deleted_at IS NULL
 	`, id).Scan(&entry.ID, &entry.ProviderKey, &entry.DisplayName, &entry.Protocol, &entry.BaseURL,
-		&entry.HasAPIKey, &tail, &entry.Enabled, &entry.CreatedAt, &entry.UpdatedAt)
+		&entry.HasAPIKey, &tail, &entry.Enabled, &entry.CreatedAt, &entry.UpdatedAt,
+		&entry.LastTestedAt, &entry.LastTestStatus, &entry.LastTestLatencyMS, &entry.LastTestFailureCategory)
 	if err != nil {
 		return providerEntry{}, err
 	}

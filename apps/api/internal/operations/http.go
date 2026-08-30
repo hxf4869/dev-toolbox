@@ -5,11 +5,16 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
 )
 
+const RequiredSchemaVersion = 6
+
 type databasePinger interface {
 	Ping(context.Context) error
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 type Handler struct {
@@ -35,6 +40,11 @@ func (handler Handler) ready(response http.ResponseWriter, request *http.Request
 	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 	defer cancel()
 	if err := handler.database.Ping(ctx); err != nil {
+		httpapi.WriteError(response, request, http.StatusServiceUnavailable, "INTERNAL_ERROR", "服务尚未就绪")
+		return
+	}
+	var version int
+	if err := handler.database.QueryRow(ctx, `SELECT version FROM public.schema_version`).Scan(&version); err != nil || version != RequiredSchemaVersion {
 		httpapi.WriteError(response, request, http.StatusServiceUnavailable, "INTERNAL_ERROR", "服务尚未就绪")
 		return
 	}
