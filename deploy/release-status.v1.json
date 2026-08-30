@@ -1,6 +1,6 @@
 {
   "candidateVersion": "v1.0.1",
-  "generatedAt": "2026-08-30T09:50:07Z",
+  "generatedAt": "2026-08-30T10:08:18Z",
   "checks": [
     {
       "id": "data_integrity",
@@ -55,8 +55,8 @@
       "id": "deployment_security",
       "label": "生产部署与依赖",
       "status": "passed",
-      "summary": "京东云四容器、零应用宿主机端口、正式 HTTPS、安全头、登录限速、Fail2ban、Secret、日志与依赖门禁已通过。",
-      "checkedAt": "2026-08-30T07:23:41Z"
+      "summary": "v1.0.1 已在京东云完成隔离恢复、升级前备份和正式切换；四容器、公网健康、零应用宿主机端口、Secret、日志与依赖门禁通过，Ubuntu 自动安全更新已恢复并清空安全更新队列。",
+      "checkedAt": "2026-08-30T10:08:18Z"
     }
   ]
 }
