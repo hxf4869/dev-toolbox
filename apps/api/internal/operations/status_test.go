@@ -20,10 +20,10 @@ func TestStatusFilesExposeOnlyValidatedOperationalState(t *testing.T) {
 		VerifiedAttachments: 12, OrphanAttachments: 1,
 	})
 	writeStatusFixture(t, filepath.Join(root, "release-status.json"), releaseStatus{
-		CandidateVersion: "v1.0.0", GeneratedAt: &now,
+		CandidateVersion: "v1.0.1", GeneratedAt: &now,
 		Checks: []releaseCheck{{ID: "data_integrity", Label: "原始数据与附件", Status: "passed", Summary: "完整性检查通过", CheckedAt: &now}},
 	})
-	service := &StatusService{statusRoot: root, appVersion: "v1.0.0"}
+	service := &StatusService{statusRoot: root, appVersion: "v1.0.1"}
 
 	backup := service.readBackupStatus()
 	restore := service.readRestoreStatus()
@@ -31,7 +31,7 @@ func TestStatusFilesExposeOnlyValidatedOperationalState(t *testing.T) {
 	if backup.State != "succeeded" || backup.SnapshotID != "abc123" || restore.State != "succeeded" || restore.OrphanAttachments != 1 {
 		t.Fatalf("unexpected operational state: backup=%+v restore=%+v", backup, restore)
 	}
-	if release.CandidateVersion != "v1.0.0" || release.Checks[0].Status != "passed" || len(release.Checks) != 8 {
+	if release.CandidateVersion != "v1.0.1" || release.Checks[0].Status != "passed" || len(release.Checks) != 8 {
 		t.Fatalf("unexpected release state: %+v", release)
 	}
 }

@@ -129,6 +129,25 @@ func TestM1AuthenticationCaptureAndRecovery(t *testing.T) {
 		t.Fatalf("unexpected TOTP confirmation response: %+v", authenticated)
 	}
 	csrf := authenticated.CSRFToken
+	var activeSessionID uuid.UUID
+	if err := database.QueryRow(ctx, "SELECT id FROM auth_sessions ORDER BY created_at DESC LIMIT 1").Scan(&activeSessionID); err != nil {
+		t.Fatal(err)
+	}
+	staleLastSeen := time.Now().UTC().Add(-10 * time.Minute)
+	if _, err := database.Exec(ctx, "UPDATE auth_sessions SET last_seen_at = $2 WHERE id = $1", activeSessionID, staleLastSeen); err != nil {
+		t.Fatal(err)
+	}
+	refreshStartedAt := time.Now().UTC()
+	refreshedSession := doRequest(t, client, newRequest(t, http.MethodGet, server.URL+"/api/v1/auth/session", nil, "", ""))
+	assertStatus(t, refreshedSession, http.StatusOK)
+	_ = readResponse(t, refreshedSession)
+	var refreshedLastSeen time.Time
+	if err := database.QueryRow(ctx, "SELECT last_seen_at FROM auth_sessions WHERE id = $1", activeSessionID).Scan(&refreshedLastSeen); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedLastSeen.Before(refreshStartedAt.Add(-time.Second)) {
+		t.Fatalf("active session last_seen_at was not refreshed: got %s, request started at %s", refreshedLastSeen, refreshStartedAt)
+	}
 
 	conflict := newRequest(t, http.MethodGet, server.URL+"/api/v1/auth/session", nil, "", "")
 	conflict.Header.Set("Authorization", "Bearer should-not-coexist")

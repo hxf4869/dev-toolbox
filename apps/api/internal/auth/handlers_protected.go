@@ -354,7 +354,9 @@ func (service *Service) listSessions(response http.ResponseWriter, request *http
 	rows, err := service.database.Query(request.Context(), `
 		SELECT id, created_at, last_seen_at, expires_at, trusted_device_id, user_agent
 		FROM auth_sessions
-		WHERE revoked_at IS NULL AND expires_at > $1 AND last_seen_at > $1 - interval '24 hours'
+		WHERE revoked_at IS NULL
+		  AND expires_at > $1::timestamptz
+		  AND last_seen_at > $1::timestamptz - interval '24 hours'
 		ORDER BY last_seen_at DESC, id DESC
 	`, service.now().UTC())
 	if err != nil {

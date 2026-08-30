@@ -22,7 +22,7 @@ write_common_env() {
   target=$1
   {
     printf '%s\n' 'APP_DOMAIN=toolbox.example.net'
-    printf '%s\n' 'APP_VERSION=v1.0.0'
+    printf '%s\n' 'APP_VERSION=v1.0.1'
     printf '%s\n' 'APP_TIMEZONE=Asia/Shanghai'
     printf '%s\n' 'POSTGRES_DB=dev_toolbox'
     printf '%s\n' 'POSTGRES_USER=dev_toolbox'

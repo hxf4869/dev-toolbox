@@ -1,6 +1,6 @@
 {
-  "candidateVersion": "v1.0.0",
-  "generatedAt": "2026-08-30T08:45:04Z",
+  "candidateVersion": "v1.0.1",
+  "generatedAt": "2026-08-30T09:50:07Z",
   "checks": [
     {
       "id": "data_integrity",
@@ -13,8 +13,8 @@
       "id": "auth_security",
       "label": "认证与安全会话",
       "status": "passed",
-      "summary": "密码、TOTP、恢复码、可信设备、会话撤销、CSRF 与凭据密文/哈希门禁已通过；正式所有者已绑定 TOTP 并离线保存恢复码。",
-      "checkedAt": "2026-08-30T06:12:19Z"
+      "summary": "密码、TOTP、恢复码、可信设备、会话撤销、CSRF 与凭据密文/哈希门禁已通过；v1.0.1 新增真实 PostgreSQL 会话活跃时间刷新回归验证。",
+      "checkedAt": "2026-08-30T09:44:45Z"
     },
     {
       "id": "search_privacy",
@@ -34,8 +34,8 @@
       "id": "backup_restore",
       "label": "备份与灾难恢复",
       "status": "passed",
-      "summary": "京东云 OSS 公网 Endpoint 的 DNS-style 加密 snapshot、restic check、一次性空目录回读和 PostgreSQL dump 校验均通过；每日单实例调度已启用。",
-      "checkedAt": "2026-08-30T08:45:04Z"
+      "summary": "v1.0.1 隔离生产形态已完成加密备份、restic check、空目录恢复、10/10 附件与认证/组织/AI 状态回读；正式仓库继续使用京东云 OSS。",
+      "checkedAt": "2026-08-30T09:49:56Z"
     },
     {
       "id": "browser_accessibility",

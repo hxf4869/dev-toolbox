@@ -23,6 +23,7 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "api")
+	slog.SetDefault(logger)
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("configuration_invalid", "errorType", "configuration")

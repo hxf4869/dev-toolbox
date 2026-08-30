@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -157,8 +158,8 @@ func (service *Service) authenticateSession(request *http.Request, token string)
 		CROSS JOIN owner_account owner
 		WHERE s.token_hash = $1
 		  AND s.revoked_at IS NULL
-		  AND s.expires_at > $2
-		  AND s.last_seen_at > $2 - interval '24 hours'
+		  AND s.expires_at > $2::timestamptz
+		  AND s.last_seen_at > $2::timestamptz - interval '24 hours'
 		  AND s.created_at >= owner.password_changed_at
 	`, tokenHash(token), now).Scan(
 		&session.ID, &session.OwnerID, &session.Username, &csrfHash,
@@ -172,11 +173,16 @@ func (service *Service) authenticateSession(request *http.Request, token string)
 		return Session{}, false
 	}
 	if now.Sub(session.LastSeenAt) >= 5*time.Minute {
-		_, _ = service.database.Exec(request.Context(), `
-			UPDATE auth_sessions SET last_seen_at = $2
-			WHERE id = $1 AND revoked_at IS NULL AND last_seen_at < $2 - interval '5 minutes'
+		_, updateErr := service.database.Exec(request.Context(), `
+			UPDATE auth_sessions SET last_seen_at = $2::timestamptz
+			WHERE id = $1 AND revoked_at IS NULL
+			  AND last_seen_at < $2::timestamptz - interval '5 minutes'
 		`, session.ID, now)
-		session.LastSeenAt = now
+		if updateErr != nil {
+			slog.ErrorContext(request.Context(), "auth_session_last_seen_update_failed", "errorType", "database")
+		} else {
+			session.LastSeenAt = now
+		}
 	}
 	return session, true
 }

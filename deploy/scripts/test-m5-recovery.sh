@@ -69,7 +69,7 @@ awk '
 
 {
   printf '%s\n' 'APP_DOMAIN=toolbox.127.0.0.1.nip.io'
-  printf '%s\n' 'APP_VERSION=v1.0.0'
+  printf '%s\n' 'APP_VERSION=v1.0.1'
   printf '%s\n' 'APP_TIMEZONE=Asia/Shanghai'
   printf '%s\n' 'POSTGRES_DB=dev_toolbox_recovery_test'
   printf '%s\n' 'POSTGRES_USER=dev_toolbox_recovery'
