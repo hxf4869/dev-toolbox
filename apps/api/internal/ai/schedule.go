@@ -86,8 +86,7 @@ func (service *Service) updateSchedule(response http.ResponseWriter, request *ht
 			writeTaskValidation(response, request)
 			return
 		}
-		model, err := service.loadEnabledTaskModel(request.Context(), id)
-		if err != nil || !model.SupportsTools {
+		if _, err := service.loadEnabledTaskModel(request.Context(), id); err != nil {
 			writeTaskValidation(response, request)
 			return
 		}
@@ -104,7 +103,7 @@ func (service *Service) updateSchedule(response http.ResponseWriter, request *ht
 			return
 		}
 		model, err := service.loadEnabledTaskModel(request.Context(), id)
-		if err != nil || !model.SupportsTools || !model.SupportsVision {
+		if err != nil || !model.SupportsVision {
 			writeTaskValidation(response, request)
 			return
 		}

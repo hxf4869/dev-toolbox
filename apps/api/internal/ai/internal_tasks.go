@@ -156,7 +156,7 @@ func (service *Service) claimTask(response http.ResponseWriter, request *http.Re
 	`, modelID, itemID).Scan(&provider.ID, &provider.Protocol, &provider.BaseURL, &provider.ModelID,
 		&provider.DisplayName, &provider.ContextWindow, &provider.MaxOutputTokens,
 		&provider.SupportsTools, &provider.SupportsVision, &ciphertext, &sensitivity)
-	if err != nil || !provider.SupportsTools || taskType == "analyze_image" && !provider.SupportsVision {
+	if err != nil || taskType == "analyze_image" && !provider.SupportsVision {
 		service.failClaimedBeforeStart(request, tx, taskID, "AI_MODEL_CAPABILITY_MISSING", "任务模型不可用或能力不匹配", now)
 		_ = tx.Commit(request.Context())
 		response.WriteHeader(http.StatusNoContent)

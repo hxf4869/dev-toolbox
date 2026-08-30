@@ -138,7 +138,7 @@ func (service *Service) createSingleTask(ctx context.Context, request singleTask
 		sensitivity != "normal" && request.SensitivePolicy == "block" {
 		return taskEntry{}, errTaskSensitiveBlocked
 	}
-	if !model.SupportsTools || request.TaskType == "analyze_image" && !model.SupportsVision {
+	if request.TaskType == "analyze_image" && !model.SupportsVision {
 		return taskEntry{}, errTaskCapability
 	}
 	if request.TaskType == "analyze_image" && sensitivity != "normal" && request.SensitivePolicy == "redact" {
@@ -567,13 +567,13 @@ func writeCreatedTask(response http.ResponseWriter, request *http.Request, entry
 func promptVersionForTask(taskType string) string {
 	switch taskType {
 	case "review_record":
-		return "review-v1"
+		return "review-v2"
 	case "analyze_image":
-		return "image-v1"
+		return "image-v2"
 	case "batch_organize":
 		return "batch-v1"
 	default:
-		return "organize-v1"
+		return "organize-v2"
 	}
 }
 

@@ -32,9 +32,10 @@ type m4TaskResponse struct {
 
 type m4ClaimResponse struct {
 	Task struct {
-		ID           uuid.UUID `json:"id"`
-		Type         string    `json:"type"`
-		LeaseVersion int       `json:"leaseVersion"`
+		ID            uuid.UUID `json:"id"`
+		Type          string    `json:"type"`
+		LeaseVersion  int       `json:"leaseVersion"`
+		PromptVersion string    `json:"promptVersion"`
 	} `json:"task"`
 	Input struct {
 		Sensitivity     string `json:"sensitivity"`
@@ -124,7 +125,7 @@ func TestM4TaskArtifactBatchAndScheduleLifecycle(t *testing.T) {
 			}
 		}
 	}
-	if claim.Task.ID != task.ID || claim.Task.LeaseVersion != 1 || len(claim.Input.Fragments) != 1 {
+	if claim.Task.ID != task.ID || claim.Task.LeaseVersion != 1 || claim.Task.PromptVersion != "organize-v2" || len(claim.Input.Fragments) != 1 {
 		t.Fatalf("unexpected claim: %+v", claim)
 	}
 
@@ -420,7 +421,16 @@ func testM4CreationBoundaries(t *testing.T, client *http.Client, baseURL, csrf s
 		"sensitivePolicy": "block", "options": map[string]any{"includeRelatedRecords": false},
 	}, csrf)
 	assertM4Error(t, disabled, http.StatusUnprocessableEntity, "VALIDATION_FAILED")
-	patchModel(map[string]any{"enabled": true, "supportsVision": false})
+	patchModel(map[string]any{"enabled": true, "supportsTools": false, "supportsVision": false})
+	withoutTools := sendJSON(t, client, http.MethodPost, baseURL+"/api/v1/ai/tasks", map[string]any{
+		"taskType": "organize_record", "itemId": item.Item.ID.String(), "modelId": modelID.String(),
+		"sensitivePolicy": "block", "options": map[string]any{"includeRelatedRecords": false},
+	}, csrf)
+	assertStatus(t, withoutTools, http.StatusCreated)
+	withoutToolsTask := decodeResponse[m4TaskResponse](t, withoutTools)
+	cancelWithoutTools := sendJSON(t, client, http.MethodPost, baseURL+"/api/v1/ai/tasks/"+withoutToolsTask.ID.String()+"/cancel", map[string]any{}, csrf)
+	assertStatus(t, cancelWithoutTools, http.StatusOK)
+	_ = readResponse(t, cancelWithoutTools)
 	missingVision := sendJSON(t, client, http.MethodPost, baseURL+"/api/v1/ai/tasks", map[string]any{
 		"taskType": "analyze_image", "itemId": item.Item.ID.String(), "modelId": modelID.String(),
 		"sensitivePolicy": "block", "options": map[string]any{"includeRelatedRecords": false},

@@ -1,7 +1,10 @@
 import { readFile } from 'node:fs/promises'
 import { basename, resolve, sep } from 'node:path'
 
-const allowedPromptVersions = new Set(['organize-v1', 'review-v1', 'image-v1'])
+const allowedPromptVersions = new Set([
+  'organize-v1', 'review-v1', 'image-v1',
+  'organize-v2', 'review-v2', 'image-v2',
+])
 
 export class PromptStore {
   readonly #cache = new Map<string, string>()

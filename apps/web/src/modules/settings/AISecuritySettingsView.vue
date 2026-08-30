@@ -114,7 +114,6 @@ function flattenModels(vision: boolean) {
           .filter(
             (model) =>
               model.enabled &&
-              model.supportsTools &&
               (!vision || model.supportsVision) &&
               model.contextWindow !== null &&
               model.maxOutputTokens !== null,

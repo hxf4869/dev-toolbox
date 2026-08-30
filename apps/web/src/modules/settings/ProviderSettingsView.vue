@@ -123,7 +123,7 @@ function emptyModel(): ModelDraft {
     displayName: '',
     contextWindow: null,
     maxOutputTokens: null,
-    supportsTools: true,
+    supportsTools: false,
     supportsVision: false,
     enabled: true,
   }
@@ -549,7 +549,7 @@ function messageFor(error: unknown) {
               <label class="settings-field"><span>上下文窗口</span><input v-model.number="modelDraft.contextWindow" type="number" min="1" placeholder="待配置" /></label>
               <label class="settings-field"><span>最大输出 Token</span><input v-model.number="modelDraft.maxOutputTokens" type="number" min="1" placeholder="待配置" /></label>
             </div>
-            <fieldset class="settings-fieldset"><legend>模型能力</legend><label class="settings-check"><input v-model="modelDraft.supportsTools" type="checkbox" /><span>支持工具调用（所有内置任务必需）</span></label><label class="settings-check"><input v-model="modelDraft.supportsVision" type="checkbox" /><span>支持图片输入</span></label><label class="settings-check"><input v-model="modelDraft.enabled" type="checkbox" /><span>启用模型</span></label></fieldset>
+            <fieldset class="settings-fieldset"><legend>模型能力</legend><label class="settings-check"><input v-model="modelDraft.supportsTools" type="checkbox" /><span>支持工具调用（可选；不可用时改用 JSON）</span></label><label class="settings-check"><input v-model="modelDraft.supportsVision" type="checkbox" /><span>支持图片输入</span></label><label class="settings-check"><input v-model="modelDraft.enabled" type="checkbox" /><span>启用模型</span></label></fieldset>
             <div v-if="actionError" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" />{{ actionError }}</div>
           </form>
         </div>

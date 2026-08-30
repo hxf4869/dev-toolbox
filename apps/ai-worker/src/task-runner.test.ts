@@ -7,6 +7,7 @@ import type { AssistantMessage, ToolCall } from '@earendil-works/pi-ai'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { loadArtifactContract, type ArtifactContract } from './artifact-schema.js'
+import { ProviderGatewayError } from './model-gateway.js'
 import { PromptStore } from './prompts.js'
 import type { ClaimedTask, SafeTaskEvent } from './task-client.js'
 import { TaskClientError } from './task-client.js'
@@ -38,6 +39,174 @@ afterEach(async () => {
 })
 
 describe('bounded task runner', () => {
+  it('materializes the same valid Artifact from the v2 tool and exact-JSON channels', async () => {
+    const toolApi = new FakeTaskApi()
+    const jsonApi = new FakeTaskApi()
+    const draft = organizedDraft()
+    const base = taskClaim()
+    const toolClaim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+    }
+    const jsonClaim: ClaimedTask = {
+      ...toolClaim,
+      provider: { ...toolClaim.provider, supportsTools: false },
+    }
+    const toolMessages = [
+      assistant([toolCall('context', 'get_record_context', {})]),
+      assistant([toolCall('candidate', 'emit_artifact_draft', draft)]),
+    ]
+    const toolRunner = createRunner(toolApi, async (request) => {
+      const schemaText = JSON.stringify(request.context.tools?.at(-1)?.parameters)
+      expect(schemaText).not.toContain('$defs')
+      expect(schemaText).not.toContain('oneOf')
+      return { message: toolMessages.shift()!, attempts: 1 }
+    })
+    const jsonRunner = createRunner(jsonApi, async (request) => {
+      expect(request.context.tools).toBeUndefined()
+      const directContext = request.context.messages[0]?.content
+      expect(typeof directContext === 'string' ? directContext : '').toContain('"ref":"S1"')
+      expect(typeof directContext === 'string' ? directContext : '').not.toContain(fragmentId)
+      return { message: assistant([{ type: 'text', text: JSON.stringify(draft) }]), attempts: 1 }
+    })
+
+    await toolRunner.run(toolClaim)
+    await jsonRunner.run(jsonClaim)
+
+    expect(toolApi.failures).toEqual([])
+    expect(jsonApi.failures).toEqual([])
+    expect(toolApi.completed).toHaveLength(1)
+    expect(jsonApi.completed).toEqual(toolApi.completed)
+    expect(contract.validate(toolApi.completed[0])).toBe(true)
+    expect(toolApi.completed[0]).toMatchObject({
+      schemaVersion: '1.0',
+      artifactType: 'organized_record',
+      sourceFragmentIds: [fragmentId],
+      review: { status: 'model_reviewed' },
+      blocks: [{ id: 'block_1', sourceFragmentIds: [fragmentId] }],
+    })
+  })
+
+  it('falls back from an ignored v2 tool channel to exact JSON without capability detection', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+    }
+    let calls = 0
+    const runner = createRunner(api, async (request) => {
+      calls += 1
+      if (calls === 1) {
+        expect(request.context.tools?.length).toBeGreaterThan(0)
+        return { message: assistant([{ type: 'text', text: '我无法调用工具。' }]), attempts: 1 }
+      }
+      expect(request.context.tools).toBeUndefined()
+      const directContext = request.context.messages[0]?.content
+      expect(typeof directContext === 'string' ? directContext : '').toContain('"ref":"S1"')
+      return { message: assistant([{ type: 'text', text: JSON.stringify(organizedDraft()) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(calls).toBe(2)
+    expect(api.completed).toHaveLength(1)
+    expect(api.failures).toEqual([])
+  })
+
+  it('falls back once when a v2 Provider rejects the tool protocol', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+    }
+    let calls = 0
+    const runner = createRunner(api, async (request) => {
+      calls += 1
+      if (calls === 1) throw new ProviderGatewayError('protocol_error')
+      expect(request.context.tools).toBeUndefined()
+      return { message: assistant([{ type: 'text', text: JSON.stringify(organizedDraft()) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(calls).toBe(2)
+    expect(api.completed).toHaveLength(1)
+    expect(api.failures).toEqual([])
+  })
+
+  it('injects authorized images into the v2 JSON channel and maps A# references', async () => {
+    const api = new FakeTaskApi()
+    api.attachmentBytes = new Uint8Array([1, 2, 3])
+    const base = taskClaim({
+      attachments: [{
+        id: imageId, kind: 'image', mediaType: 'image/png', sizeBytes: 3,
+        width: 1, height: 1,
+      }],
+    })
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, type: 'analyze_image', promptVersion: 'image-v2' },
+      provider: { ...base.provider, supportsTools: false, supportsVision: true },
+    }
+    const draft = {
+      ...organizedDraft(),
+      classification: {
+        contentType: 'image', suggestedFolderPath: ['图片'], suggestedTags: ['截图'],
+        sensitivitySuggestion: 'normal',
+      },
+      blocks: [{
+        type: 'image_reference', attachmentRef: 'A1', caption: '截图内容', sourceRefs: [],
+      }],
+    }
+    const runner = createRunner(api, async (request) => {
+      expect(request.context.tools).toBeUndefined()
+      const content = request.context.messages[0]?.content
+      expect(Array.isArray(content) ? content.filter((part) => part.type === 'image') : []).toHaveLength(1)
+      const contextText = Array.isArray(content) ? content.find((part) => part.type === 'text')?.text ?? '' : ''
+      expect(contextText).toContain('"ref":"A1"')
+      expect(contextText).not.toContain(imageId)
+      return { message: assistant([{ type: 'text', text: JSON.stringify(draft) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(api.attachmentReads).toEqual([imageId])
+    expect(api.failures).toEqual([])
+    expect(api.completed[0]).toMatchObject({
+      artifactType: 'image_analysis',
+      blocks: [{ type: 'image_reference', attachmentId: imageId }],
+    })
+  })
+
+  it('returns a precise v2 Draft error once and accepts the repaired JSON', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const invalid = organizedDraft()
+    ;(invalid.blocks as Array<Record<string, unknown>>)[0]!.sourceRefs = ['S99']
+    let calls = 0
+    const runner = createRunner(api, async (request) => {
+      calls += 1
+      if (calls === 1) return { message: assistant([{ type: 'text', text: JSON.stringify(invalid) }]), attempts: 1 }
+      const repairMessage = request.context.messages.at(-1)
+      expect(JSON.stringify(repairMessage)).toContain('/blocks/0/sourceRefs')
+      expect(JSON.stringify(repairMessage)).toContain('S99')
+      return { message: assistant([{ type: 'text', text: JSON.stringify(organizedDraft()) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(calls).toBe(2)
+    expect(api.completed).toHaveLength(1)
+    expect(api.failures).toEqual([])
+  })
+
   it('completes a valid candidate after reading the controlled context', async () => {
     const api = new FakeTaskApi()
     const messages = [
@@ -379,6 +548,13 @@ class FakeTaskApi implements TaskApi {
   }
 
   async events(_claim: ClaimedTask, events: readonly SafeTaskEvent[]): Promise<void> {
+    const allowedDetailKeys = new Set([
+      'turn', 'tool', 'durationMs', 'inputTokens', 'outputTokens',
+      'attempt', 'failureCategory', 'toolCalls',
+    ])
+    if (events.some((event) => Object.keys(event.details).some((key) => !allowedDetailKeys.has(key)))) {
+      throw new TaskClientError(422, 'VALIDATION_FAILED')
+    }
     this.taskEvents.push(...events)
   }
 
@@ -455,6 +631,31 @@ function assistant(content: AssistantMessage['content']): AssistantMessage {
 
 function toolCall(id: string, name: string, argumentsValue: Record<string, unknown>): ToolCall {
   return { type: 'toolCall', id, name, arguments: argumentsValue }
+}
+
+function organizedDraft(): Record<string, unknown> {
+  return {
+    title: 'Linux 新磁盘挂载',
+    summary: '记录新磁盘分区、格式化与挂载步骤。',
+    classification: {
+      contentType: 'operations_guide',
+      suggestedFolderPath: ['服务器运维', '磁盘'],
+      suggestedTags: ['Linux', 'ext4'],
+      sensitivitySuggestion: 'normal',
+    },
+    blocks: [{
+      type: 'command_steps',
+      title: '挂载步骤',
+      steps: [{
+        title: '查看磁盘',
+        commands: [{ shell: 'bash', command: 'lsblk' }],
+        sourceRefs: ['S1'],
+      }],
+      sourceRefs: ['S1'],
+    }],
+    warnings: [],
+    limitations: ['模型没有连接目标服务器验证命令。'],
+  }
 }
 
 async function startEgressSpy(): Promise<{ baseUrl: string; bodies: string[] }> {

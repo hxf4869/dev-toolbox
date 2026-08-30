@@ -581,7 +581,7 @@ Provider 未返回 usage 时该字段为 `null`。连接测试只发起一次外
 
 发现接口失败不能删除手工模型。
 
-模型可先保存未知限制用于待配置列表；`contextWindow` 与 `maxOutputTokens` 未同时提供正整数时，服务端不允许把它设为默认或用于任务。`maxOutputTokens` 必须小于 `contextWindow`，worker还要为系统 Prompt 和输入保留空间。所有内置任务要求 `supportsTools=true`；`analyze_image` 还要求 `supportsVision=true`，一期不维护无工具调用的第二套 JSON 生成路径。
+模型可先保存未知限制用于待配置列表；`contextWindow` 与 `maxOutputTokens` 未同时提供正整数时，服务端不允许把它设为默认或用于任务。`maxOutputTokens` 必须小于 `contextWindow`，worker还要为系统 Prompt 和输入保留空间。`supportsTools` 只决定 worker 优先使用工具通道还是直接 JSON 通道，不是内置任务的准入条件；`analyze_image` 仍要求 `supportsVision=true`。
 
 模型 `DELETE` 同样是软删除；queued/running 任务引用时返回 `PROVIDER_IN_USE`，其他历史引用保留。删除默认模型时同时清空对应默认设置，不自动选择另一个模型。
 
@@ -606,7 +606,7 @@ Provider 未返回 usage 时该字段为 `null`。连接测试只发起一次外
 服务端检查：
 
 - item 存在且不在回收站。
-- 模型启用且声明支持工具调用；图片任务还必须支持视觉输入。
+- 模型启用且已配置上下文窗口和最大输出 token；图片任务还必须支持视觉输入。
 - 敏感策略允许。
 - 同一 `itemId + taskType` 没有 `queued` 或 `running` 任务；即使手动点击也不允许并发创建，返回 `AI_TASK_ALREADY_ACTIVE`。不同 task type 可以并行。
 
@@ -828,7 +828,7 @@ Claim 响应只包含本任务需要的数据：
     "id": "...",
     "type": "organize_record",
     "leaseVersion": 1,
-    "promptVersion": "organize-v1",
+    "promptVersion": "organize-v2",
     "schemaVersion": "1.0",
     "limits": {
       "maxTurns": 4,
@@ -865,6 +865,10 @@ API 与 worker 都不得记录该 RPC 请求体。Key 明文只存在于 API 组
 
 机器契约见 `contracts/ai-artifact.schema.json`。本节规定语义。
 
+内置 worker 不要求模型直接拼装这份最终契约。`*-v2` Prompt 让模型输出一份较小的 Artifact Draft：真实 fragment/attachment UUID 分别替换成任务内短引用 `S#`/`A#`，并移除 `schemaVersion`、`artifactType`、block ID、顶层来源集合和 `review.status` 等服务端可确定字段。支持工具调用时，模型把同一 Draft 作为 `emit_artifact_draft` 参数提交；不支持或忽略工具调用时，模型返回可被 `JSON.parse` 直接解析的单个 Draft 对象。两条通道进入同一个 Draft 校验与确定性转换器，转换后仍须完整通过本节最终 Artifact 契约。
+
+若声明支持工具的 Provider 拒绝工具协议，或模型未调用任何工具，worker 在同一任务内最多切换一次直接 JSON 通道。Draft 或最终契约错误最多允许一次带具体字段路径的格式修复；不从自然语言或 Markdown 代码围栏中正则截取 JSON。
+
 ### 12.1 顶层字段
 
 | 字段 | 语义 |
@@ -898,7 +902,7 @@ API 与 worker 都不得记录该 RPC 请求体。Key 明文只存在于 API 组
 
 ### 12.3 来源引用
 
-- 模型只能引用任务输入给出的、属于当前 item raw records 的 fragment ID 和 attachment ID；相关记录上下文不提供可引用 fragment ID。
+- 模型只能引用任务上下文给出的 `S#` 和 `A#`；worker 将其映射为属于当前 item raw records 的 fragment ID 和 attachment ID。相关记录上下文不提供可引用来源。
 - 服务端校验引用归属。
 - 内置任务与结果类型固定对应：`organize_record → organized_record`、`review_record → correctness_review`、`analyze_image → image_analysis`；不接受模型自行改换结果类型。
 - 可作为证据的 fragment 必须来自该 item 的不可变 raw record；AI/标题/元数据搜索片段不能反向充当“原始证据”。
@@ -917,9 +921,9 @@ V1 Schema 不接受未知 block。前端仍必须实现运行时兜底，以处�
 ### 12.5 校验顺序
 
 1. 响应大小限制。
-2. JSON 解析。
-3. JSON Schema 校验。
-4. 任务类型与 artifact type 对应校验。
+2. Draft JSON 解析；工具参数和直接 JSON 使用同一对象结构。
+3. Draft Schema 校验与 `S#`/`A#` 授权映射。
+4. 服务端生成版本、artifact type、block ID、顶层来源集合和 review 状态，再执行最终 JSON Schema 校验。
 5. 所有 block ID 唯一；block、`command_steps` step、checklist item 和 warning 的 `sourceFragmentIds` 都属于顶层集合，顶层集合覆盖全部实际引用。
 6. fragment/attachment 属于本任务授权集，完成非空证据和图片覆盖校验。
 7. table 每行单元格数量等于 columns 数量；`suggestedTags` 在 trim + Unicode 大小写折叠后去重。
@@ -933,7 +937,7 @@ Schema 的 `format: uuid` 必须在 Go 与 Node 校验器中显式注册等价�
 
 ## 13. Prompt 与版本
 
-- Prompt 以仓库文件管理并具有稳定版本名，例如 `organize-v1`。
+- Prompt 以仓库文件管理并具有稳定版本名，例如 `organize-v2`。
 - 修改 Prompt 行为但不改变输出结构，升级 promptVersion。
 - 改变字段或 block 结构，升级 JSON Schema 版本并提供前端兼容。
 - 任务保存实际 promptVersion、schemaVersion、模型和来源记录。

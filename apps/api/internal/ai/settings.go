@@ -115,15 +115,15 @@ func (service *Service) resolveDefaultModel(request *http.Request, supplied *str
 	if err != nil {
 		return nil, errInvalidProviderInput
 	}
-	var supportsTools, supportsVision bool
+	var supportsVision bool
 	err = service.database.QueryRow(request.Context(), `
-		SELECT model.supports_tools, model.supports_vision
+		SELECT model.supports_vision
 		FROM provider_models model JOIN provider_configs provider ON provider.id = model.provider_config_id
 		WHERE model.id = $1 AND model.deleted_at IS NULL AND provider.deleted_at IS NULL
 		  AND model.enabled AND provider.enabled AND model.context_window IS NOT NULL
 		  AND model.max_output_tokens IS NOT NULL
-	`, id).Scan(&supportsTools, &supportsVision)
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && (!supportsTools || vision && !supportsVision) {
+	`, id).Scan(&supportsVision)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && vision && !supportsVision {
 		return nil, errInvalidProviderInput
 	}
 	if err != nil {

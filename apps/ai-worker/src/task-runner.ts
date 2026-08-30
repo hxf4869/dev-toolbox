@@ -1,5 +1,10 @@
 import type { AssistantMessage, Context, Tool, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai'
 
+import {
+  artifactDraftSchema,
+  createModelTaskContext,
+  materializeArtifactDraft,
+} from './artifact-draft.js'
 import type { ArtifactContract } from './artifact-schema.js'
 import { ProviderGatewayError, runProviderTurn, type ProviderTurnRequest } from './model-gateway.js'
 import { PromptStore } from './prompts.js'
@@ -63,6 +68,14 @@ export class TaskRunner {
   }
 
   private async execute(claim: ClaimedTask, usage: Usage, heartbeat: TaskHeartbeat): Promise<void> {
+    if (claim.task.promptVersion.endsWith('-v2')) {
+      await this.executeDraft(claim, usage, heartbeat)
+      return
+    }
+    await this.executeLegacy(claim, usage, heartbeat)
+  }
+
+  private async executeLegacy(claim: ClaimedTask, usage: Usage, heartbeat: TaskHeartbeat): Promise<void> {
     validateClaimLimits(claim)
     const deadlineAt = new Date(claim.task.limits.deadlineAt)
     const prompt = await this.prompts.load(claim.task.promptVersion)
@@ -166,6 +179,171 @@ export class TaskRunner {
       }
     }
     throw new TaskExecutionError('AI_TURN_LIMIT', '模型交互达到四轮上限仍未产生有效候选')
+  }
+
+  private async executeDraft(claim: ClaimedTask, usage: Usage, heartbeat: TaskHeartbeat): Promise<void> {
+    validateClaimLimits(claim)
+    const deadlineAt = new Date(claim.task.limits.deadlineAt)
+    const prompt = await this.prompts.load(claim.task.promptVersion)
+    const state = new DraftToolState(claim)
+    let toolChannel = claim.provider.supportsTools
+    let channelFallbackUsed = false
+    let context = await createDraftConversation(prompt, claim, toolChannel, this.api, state, heartbeat.signal)
+    let formatRepairUsed = false
+    const turns = Math.min(maximumTurns, claim.task.limits.maxTurns)
+
+    for (let turn = 1; turn <= turns; turn += 1) {
+      ensureBoundary(deadlineAt, heartbeat)
+      await this.event(claim, 'model_request_started', { turn })
+      const startedAt = performance.now()
+      let message: AssistantMessage
+      let attempts: number
+      try {
+        const result = await this.providerTurn({
+          provider: claim.provider,
+          context,
+          deadlineAt,
+          maxOutputTokens: claim.provider.maxOutputTokens,
+          allowInsecureHttp: this.allowInsecureProviderHttp,
+          signal: heartbeat.signal,
+        })
+        message = result.message
+        attempts = result.attempts
+      } catch (error) {
+        if (heartbeat.cancelRequested) throw new TaskExecutionError('AI_TASK_CANCELLED', '用户已请求取消任务', error)
+        if (Date.now() >= deadlineAt.getTime()) throw new TaskExecutionError('AI_TASK_DEADLINE_EXCEEDED', '任务超过五分钟运行上限', error)
+        if (
+          toolChannel &&
+          !channelFallbackUsed &&
+          error instanceof ProviderGatewayError &&
+          error.category === 'protocol_error'
+        ) {
+          toolChannel = false
+          channelFallbackUsed = true
+          context = await createDraftConversation(prompt, claim, false, this.api, state, heartbeat.signal)
+          continue
+        }
+        throw error
+      }
+      usage.inputTokens += message.usage.input
+      usage.outputTokens += message.usage.output
+      await this.event(claim, 'model_request_finished', {
+        turn,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        inputTokens: message.usage.input,
+        outputTokens: message.usage.output,
+        attempt: attempts,
+      })
+      context.messages.push(message)
+      const calls = message.content.filter((part): part is ToolCall => part.type === 'toolCall')
+
+      if (toolChannel && calls.length === 0 && !state.contextLoaded) {
+        toolChannel = false
+        channelFallbackUsed = true
+        context = await createDraftConversation(prompt, claim, false, this.api, state, heartbeat.signal)
+        continue
+      }
+
+      if (calls.length === 0) {
+        const parsed = parseExactDraft(message)
+        if (parsed.error !== undefined) {
+          if (formatRepairUsed) {
+            throw new TaskExecutionError('AI_ARTIFACT_SCHEMA_INVALID', `模型 Draft 两次无效：${parsed.error}`)
+          }
+          formatRepairUsed = true
+          context.messages.push({
+            role: 'user',
+            content: `只修复 JSON 输出，不要解释、不要 Markdown 代码围栏。错误：${parsed.error}`,
+            timestamp: Date.now(),
+          })
+          continue
+        }
+        const completed = await this.acceptDraft(
+          claim,
+          parsed.draft,
+          state,
+          usage,
+          heartbeat,
+          turn,
+          undefined,
+          context,
+          formatRepairUsed,
+        )
+        if (completed) return
+        formatRepairUsed = true
+        continue
+      }
+
+      for (const call of calls) {
+        ensureBoundary(deadlineAt, heartbeat)
+        state.countToolCall(claim.task.limits.maxToolCalls)
+        await this.event(claim, 'tool_started', { turn, tool: call.name, toolCalls: state.toolCalls })
+        const outcome = await state.execute(call, this.api, heartbeat.signal)
+        await this.event(claim, 'tool_finished', { turn, tool: call.name, toolCalls: state.toolCalls })
+        if (outcome.draft === undefined) {
+          context.messages.push(outcome.result)
+          continue
+        }
+        const completed = await this.acceptDraft(
+          claim,
+          outcome.draft,
+          state,
+          usage,
+          heartbeat,
+          turn,
+          call,
+          context,
+          formatRepairUsed,
+        )
+        if (completed) return
+        formatRepairUsed = true
+        break
+      }
+    }
+    throw new TaskExecutionError('AI_TURN_LIMIT', '模型交互达到四轮上限仍未产生有效 Draft')
+  }
+
+  private async acceptDraft(
+    claim: ClaimedTask,
+    draft: unknown,
+    state: DraftToolState,
+    usage: Usage,
+    heartbeat: TaskHeartbeat,
+    turn: number,
+    call: ToolCall | undefined,
+    context: Context,
+    formatRepairUsed: boolean,
+  ): Promise<boolean> {
+    const materialized = materializeArtifactDraft(draft, claim, this.artifactContract, state.readAttachmentIds)
+    if (materialized.artifact === undefined) {
+      const detail = materialized.error ?? 'Draft 无法转换为 Artifact'
+      if (formatRepairUsed) throw new TaskExecutionError('AI_ARTIFACT_SCHEMA_INVALID', `模型 Draft 两次未通过校验：${detail}`)
+      context.messages.push(call === undefined
+        ? {
+            role: 'user',
+            content: `只修复 Draft JSON，不要解释、不要 Markdown 代码围栏。错误：${detail}`,
+            timestamp: Date.now(),
+          }
+        : toolError(call, `Draft 未通过校验，只修复这些字段后重新提交：${detail}`))
+      return false
+    }
+    await this.event(claim, 'candidate_received', { turn, toolCalls: state.toolCalls })
+    try {
+      await completeWithOneTransportRetry(this.api, claim, materialized.artifact, usage, heartbeat.signal)
+      return true
+    } catch (error) {
+      if (error instanceof TaskClientError && error.status === 422 && !formatRepairUsed) {
+        context.messages.push(call === undefined
+          ? {
+              role: 'user',
+              content: '服务端拒绝了转换结果。只重新提交一份完整 Draft JSON，不要解释、不要 Markdown 代码围栏。',
+              timestamp: Date.now(),
+            }
+          : toolError(call, '服务端拒绝了转换结果；只重新提交一份完整 Draft。'))
+        return false
+      }
+      throw error
+    }
   }
 
   private event(claim: ClaimedTask, type: SafeTaskEvent['type'], details: SafeTaskEvent['details']): Promise<void> {
@@ -302,6 +480,191 @@ class ToolState {
     this.callKeys.add(key)
   }
 }
+
+class DraftToolState {
+  toolCalls = 0
+  contextLoaded = false
+  readonly callKeys = new Set<string>()
+  readonly readAttachmentIds = new Set<string>()
+
+  constructor(readonly claim: ClaimedTask) {}
+
+  countToolCall(configuredMaximum: number): void {
+    this.toolCalls += 1
+    if (this.toolCalls > Math.min(maximumToolCalls, configuredMaximum)) {
+      throw new TaskExecutionError('AI_TOOL_LIMIT', '领域工具调用达到八次上限')
+    }
+  }
+
+  async execute(
+    call: ToolCall,
+    api: Pick<TaskApi, 'attachment'>,
+    signal: AbortSignal,
+  ): Promise<{ result: ToolResultMessage; draft?: Record<string, unknown> }> {
+    if (call.name === 'get_record_context') {
+      requireKeys(call.arguments, [])
+      this.unique('get_record_context')
+      this.contextLoaded = true
+      return { result: toolJson(call, createModelTaskContext(this.claim)) }
+    }
+    if (!this.contextLoaded) {
+      throw new TaskExecutionError('AI_TOOL_INVALID', '模型必须先读取当前记录上下文')
+    }
+    if (call.name === 'get_attachment') {
+      requireKeys(call.arguments, ['attachmentRef'])
+      if (this.claim.task.type !== 'analyze_image' || typeof call.arguments.attachmentRef !== 'string') {
+        throw new TaskExecutionError('AI_TOOL_INVALID', '当前任务不允许读取该附件')
+      }
+      const attachment = attachmentForRef(this.claim, call.arguments.attachmentRef)
+      if (attachment === undefined || attachment.kind !== 'image' || !attachment.mediaType.startsWith('image/')) {
+        throw new TaskExecutionError('AI_TOOL_INVALID', '附件引用不在任务授权图片集合中')
+      }
+      this.unique(`get_attachment:${attachment.id}`)
+      const bytes = await api.attachment(this.claim, attachment, signal)
+      this.readAttachmentIds.add(attachment.id)
+      return {
+        result: {
+          role: 'toolResult', toolCallId: call.id, toolName: call.name, isError: false,
+          content: [
+            { type: 'text', text: JSON.stringify({ attachmentRef: call.arguments.attachmentRef, mediaType: attachment.mediaType }) },
+            { type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: attachment.mediaType },
+          ],
+          timestamp: Date.now(),
+        },
+      }
+    }
+    if (call.name === 'search_related_records') {
+      requireKeys(call.arguments, ['query', 'limit'])
+      const query = typeof call.arguments.query === 'string' ? call.arguments.query.trim() : ''
+      const limit = call.arguments.limit
+      if (!query || query.length > 200 || !Number.isSafeInteger(limit) || limit < 1 || limit > 10) {
+        throw new TaskExecutionError('AI_TOOL_INVALID', '相关记录检索参数无效')
+      }
+      this.unique(`search_related_records:${query.toLocaleLowerCase()}:${String(limit)}`)
+      const normalized = query.toLocaleLowerCase()
+      const items = this.claim.input.relatedRecords.filter((entry) =>
+        `${entry.title}\n${entry.summary}`.toLocaleLowerCase().includes(normalized),
+      ).slice(0, limit as number).map((entry) => ({ title: entry.title, summary: entry.summary }))
+      return { result: toolJson(call, { items }) }
+    }
+    if (call.name === 'emit_artifact_draft') {
+      if (!isObject(call.arguments)) throw new TaskExecutionError('AI_TOOL_INVALID', 'Draft 参数无效')
+      return { result: toolJson(call, { accepted: true }), draft: call.arguments }
+    }
+    throw new TaskExecutionError('AI_TOOL_INVALID', '模型请求了未授权工具')
+  }
+
+  private unique(key: string): void {
+    if (this.callKeys.has(key)) throw new TaskExecutionError('AI_TOOL_INVALID', '模型重复调用了同一领域工具')
+    this.callKeys.add(key)
+  }
+}
+
+async function createDraftConversation(
+  prompt: string,
+  claim: ClaimedTask,
+  toolChannel: boolean,
+  api: Pick<TaskApi, 'attachment'>,
+  state: DraftToolState,
+  signal: AbortSignal,
+): Promise<Context> {
+  const channelInstruction = toolChannel
+    ? '必须先调用 get_record_context。完成后调用 emit_artifact_draft；该工具的参数本身就是完整 Draft，不要添加 draft 或 artifact 包装层。'
+    : '当前消息已直接提供完整受控上下文。最终响应只能是一个完整 Draft JSON 对象；不要解释，不要 Markdown 代码围栏，不要调用工具。'
+  const context: Context = {
+    systemPrompt: `${prompt}\n\n任务 schemaVersion=${claim.task.schemaVersion}，taskType=${claim.task.type}。\n${draftContractGuide}\n\n${channelInstruction}`,
+    messages: [],
+    ...(toolChannel ? { tools: createDraftTools(claim) } : {}),
+  }
+  if (toolChannel) {
+    context.messages.push({
+      role: 'user',
+      content: '读取当前条目的受控上下文，随后提交 Artifact Draft。',
+      timestamp: Date.now(),
+    })
+    return context
+  }
+
+  const modelContext = createModelTaskContext(claim)
+  const text = `受控任务上下文如下。S# 只能从 sources.ref 选择，A# 只能从 attachments.ref 选择。\n${JSON.stringify(modelContext)}\n\n现在只返回完整 Draft JSON。`
+  if (claim.task.type !== 'analyze_image') {
+    context.messages.push({ role: 'user', content: text, timestamp: Date.now() })
+    return context
+  }
+  const content: Array<
+    { type: 'text'; text: string } |
+    { type: 'image'; data: string; mimeType: string }
+  > = [{ type: 'text', text }]
+  for (const attachment of claim.input.attachments) {
+    if (attachment.kind !== 'image' || !attachment.mediaType.startsWith('image/')) continue
+    const bytes = await api.attachment(claim, attachment, signal)
+    state.readAttachmentIds.add(attachment.id)
+    const attachmentIndex = claim.input.attachments.indexOf(attachment) + 1
+    content.push({ type: 'text', text: `下面是附件 A${attachmentIndex}：` })
+    content.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: attachment.mediaType })
+  }
+  context.messages.push({ role: 'user', content, timestamp: Date.now() })
+  return context
+}
+
+function createDraftTools(claim: ClaimedTask): Tool[] {
+  const tools: Tool[] = [
+    asTool('get_record_context', '读取带 R#/S#/A# 短引用的当前条目受控上下文。', objectSchema({})),
+  ]
+  if (claim.task.type === 'analyze_image') {
+    tools.push(asTool('get_attachment', '读取一张当前任务授权的 A# 图片。', objectSchema({
+      attachmentRef: { type: 'string', pattern: '^A[1-9][0-9]*$' },
+    }, ['attachmentRef'])))
+  }
+  if (claim.input.relatedRecords.length > 0) {
+    tools.push(asTool('search_related_records', '筛选服务端已提供的安全相关记录；结果不可作为 S# 来源。', objectSchema({
+      query: { type: 'string', minLength: 1, maxLength: 200 },
+      limit: { type: 'integer', minimum: 1, maximum: 10 },
+    }, ['query', 'limit'])))
+  }
+  tools.push(asTool('emit_artifact_draft', '提交完整 Artifact Draft；参数直接使用 Draft 根对象。', artifactDraftSchema))
+  return tools
+}
+
+function attachmentForRef(
+  claim: ClaimedTask,
+  ref: string,
+): ClaimedTask['input']['attachments'][number] | undefined {
+  const match = /^A([1-9][0-9]*)$/.exec(ref)
+  if (match === null) return undefined
+  return claim.input.attachments[Number(match[1]) - 1]
+}
+
+function parseExactDraft(message: AssistantMessage): { draft: Record<string, unknown>; error?: undefined } | { draft?: undefined; error: string } {
+  const parts = message.content.filter((part) => part.type === 'text')
+  if (parts.length === 0) return { error: '响应中没有 JSON 文本' }
+  const raw = parts.map((part) => part.text).join('').trim()
+  if (!raw) return { error: '响应中的 JSON 文本为空' }
+  try {
+    const value: unknown = JSON.parse(raw)
+    return isObject(value) ? { draft: value } : { error: 'JSON 根节点必须是对象' }
+  } catch {
+    return { error: '响应必须是可直接 JSON.parse 的单个对象' }
+  }
+}
+
+const draftContractGuide = `Artifact Draft 固定包含 title、summary、classification、blocks、warnings、limitations。
+classification 固定包含 contentType、suggestedFolderPath、suggestedTags、sensitivitySuggestion，可选 sensitivityReason。
+contentType 只能是 operations_guide、command_snippet、credential_related、deployment、database、development、reference、image、file、mixed、other；sensitivitySuggestion 只能是 normal、sensitive、unknown。
+每个 block 固定包含 type 和 sourceRefs。type 及额外必填字段：
+- markdown: markdown
+- code: language, code
+- command: shell, command
+- command_steps: title, steps；每个 step 含 title, commands, sourceRefs
+- key_value: entries；每项含 key, value, sensitive
+- table: columns, rows，且每行列数一致
+- checklist: title, items；每项含 label, sourceRefs
+- callout: tone, body
+- image_reference: attachmentRef
+- attachment_reference: attachmentRef
+shell 只能是 bash、sh、zsh、powershell、cmd、sql、docker、yaml、text、other；callout tone 只能是 info、tip、warning、danger。
+每个 warning 固定包含 severity、title、message、basis、sourceRefs；severity 只能是 info、warning、danger；basis 只能是 source_evidence、model_knowledge，且 basis=source_evidence 时 sourceRefs 不得为空。
+sourceRefs 只能填写当前上下文的 S#；attachmentRef 只能填写当前上下文的 A#。不要输出 schemaVersion、artifactType、block id、真实 UUID、顶层 sourceFragmentIds 或 review，服务端会确定性生成。limitations 至少写一条真实限制。`
 
 function createTools(schema: Record<string, unknown>, claim: ClaimedTask): Tool[] {
   const tools: Tool[] = [

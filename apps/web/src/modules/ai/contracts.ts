@@ -274,7 +274,6 @@ export function availableModels(providers: ProviderEntry[], visionOnly = false):
           .filter(
             (model) =>
               model.enabled &&
-              model.supportsTools &&
               model.contextWindow !== null &&
               model.maxOutputTokens !== null &&
               (!visionOnly || model.supportsVision),

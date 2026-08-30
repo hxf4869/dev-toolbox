@@ -75,8 +75,7 @@ func (service *Service) createBatchTask(
 	if err != nil {
 		return taskEntry{}, errTaskValidation
 	}
-	organizeModel, err := service.loadEnabledTaskModel(ctx, organizeModelID)
-	if err != nil || !organizeModel.SupportsTools {
+	if _, err := service.loadEnabledTaskModel(ctx, organizeModelID); err != nil {
 		return taskEntry{}, errTaskValidation
 	}
 	var visionModelID *uuid.UUID
@@ -86,7 +85,7 @@ func (service *Service) createBatchTask(
 			return taskEntry{}, errTaskValidation
 		}
 		visionModel, err := service.loadEnabledTaskModel(ctx, parsed)
-		if err != nil || !visionModel.SupportsTools || !visionModel.SupportsVision {
+		if err != nil || !visionModel.SupportsVision {
 			return taskEntry{}, errTaskValidation
 		}
 		visionModelID = &parsed
