@@ -1,6 +1,6 @@
 {
-  "candidateVersion": "v1.0.1",
-  "generatedAt": "2026-08-30T10:08:18Z",
+  "candidateVersion": "v1.0.2",
+  "generatedAt": "2026-08-30T11:25:25Z",
   "checks": [
     {
       "id": "data_integrity",
@@ -27,15 +27,15 @@
       "id": "ai_policy",
       "label": "AI 策略与版本",
       "status": "passed",
-      "summary": "本地 mock 覆盖三协议、受控工具、block/redact/allow、任务有界停止和 Artifact 版本契约。",
-      "checkedAt": "2026-08-29T23:59:22Z"
+      "summary": "本地 mock 覆盖三协议、受控工具、block/redact/allow、任务有界停止和 Artifact 版本契约；v1.0.2 验证 Provider 连接测试 60 秒 deadline。",
+      "checkedAt": "2026-08-30T10:59:50Z"
     },
     {
       "id": "backup_restore",
       "label": "备份与灾难恢复",
       "status": "passed",
-      "summary": "v1.0.1 隔离生产形态已完成加密备份、restic check、空目录恢复、10/10 附件与认证/组织/AI 状态回读；正式仓库继续使用京东云 OSS。",
-      "checkedAt": "2026-08-30T09:49:56Z"
+      "summary": "v1.0.2 镜像已从正式 OSS snapshot 完成隔离恢复并全服务健康；目标版本完整合成数据加密备份、restic check 与空机恢复通过，10/10 附件及认证、组织、AI 状态一致。",
+      "checkedAt": "2026-08-30T11:25:25Z"
     },
     {
       "id": "browser_accessibility",
@@ -55,8 +55,8 @@
       "id": "deployment_security",
       "label": "生产部署与依赖",
       "status": "passed",
-      "summary": "v1.0.1 已在京东云完成隔离恢复、升级前备份和正式切换；四容器、公网健康、零应用宿主机端口、Secret、日志与依赖门禁通过，Ubuntu 自动安全更新已恢复并清空安全更新队列。",
-      "checkedAt": "2026-08-30T10:08:18Z"
+      "summary": "v1.0.2 已完成隔离恢复、升级前 OSS 快照和正式切换；四容器健康且零重启，Nginx 65 秒等待配置与公网健康检查通过。",
+      "checkedAt": "2026-08-30T11:20:20Z"
     }
   ]
 }
