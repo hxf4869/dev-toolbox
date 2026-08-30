@@ -12,7 +12,7 @@ write_env() {
   edge_mode=$2
   {
     printf '%s\n' 'APP_DOMAIN=toolbox.example.net'
-    printf '%s\n' 'APP_VERSION=v1.0.1'
+    printf '%s\n' 'APP_VERSION=v1.0.2'
     printf '%s\n' 'APP_TIMEZONE=Asia/Shanghai'
     printf '%s\n' 'POSTGRES_DB=dev_toolbox'
     printf '%s\n' 'POSTGRES_USER=dev_toolbox'
@@ -67,6 +67,7 @@ grep -F 'server_name toolbox.example.net;' "$rendered_config" >/dev/null
 grep -F 'limit_req_zone $binary_remote_addr zone=dev_toolbox_login_per_ip:10m rate=6r/m;' "$rendered_config" >/dev/null
 grep -F 'limit_req zone=dev_toolbox_login_per_ip burst=5 nodelay;' "$rendered_config" >/dev/null
 grep -F 'proxy_set_header X-Forwarded-For $remote_addr;' "$rendered_config" >/dev/null
+grep -F 'proxy_read_timeout 65s;' "$rendered_config" >/dev/null
 grep -F 'proxy_pass http://dev-toolbox-gateway:80;' "$rendered_config" >/dev/null
 
 rendered_filter="$test_root/fail2ban-filter.conf"

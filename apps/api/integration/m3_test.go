@@ -585,7 +585,8 @@ func assertWorkerSnapshot(t *testing.T, capture *m3WorkerCapture) {
 		t.Fatal("provider test did not use the internal service credential")
 	}
 	var payload struct {
-		Provider struct {
+		DeadlineAt time.Time `json:"deadlineAt"`
+		Provider   struct {
 			APIKey  string `json:"apiKey"`
 			ModelID string `json:"modelId"`
 			BaseURL string `json:"baseUrl"`
@@ -597,6 +598,10 @@ func assertWorkerSnapshot(t *testing.T, capture *m3WorkerCapture) {
 	if payload.Provider.APIKey != m3ProviderKey || payload.Provider.ModelID != "mock-model" ||
 		payload.Provider.BaseURL != "https://provider.example.test/gateway/v1" {
 		t.Fatal("provider test did not use the saved provider/model snapshot")
+	}
+	remaining := time.Until(payload.DeadlineAt)
+	if remaining < 55*time.Second || remaining > 61*time.Second {
+		t.Fatalf("provider test deadline remaining = %s, want about 60s", remaining)
 	}
 }
 

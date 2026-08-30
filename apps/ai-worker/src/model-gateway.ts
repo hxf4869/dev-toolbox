@@ -11,6 +11,7 @@ import { streamSimple as streamOpenAICompletions } from '@earendil-works/pi-ai/a
 import { streamSimple as streamOpenAIResponses } from '@earendil-works/pi-ai/api/openai-responses'
 
 const maximumResponseBytes = 4 * 1024 * 1024
+const maximumProviderTestWindowMs = 65_000
 
 export type ProviderProtocol = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
 
@@ -71,7 +72,7 @@ export async function testProviderConnection(
     throw new ProviderGatewayError('unavailable')
   }
   const remainingMs = deadlineAt.getTime() - Date.now()
-  if (remainingMs <= 0 || remainingMs > 15_000) throw new ProviderGatewayError('unavailable')
+  if (remainingMs <= 0 || remainingMs > maximumProviderTestWindowMs) throw new ProviderGatewayError('unavailable')
 
   const expectedUrl = new URL(endpointFor(snapshot.protocol), `${baseUrl}/`).toString()
   let responseStatus: number | undefined

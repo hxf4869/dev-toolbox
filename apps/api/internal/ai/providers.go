@@ -381,14 +381,14 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 		writeProviderInternal(response, request)
 		return
 	}
-	deadline := service.now().UTC().Add(10 * time.Second)
+	deadline := service.now().UTC().Add(providerTestTimeout)
 	payload := map[string]any{
 		"requestId":  httpapi.RequestIDFromContext(request.Context()),
 		"provider":   map[string]any{"protocol": protocol, "baseUrl": baseURL, "apiKey": apiKey, "modelId": upstreamModelID},
 		"deadlineAt": deadline,
 	}
 	encoded, _ := json.Marshal(payload)
-	ctx, cancel := context.WithDeadline(request.Context(), deadline.Add(time.Second))
+	ctx, cancel := context.WithDeadline(request.Context(), deadline.Add(providerTestResponseGrace))
 	defer cancel()
 	internalRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, service.workerURL+"/internal/provider-test", bytes.NewReader(encoded))
 	if err != nil {

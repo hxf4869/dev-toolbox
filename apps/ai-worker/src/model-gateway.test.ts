@@ -36,7 +36,7 @@ describe('ModelGateway provider connection test', () => {
       })
       const result = await testProviderConnection(
         { protocol, baseUrl: `${baseUrl}/gateway/v1/`, apiKey: 'local-test-key', modelId: 'mock-model' },
-        new Date(Date.now() + 5_000),
+        new Date(Date.now() + 60_000),
         true,
       )
 
@@ -138,6 +138,12 @@ describe('ModelGateway provider connection test', () => {
   ])('rejects an unsafe base URL: %s', async (baseUrl) => {
     await expect(
       testProviderConnection(snapshot(baseUrl), new Date(Date.now() + 5_000), false),
+    ).rejects.toMatchObject({ category: 'unavailable' })
+  })
+
+  it('rejects a provider test deadline beyond the supported window', async () => {
+    await expect(
+      testProviderConnection(snapshot('https://example.com/v1'), new Date(Date.now() + 66_000), false),
     ).rejects.toMatchObject({ category: 'unavailable' })
   })
 })

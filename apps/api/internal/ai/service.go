@@ -11,6 +11,11 @@ import (
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
 )
 
+const (
+	providerTestTimeout       = 60 * time.Second
+	providerTestResponseGrace = time.Second
+)
+
 type Service struct {
 	database                  *pgxpool.Pool
 	masterKey                 []byte
@@ -35,7 +40,7 @@ func NewService(
 		workerURL: workerURL, internalServiceToken: internalServiceToken,
 		attachmentRoot:            filepath.Clean(attachmentRoot),
 		allowInsecureProviderHTTP: allowInsecureProviderHTTP,
-		httpClient:                &http.Client{Timeout: 12 * time.Second}, now: time.Now,
+		httpClient:                &http.Client{Timeout: providerTestTimeout + providerTestResponseGrace + time.Second}, now: time.Now,
 	}
 }
 
