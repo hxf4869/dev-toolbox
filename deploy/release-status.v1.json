@@ -1,6 +1,6 @@
 {
-  "candidateVersion": "v1.0.2",
-  "generatedAt": "2026-08-30T11:29:19Z",
+  "candidateVersion": "v1.0.3",
+  "generatedAt": "2026-08-30T12:47:12Z",
   "checks": [
     {
       "id": "data_integrity",
@@ -27,14 +27,14 @@
       "id": "ai_policy",
       "label": "AI 策略与版本",
       "status": "passed",
-      "summary": "本地 mock 覆盖三协议、受控工具、block/redact/allow、任务有界停止和 Artifact 版本契约；v1.0.2 验证 Provider 连接测试 60 秒 deadline。",
-      "checkedAt": "2026-08-30T10:59:50Z"
+      "summary": "v1.0.3 本地 mock 覆盖工具、严格 JSON、协议拒绝/忽略工具回退与一次格式修复；DeepSeek V4 Flash 实测两轮成功，旧任务保留 v1 行为。",
+      "checkedAt": "2026-08-30T12:47:12Z"
     },
     {
       "id": "backup_restore",
       "label": "备份与灾难恢复",
       "status": "passed",
-      "summary": "v1.0.2 镜像已从正式 OSS snapshot 完成隔离恢复并全服务健康；目标版本完整合成数据加密备份、restic check 与空机恢复通过，10/10 附件及认证、组织、AI 状态一致。",
+      "summary": "v1.0.2 已完成正式 OSS 隔离恢复、加密备份、restic check 与空机恢复，10/10 附件及认证、组织、AI 状态一致；v1.0.3 未重跑且未访问对象存储。",
       "checkedAt": "2026-08-30T11:25:25Z"
     },
     {
@@ -55,8 +55,8 @@
       "id": "deployment_security",
       "label": "生产部署与依赖",
       "status": "passed",
-      "summary": "v1.0.2 已完成隔离恢复、升级前 OSS 快照和正式切换；四容器运行且零重启，已有三项容器健康检查、Nginx 65 秒等待配置与公网健康检查均通过。",
-      "checkedAt": "2026-08-30T11:29:19Z"
+      "summary": "v1.0.3 三个应用镜像从提交 40c56f2 构建并切换；API、worker 和公网健康检查通过，四容器零重启且启动窗口错误计数为 0；PostgreSQL 未重启。",
+      "checkedAt": "2026-08-30T12:47:12Z"
     }
   ]
 }
