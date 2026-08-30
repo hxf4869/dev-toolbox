@@ -1,6 +1,6 @@
 {
   "candidateVersion": "v1.0.2",
-  "generatedAt": "2026-08-30T11:25:25Z",
+  "generatedAt": "2026-08-30T11:29:19Z",
   "checks": [
     {
       "id": "data_integrity",
@@ -55,8 +55,8 @@
       "id": "deployment_security",
       "label": "生产部署与依赖",
       "status": "passed",
-      "summary": "v1.0.2 已完成隔离恢复、升级前 OSS 快照和正式切换；四容器健康且零重启，Nginx 65 秒等待配置与公网健康检查通过。",
-      "checkedAt": "2026-08-30T11:20:20Z"
+      "summary": "v1.0.2 已完成隔离恢复、升级前 OSS 快照和正式切换；四容器运行且零重启，已有三项容器健康检查、Nginx 65 秒等待配置与公网健康检查均通过。",
+      "checkedAt": "2026-08-30T11:29:19Z"
     }
   ]
 }

@@ -16,9 +16,9 @@
 
 - Provider 连接测试总超时由 10 秒延长至 60 秒，API 与 AI worker 的 deadline 窗口同步放宽，外置 Nginx 读取超时设为 65 秒；正式 AI 任务的 5 分钟上限未改变。
 - AI worker 119 项测试、API AI 包测试、M3 Provider 集成、worker TypeScript 检查、Web/worker 构建、外置 Nginx 与 restic 后端部署契约均通过。
-- 京东云使用已有正式 OSS snapshot `2885bcef` 在隔离目录、隔离 Compose 项目和隔离边缘网络完成 `v1.0.2` 恢复，四个目标镜像均健康；该 snapshot 当时没有附件，所以这里只证明正式备份可恢复和目标版本可启动，不把它记作附件完整性证据。
+- 京东云使用已有正式 OSS snapshot `2885bcef` 在隔离目录、隔离 Compose 项目和隔离边缘网络完成 `v1.0.2` 恢复，四个目标服务均正常启动；该 snapshot 当时没有附件，所以这里只证明正式备份可恢复和目标版本可启动，不把它记作附件完整性证据。
 - 完整合成数据恢复演练生成加密 snapshot `ceadfd51`，通过 `restic check` 后从空目录与空数据库恢复；20 条文本、5 张原图、5 个普通附件、10/10 引用附件及认证、组织、回收站、AI 状态全部一致。
-- 正式升级前生成 OSS snapshot `4397f018`，随后从 `v1.0.1` 切换到 `v1.0.2`；公网健康检查返回 200，四个容器健康且重启计数均为 0，升级后日志未发现 panic、fatal、uncaught、unhandled 或 error 标记。
+- 正式升级前生成 OSS snapshot `4397f018`，随后从 `v1.0.1` 切换到 `v1.0.2`；公网健康检查返回 200，四个容器均在运行且重启计数为 0，API、AI worker、PostgreSQL 的容器健康检查均通过，gateway 按部署定义未配置 Docker healthcheck。升级后日志未发现 panic、fatal、uncaught、unhandled 或 error 标记。
 - 外置 Nginx 配置校验与 reload 均通过，Provider 测试链路允许最长 65 秒读取等待；TLS 证书未在本次补丁中变更。
 
 ### v1.0.1
@@ -41,7 +41,7 @@
 | 备份与灾难恢复 | 通过 | v1.0.2 隔离生产形态空机恢复、京东云 OSS 加密 snapshot、`restic check`、10/10 引用附件及认证/组织/AI 状态回读均通过；每日单实例调度已启用 |
 | 浏览器与可访问性 | 通过 | Chrome 与 Safari 已在正式 HTTPS 上完成核心 E2E；响应式、主题、键盘、reduced motion 与 VoiceOver 基础人工抽查通过 |
 | 目标主机性能 | 通过 | 京东云正式硬件上的完整固定规模测试通过：搜索 P95 335.915 ms，纯文本保存 P95 4.692 ms |
-| 生产部署与依赖 | 通过 | v1.0.2 已完成隔离恢复、升级前快照和正式切换；四容器健康且零重启，外置 Nginx 65 秒读取等待、零应用宿主机端口、安全头、登录限速、Fail2ban、Secret、日志、漏洞与许可证门禁通过；Ubuntu 安全更新已恢复自动执行 |
+| 生产部署与依赖 | 通过 | v1.0.2 已完成隔离恢复、升级前快照和正式切换；四容器运行且零重启，已有三项容器健康检查与公网就绪检查均通过，外置 Nginx 65 秒读取等待、零应用宿主机端口、安全头、登录限速、Fail2ban、Secret、日志、漏洞与许可证门禁通过；Ubuntu 安全更新已恢复自动执行 |
 
 任何阻塞项存在时，都不得把 M5、发布候选或一期 Definition of Done 标为完成。
 
