@@ -537,7 +537,7 @@ worker complete 先按 `task_run_id` 查询已有 Artifact：若存在且任务�
 - fenced code block 独立成为 `code` 片段。
 - 普通段落在不跨标题/代码边界的前提下合并，目标不超过 4 KiB UTF-8，硬上限 8 KiB。
 - 纯文本连续非空行按段落组处理。
-- 过长单段/代码块优先在换行处分割；单行本身超过 8 KiB 时才按 UTF-8 字符边界硬分割。详情复制始终读取原始正文，不拼搜索片段。
+- 过长原始单段/代码块优先在换行处分割；单行本身超过 8 KiB 时才按 UTF-8 字符边界硬分割。AI Artifact 的派生检索文本按最多 4 KiB、优先换行且保持 UTF-8 边界拆成多个 `ai_text`/`image_text` 片段，避免单个长 Artifact 超过 PostgreSQL 索引项上限。详情复制始终读取原始正文或 Artifact 内容，不拼搜索片段。
 - V1 不做重叠窗口；命中定位依赖每片段的原始字节范围。
 - `normalized_content` 只做 Unicode 小写、换行/空白统一和首尾空白去除，不删除标点、路径分隔符或命令符号。
 

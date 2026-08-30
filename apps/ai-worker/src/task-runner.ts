@@ -4,6 +4,8 @@ import {
   artifactDraftSchema,
   createModelTaskContext,
   materializeArtifactDraft,
+  mergeArtifactDraftRepair,
+  normalizeArtifactDraft,
 } from './artifact-draft.js'
 import type { ArtifactContract } from './artifact-schema.js'
 import { ProviderGatewayError, runProviderTurn, type ProviderTurnRequest } from './model-gateway.js'
@@ -314,7 +316,16 @@ export class TaskRunner {
     context: Context,
     formatRepairUsed: boolean,
   ): Promise<boolean> {
-    const materialized = materializeArtifactDraft(draft, claim, this.artifactContract, state.readAttachmentIds)
+    const normalizedDraft = formatRepairUsed && state.previousDraft !== undefined
+      ? mergeArtifactDraftRepair(state.previousDraft, draft)
+      : normalizeArtifactDraft(draft)
+    state.previousDraft = normalizedDraft
+    const materialized = materializeArtifactDraft(
+      normalizedDraft,
+      claim,
+      this.artifactContract,
+      state.readAttachmentIds,
+    )
     if (materialized.artifact === undefined) {
       const detail = materialized.error ?? 'Draft 无法转换为 Artifact'
       if (formatRepairUsed) throw new TaskExecutionError('AI_ARTIFACT_SCHEMA_INVALID', `模型 Draft 两次未通过校验：${detail}`)
@@ -484,6 +495,7 @@ class ToolState {
 class DraftToolState {
   toolCalls = 0
   contextLoaded = false
+  previousDraft: unknown = undefined
   readonly callKeys = new Set<string>()
   readonly readAttachmentIds = new Set<string>()
 
@@ -640,11 +652,13 @@ function parseExactDraft(message: AssistantMessage): { draft: Record<string, unk
   if (parts.length === 0) return { error: '响应中没有 JSON 文本' }
   const raw = parts.map((part) => part.text).join('').trim()
   if (!raw) return { error: '响应中的 JSON 文本为空' }
+  const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/iu.exec(raw)
+  const candidate = fenced === null ? raw : fenced[1]!.trim()
   try {
-    const value: unknown = JSON.parse(raw)
+    const value: unknown = JSON.parse(candidate)
     return isObject(value) ? { draft: value } : { error: 'JSON 根节点必须是对象' }
   } catch {
-    return { error: '响应必须是可直接 JSON.parse 的单个对象' }
+    return { error: '响应必须是单个 JSON 对象，或只包含该对象的单个 JSON 代码围栏' }
   }
 }
 

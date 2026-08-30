@@ -13,7 +13,7 @@ type textRedactor struct {
 
 var (
 	privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
-	credentialPattern = regexp.MustCompile(`(?i)\b(password|passwd|token|secret|api[_-]?key)\b(\s*[:=]\s*)([^\s,;]+)`)
+	credentialPattern = regexp.MustCompile(`(?i)\b((?:[a-z0-9]+[_-])*(?:password|passwd|username|token|secret|api[_-]?key))\b(\s*[:=]\s*)([^\s,;]+)`)
 	bearerPattern     = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
 	privateIPPattern  = regexp.MustCompile(`\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b`)
 )
@@ -31,7 +31,7 @@ func (redactor *textRedactor) Redact(value string) string {
 		if len(parts) != 4 {
 			return redactor.placeholder("CREDENTIAL", match)
 		}
-		return parts[1] + parts[2] + redactor.placeholder(strings.ToUpper(strings.ReplaceAll(parts[1], "-", "_")), parts[3])
+		return parts[1] + parts[2] + redactor.placeholder(credentialCategory(parts[1]), parts[3])
 	})
 	value = bearerPattern.ReplaceAllStringFunc(value, func(match string) string {
 		return "Bearer " + redactor.placeholder("TOKEN", match)
@@ -39,6 +39,40 @@ func (redactor *textRedactor) Redact(value string) string {
 	return privateIPPattern.ReplaceAllStringFunc(value, func(match string) string {
 		return redactor.placeholder("INTERNAL_IP", match)
 	})
+}
+
+func (redactor *textRedactor) RedactArtifact(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return redactor.Redact(typed)
+	case map[string]any:
+		for key, nested := range typed {
+			typed[key] = redactor.RedactArtifact(nested)
+		}
+	case []any:
+		for index, nested := range typed {
+			typed[index] = redactor.RedactArtifact(nested)
+		}
+	}
+	return value
+}
+
+func credentialCategory(key string) string {
+	normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	switch {
+	case strings.HasSuffix(normalized, "password"), strings.HasSuffix(normalized, "passwd"):
+		return "PASSWORD"
+	case strings.HasSuffix(normalized, "username"):
+		return "USERNAME"
+	case strings.HasSuffix(normalized, "api_key"):
+		return "API_KEY"
+	case strings.HasSuffix(normalized, "token"):
+		return "TOKEN"
+	case strings.HasSuffix(normalized, "secret"):
+		return "SECRET"
+	default:
+		return "CREDENTIAL"
+	}
 }
 
 func (redactor *textRedactor) placeholder(category, original string) string {

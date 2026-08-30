@@ -84,6 +84,7 @@ services:
 
   ai-worker:
     image: dev-toolbox-ai-worker:${APP_VERSION:?请配置明确的 APP_VERSION}
+    dns: [223.5.5.5]
     user: "1000:1000"
     group_add: ["20000"]
     restart: unless-stopped

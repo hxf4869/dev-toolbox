@@ -22,6 +22,7 @@ import (
 const maximumArtifactBytes = 2 * 1024 * 1024
 
 var rawHTMLPattern = regexp.MustCompile(`(?i)<(?:/?[a-z][^>]*|!--|!doctype\b|\?xml\b)[^>]*>`)
+var redactionPlaceholderPattern = regexp.MustCompile(`<(?:PRIVATE_KEY|CREDENTIAL|PASSWORD|USERNAME|API_KEY|TOKEN|SECRET|INTERNAL_IP)_[1-9][0-9]*>`)
 
 type artifactEntry struct {
 	ID            uuid.UUID       `json:"id"`
@@ -282,7 +283,7 @@ func validateArtifactStructure(content map[string]any, topFragments map[uuid.UUI
 		blockIDs[id] = struct{}{}
 		if block["type"] == "markdown" {
 			markdown, _ := block["markdown"].(string)
-			if rawHTMLPattern.MatchString(markdown) {
+			if containsRawArtifactHTML(markdown) {
 				return false
 			}
 		}
@@ -309,6 +310,10 @@ func validateArtifactStructure(content map[string]any, topFragments map[uuid.UUI
 		seenTags[normalized] = struct{}{}
 	}
 	return walkArtifactReferences(content, topFragments)
+}
+
+func containsRawArtifactHTML(markdown string) bool {
+	return rawHTMLPattern.MatchString(redactionPlaceholderPattern.ReplaceAllString(markdown, ""))
 }
 
 func walkArtifactReferences(value any, top map[uuid.UUID]struct{}) bool {

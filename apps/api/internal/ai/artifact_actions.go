@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -47,19 +48,24 @@ func (service *Service) completeTask(response http.ResponseWriter, request *http
 	}
 	defer tx.Rollback(request.Context())
 	var itemID, modelID uuid.UUID
-	var taskType, status, promptVersion, schemaVersion string
+	var taskType, status, promptVersion, schemaVersion, sensitivePolicy, sensitivity string
 	var leaseOwner *string
 	var claimAttempt int
 	var leaseExpiresAt, cancelRequestedAt *time.Time
 	var snapshotBytes []byte
 	var parentID *uuid.UUID
 	err = tx.QueryRow(request.Context(), `
-		SELECT item_id, model_id, task_type, status, prompt_version, schema_version,
-		       lease_owner, claim_attempt, lease_expires_at, cancel_requested_at,
-		       input_snapshot, parent_task_id
-		FROM ai_task_runs WHERE id = $1 FOR UPDATE
+		SELECT task.item_id, task.model_id, task.task_type, task.status,
+		       task.prompt_version, task.schema_version, task.lease_owner,
+		       task.claim_attempt, task.lease_expires_at, task.cancel_requested_at,
+		       task.input_snapshot, task.parent_task_id, task.sensitive_policy,
+		       item.sensitivity
+		FROM ai_task_runs task
+		JOIN knowledge_items item ON item.id = task.item_id
+		WHERE task.id = $1 FOR UPDATE OF task
 	`, taskID).Scan(&itemID, &modelID, &taskType, &status, &promptVersion, &schemaVersion,
-		&leaseOwner, &claimAttempt, &leaseExpiresAt, &cancelRequestedAt, &snapshotBytes, &parentID)
+		&leaseOwner, &claimAttempt, &leaseExpiresAt, &cancelRequestedAt, &snapshotBytes,
+		&parentID, &sensitivePolicy, &sensitivity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeLeaseConflict(response, request)
 		return
@@ -116,13 +122,21 @@ func (service *Service) completeTask(response http.ResponseWriter, request *http
 		writeLeaseConflict(response, request)
 		return
 	}
-	if err := service.artifactValidator.ValidateJSON(input.Artifact); err != nil {
-		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "ARTIFACT_SCHEMA_INVALID", "Artifact 未通过契约校验")
-		return
-	}
 	var content map[string]any
 	if json.Unmarshal(input.Artifact, &content) != nil {
 		writeInternalValidation(response, request)
+		return
+	}
+	if sensitivePolicy == "redact" && sensitivity != "normal" {
+		newTextRedactor().RedactArtifact(content)
+		input.Artifact, err = json.Marshal(content)
+		if err != nil || len(input.Artifact) > maximumArtifactBytes {
+			writeInternalValidation(response, request)
+			return
+		}
+	}
+	if err := service.artifactValidator.ValidateJSON(input.Artifact); err != nil {
+		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "ARTIFACT_SCHEMA_INVALID", "Artifact 未通过契约校验")
 		return
 	}
 	var snapshot taskInputSnapshot
@@ -174,18 +188,22 @@ func (service *Service) completeTask(response http.ResponseWriter, request *http
 		}
 	}
 	searchText := artifactSearchText(content)
-	if searchText != "" {
+	for ordinal, fragmentText := range splitArtifactSearchText(searchText) {
 		sourceKind := "ai_text"
 		if validated.ArtifactType == "image_analysis" {
 			sourceKind = "image_text"
+		}
+		fragmentKey := artifactID.String() + ":search"
+		if ordinal > 0 {
+			fragmentKey += ":" + strconv.Itoa(ordinal)
 		}
 		if _, err := tx.Exec(request.Context(), `
 			INSERT INTO search_fragments (
 				id, item_id, artifact_id, source_kind, ordinal, content,
 				normalized_content, weight, active, created_at
-			) VALUES ($1, $2, $3, $4, 0, $5, $6, 2, $7, $8)
-		`, uuid.NewSHA1(searchFragmentNamespace, []byte(artifactID.String()+":search")), itemID,
-			artifactID, sourceKind, searchText, normalizeArtifactSearch(searchText), autoActivate, now); err != nil {
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, $9)
+		`, uuid.NewSHA1(searchFragmentNamespace, []byte(fragmentKey)), itemID,
+			artifactID, sourceKind, ordinal, fragmentText, normalizeArtifactSearch(fragmentText), autoActivate, now); err != nil {
 			writeInternalFailure(response, request)
 			return
 		}
@@ -746,6 +764,29 @@ func artifactSearchText(content map[string]any) string {
 	values := []string{}
 	collectArtifactStrings(content, "", &values)
 	return strings.Join(values, "\n")
+}
+
+const artifactSearchFragmentMaximum = 4 * 1024
+
+func splitArtifactSearchText(value string) []string {
+	fragments := []string{}
+	for start := 0; start < len(value); {
+		end := min(start+artifactSearchFragmentMaximum, len(value))
+		for end < len(value) && end > start && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		if end < len(value) {
+			if boundary := strings.LastIndex(value[start:end], "\n"); boundary >= artifactSearchFragmentMaximum/2 {
+				end = start + boundary + 1
+			}
+		}
+		fragment := value[start:end]
+		if strings.TrimSpace(fragment) != "" {
+			fragments = append(fragments, fragment)
+		}
+		start = end
+	}
+	return fragments
 }
 
 func collectArtifactStrings(value any, key string, output *[]string) {

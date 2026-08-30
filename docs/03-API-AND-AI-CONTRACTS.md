@@ -815,7 +815,7 @@ complete 按固定顺序处理：
 
 1. 验证内部身份、task ID，并确认请求 `leaseVersion` 等于该任务当前/成功 claim version。
 2. 按 `task_run_id` 查询已有 Artifact；若存在且任务为 succeeded，直接返回原 Artifact 和终态，忽略重试正文，不再要求任务为 running。
-3. 仅在 Artifact 不存在时，检查任务仍为 running、lease 有效且 `cancelRequestedAt` 为空，再执行 Schema/业务校验并在一个事务中创建 Artifact、分配版本和置任务 succeeded。
+3. 仅在 Artifact 不存在时，检查任务仍为 running、lease 有效且 `cancelRequestedAt` 为空。对 sensitive/unknown 且策略为 `redact` 的任务，API 先递归脱敏候选 Artifact 的全部字符串值，再对脱敏后的 JSON 执行大小、Schema 与业务校验，并在一个事务中创建 Artifact、分配版本和置任务 succeeded。
 4. 唯一约束竞态命中 `ai_artifacts.task_run_id UNIQUE` 时重新读取并返回同一 Artifact；取消或 lease 冲突则不创建版本。
 
 这只解决 complete 成功响应丢失，不建立通用幂等框架。
@@ -865,9 +865,9 @@ API 与 worker 都不得记录该 RPC 请求体。Key 明文只存在于 API 组
 
 机器契约见 `contracts/ai-artifact.schema.json`。本节规定语义。
 
-内置 worker 不要求模型直接拼装这份最终契约。`*-v2` Prompt 让模型输出一份较小的 Artifact Draft：真实 fragment/attachment UUID 分别替换成任务内短引用 `S#`/`A#`，并移除 `schemaVersion`、`artifactType`、block ID、顶层来源集合和 `review.status` 等服务端可确定字段。支持工具调用时，模型把同一 Draft 作为 `emit_artifact_draft` 参数提交；不支持或忽略工具调用时，模型返回可被 `JSON.parse` 直接解析的单个 Draft 对象。两条通道进入同一个 Draft 校验与确定性转换器，转换后仍须完整通过本节最终 Artifact 契约。
+内置 worker 不要求模型直接拼装这份最终契约。`*-v2` Prompt 让模型输出一份较小的 Artifact Draft：真实 fragment/attachment UUID 分别替换成任务内短引用 `S#`/`A#`，并移除 `schemaVersion`、`artifactType`、block ID、顶层来源集合和 `review.status` 等服务端可确定字段。支持工具调用时，模型把同一 Draft 作为 `emit_artifact_draft` 参数提交；不支持或忽略工具调用时，模型返回单个 Draft JSON 对象。两条通道先经过同一套有界归一化，再进入 Draft 校验与确定性转换器，转换后仍须完整通过本节最终 Artifact 契约。
 
-若声明支持工具的 Provider 拒绝工具协议，或模型未调用任何工具，worker 在同一任务内最多切换一次直接 JSON 通道。Draft 或最终契约错误最多允许一次带具体字段路径的格式修复；不从自然语言或 Markdown 代码围栏中正则截取 JSON。
+若声明支持工具的 Provider 拒绝工具协议，或模型未调用任何工具，worker 在同一任务内最多切换一次直接 JSON 通道。Draft 或最终契约错误最多允许一次带具体字段路径的格式修复。直接 JSON 通道只接受裸 JSON 对象，或完整响应恰好为一个 `json`/无语言标记代码围栏的 JSON 对象；不得从解释性自然语言中提取 JSON。有界归一化只处理等价格式差异：精确 `draft`/`artifact` 包装、已知 block/字段别名、字符串与单元素数组表示、以逗号/顿号等明确分隔符连写的多个 `S#`、明确的 `sourceTRefs` 拼写别名，以及内容严格为 `S#` 的 `sourceRef`/`reference` 单数别名（与已有 `sourceRefs` 冲突时仍拒绝，普通说明文本不消费）、父子层已有 `sourceRefs` 的提升或下传、缺失引用字段的空数组表示、嵌套 `table`/`command_steps` 与命令 `wrapper` 展平、带标题的顶层 `commands` block 包装为单步 `command_steps`、显式 `code`/`command` block 将非空 `bash` 字符串作为缺失正文的等价别名并补对应的 `language`/`shell=bash`（与已有标准字段冲突时仍拒绝）、warning 将非空 `error` 字符串作为缺失 `message` 的等价别名并补 `severity=warning`（与已有 `message` 冲突时仍拒绝）、`instructions` 单复数别名、错放在 block/warning 中的 `classification`/`limitations` 归位、错放在 block 的已知 classification 字段归位、被误写成顶层键且含明确局限语义的短文本进入 `review.limitations`、表格列注释与 block 级字符串 `warnings` 进入 `review.limitations`、block 级 `summary` 复用为对应的正文、说明、标题或图片说明、步骤块标题复用其首个已有步骤标题、Markdown 中原样 HTML 的文本实体转义，以及 `shell=other` 等明确未知值。声明为 `code` 但没有代码正文的 block，仅在字段仍属于已知 code 清单时忽略，不伪造代码或改写为其他正文类型；已有说明和忽略事实写入 `review.limitations`，带未知字段的缺失正文 block 仍由契约拒绝。若模型完全省略 `limitations`，worker 写入固定的人工核对提示；模型在收到字段级修复反馈后若只返回局部根字段，worker 只允许把它覆盖到同一任务内紧邻的上一份 Draft，数组整体替换且不跨任务复用；若补丁仅含 warning 已知字段，则只有上一份 Draft 的 Schema 错误唯一指向某个 warning 时才合并到该位置，多处错误或未知字段仍拒绝。归一化不得生成不存在的来源引用、删除不在已知清单中的字段或绕过最终 Schema。最终 Artifact 的唯一来源引用超过 100 个时，worker 按首次出现顺序只保留前 100 个，并在 `review.limitations` 中明确记录契约截断。
 
 ### 12.1 顶层字段
 

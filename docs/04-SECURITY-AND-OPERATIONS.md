@@ -216,7 +216,7 @@ form-action 'self'
 - `block`、`redact`、`allow` 在 API 生成任务上下文时执行，不能只靠 Prompt 要求模型忽略敏感数据。
 - worker 获取的是已经按策略处理的上下文，并同时得到策略枚举值，不拥有绕过策略读取原文的通用工具。
 - `search_related_records` 的结果也先经过同一策略：block 排除敏感/未知候选，redact 返回脱敏副本，allow 仍受任务授权数量限制。
-- `redact` 仅使用本地确定性规则；替换内容使用类型化占位符，例如 `<TOKEN_1>`、`<INTERNAL_IP_2>`。
+- `redact` 仅使用本地确定性规则；API 在 claim 上下文构建时处理外发文本，并在 worker complete 的最终 Artifact 入库边界再次递归处理全部字符串值。替换内容使用类型化占位符，例如 `<TOKEN_1>`、`<INTERNAL_IP_2>`。凭据键同时识别普通名称和以 `_`/`-` 分段的环境变量名称，例如 `password`、`DB_PASSWORD`、`KAFKA_MANAGER_USERNAME` 与 `APPLICATION_SECRET`。
 - 二进制图片无法在没有 OCR/打码模型的前提下可靠 redact；敏感/未知图片在 redact 策略下不外发，必须改为用户明确允许或把记录标为 normal。
 - 一次任务的映射只存在于内存，任务结束即释放，不持久化到 artifact、事件或日志。
 - 当规则不确定时宁可保留并提示风险，不能声称完成可靠脱敏。

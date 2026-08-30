@@ -207,6 +207,653 @@ describe('bounded task runner', () => {
     expect(api.failures).toEqual([])
   })
 
+  it('merges a partial v2 repair over the immediately preceding invalid Draft', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const invalid = organizedDraft()
+    ;(invalid.blocks as Array<Record<string, unknown>>)[0]!.sourceRefs = ['S99']
+    const repairedBlocks = organizedDraft().blocks
+    let calls = 0
+    const runner = createRunner(api, async () => {
+      calls += 1
+      const response = calls === 1 ? invalid : { blocks: repairedBlocks }
+      return { message: assistant([{ type: 'text', text: JSON.stringify(response) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(calls).toBe(2)
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(api.completed[0]).toMatchObject({
+      title: organizedDraft().title,
+      summary: organizedDraft().summary,
+      blocks: [{ sourceFragmentIds: [fragmentId] }],
+    })
+  })
+
+  it('merges a warning-only repair only when one invalid warning is uniquely identified', async () => {
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const invalid = organizedDraft() as Record<string, any>
+    invalid.warnings = [{ severity: 'warning', title: '配置风险', sourceRefs: ['S1'] }]
+    let calls = 0
+    const api = new FakeTaskApi()
+    const runner = createRunner(api, async () => {
+      calls += 1
+      const response = calls === 1
+        ? invalid
+        : { message: '部署前核对配置。', basis: 'source_evidence', sourceRefs: ['S1'] }
+      return { message: assistant([{ type: 'text', text: JSON.stringify(response) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(calls).toBe(2)
+    expect(api.failures).toEqual([])
+    expect(api.completed[0]).toMatchObject({
+      warnings: [{
+        severity: 'warning', title: '配置风险', message: '部署前核对配置。',
+        basis: 'source_evidence', sourceFragmentIds: [fragmentId],
+      }],
+    })
+
+    const ambiguous = organizedDraft() as Record<string, any>
+    ambiguous.warnings = [
+      { severity: 'warning', title: '风险一', sourceRefs: ['S1'] },
+      { severity: 'warning', title: '风险二', sourceRefs: ['S1'] },
+    ]
+    let ambiguousCalls = 0
+    const ambiguousApi = new FakeTaskApi()
+    const ambiguousRunner = createRunner(ambiguousApi, async () => {
+      ambiguousCalls += 1
+      const response = ambiguousCalls === 1
+        ? ambiguous
+        : { message: '无法确定应修复哪一项。', basis: 'source_evidence', sourceRefs: ['S1'] }
+      return { message: assistant([{ type: 'text', text: JSON.stringify(response) }]), attempts: 1 }
+    })
+
+    await ambiguousRunner.run(claim)
+
+    expect(ambiguousApi.completed).toEqual([])
+    expect(ambiguousApi.failures.at(-1)?.detail).toContain('不允许字段 message')
+
+    let titledCalls = 0
+    const titledApi = new FakeTaskApi()
+    const titledRunner = createRunner(titledApi, async () => {
+      titledCalls += 1
+      const response = titledCalls === 1
+        ? invalid
+        : { title: '根标题或 warning 标题不明确', message: '部署前核对配置。', basis: 'source_evidence', sourceRefs: ['S1'] }
+      return { message: assistant([{ type: 'text', text: JSON.stringify(response) }]), attempts: 1 }
+    })
+
+    await titledRunner.run(claim)
+
+    expect(titledApi.completed).toEqual([])
+    expect(titledApi.failures.at(-1)?.detail).toContain('不允许字段 message')
+  })
+
+  it('normalizes bounded v2 provider variations without weakening the final contract', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.classification.suggestedFolderPath = '服务器运维/磁盘'
+    draft.classification.suggestedTags = 'Linux'
+    draft.blocks = [
+      { type: 'section', content: '查看 <disk> 并挂载新磁盘。', sourceRefs: 'S1' },
+      {
+        steps: [{
+          title: '查看磁盘',
+          commands: [{ command: 'lsblk', sourceRefs: ['S1'] }],
+        }],
+      },
+      {
+        table: {
+          title: '挂载参数',
+          columns: ['参数', '说明'],
+          rows: [['设备', '/dev/vdb']],
+        },
+        sourceRefs: ['S1'],
+      },
+    ]
+    draft.warnings = [{
+      severity: 'warning', title: '先核对设备名', message: '设备名可能因环境而不同。',
+      sourceRefs: ['S1'], recommend: '先运行 lsblk。', module: '磁盘',
+    }]
+    draft.limitations = '模型没有连接目标服务器验证命令。'
+    const messages = [
+      assistant([toolCall('context', 'get_record_context', {})]),
+      assistant([toolCall('candidate', 'emit_artifact_draft', { draft })]),
+    ]
+    const runner = createRunner(api, async () => ({ message: messages.shift()!, attempts: 1 }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(contract.validate(api.completed[0])).toBe(true)
+    expect(api.completed[0]).toMatchObject({
+      classification: {
+        suggestedFolderPath: ['服务器运维/磁盘'],
+        suggestedTags: ['Linux'],
+      },
+      blocks: [
+        { type: 'markdown', markdown: '查看 &lt;disk&gt; 并挂载新磁盘。', sourceFragmentIds: [fragmentId] },
+        {
+          type: 'command_steps', title: '查看磁盘', sourceFragmentIds: [fragmentId],
+          steps: [{
+            sourceFragmentIds: [fragmentId],
+            commands: [{ shell: 'other', command: 'lsblk' }],
+          }],
+        },
+        {
+          type: 'table', title: '挂载参数', columns: ['参数', '说明'],
+          rows: [['设备', '/dev/vdb']], sourceFragmentIds: [fragmentId],
+        },
+      ],
+      warnings: [{
+        basis: 'source_evidence', recommendation: '先运行 lsblk。',
+        sourceFragmentIds: [fragmentId],
+      }],
+    })
+  })
+
+  it('normalizes misplaced metadata, nested command steps, and source-less supporting blocks', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    const classification = draft.classification
+    delete draft.classification
+    delete draft.limitations
+    draft.blocks = [
+      {
+        command_steps: {
+          title: '查看磁盘',
+          steps: [{
+            title: '执行检查',
+            instructions: ['先确认设备名。'],
+            commands: [{ wrapper: { shell: 'bash', command: 'lsblk', sourceRefs: ['S1'] } }],
+          }],
+        },
+      },
+      { type: 'markdown', markdown: '这是未单独关联来源的辅助说明。' },
+      {
+        type: 'table', columns: ['字段', '说明'], rows: [['device', '磁盘设备']], sourceRefs: ['S1'],
+        columns_note: '表格列由原始笔记归纳。', limitations: '表格内容需要人工复核。',
+        summary: '挂载参数摘要。', warnings: ['表格来源需要人工复核。'],
+      },
+      { type: 'code', code: 'lsblk', class: 'bash', sourceRefs: ['S1'] },
+      {
+        type: 'command', shell: 'bash', call: 'lsblk', summary: '列出块设备。',
+        warnings: [{ title: '执行提醒', message: '先确认当前主机。' }], sourceRefs: ['S1'],
+      },
+      { classification },
+    ]
+    draft.warnings = [{
+      severity: 'warning', title: '人工核对', message: '执行前核对设备名。',
+      basis: 'source_evidence', sourceRefs: ['S1'],
+      limitations: '模型没有连接目标服务器验证命令。',
+    }]
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(contract.validate(api.completed[0])).toBe(true)
+    expect(api.completed[0]).toMatchObject({
+      classification,
+      blocks: [
+        {
+          type: 'command_steps', title: '查看磁盘', sourceFragmentIds: [fragmentId],
+          steps: [{
+            instruction: '先确认设备名。', sourceFragmentIds: [fragmentId],
+            commands: [{ shell: 'bash', command: 'lsblk' }],
+          }],
+        },
+        { type: 'markdown', sourceFragmentIds: [] },
+        { type: 'table', columns: ['字段', '说明'], rows: [['device', '磁盘设备']] },
+        { type: 'code', language: 'bash', code: 'lsblk' },
+        { type: 'command', shell: 'bash', command: 'lsblk', description: '列出块设备。' },
+      ],
+      warnings: [{ sourceFragmentIds: [fragmentId] }],
+      review: {
+        limitations: expect.arrayContaining([
+          '表格列由原始笔记归纳。',
+          '表格内容需要人工复核。',
+          '表格来源需要人工复核。',
+          '执行提醒：先确认当前主机。',
+          '模型没有连接目标服务器验证命令。',
+        ]),
+      },
+    })
+  })
+
+  it('normalizes the bounded misplaced fields and source-ref list seen in migration output', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    const limitation = '多段命令源自原始 Notion 页面文本，尚未在实际服务器上验证执行结果，仅作记录归档。'
+    draft[limitation] = true
+    const classification = draft.classification as Record<string, unknown>
+    const blocks = draft.blocks as Array<Record<string, unknown>>
+    blocks[0]!.sourceRefs = ['S1，S1']
+    const classificationBlock: Record<string, unknown> = { sourceRefs: ['S1', 'S1', 'not-a-source-ref'] }
+    for (const field of ['suggestedFolderPath', 'suggestedTags', 'sensitivitySuggestion'] as const) {
+      classificationBlock[field] = classification[field]
+      delete classification[field]
+    }
+    classificationBlock.sensitivityReason = '原文包含部署命令，需要人工确认。'
+    blocks.push(classificationBlock)
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(contract.validate(api.completed[0])).toBe(true)
+    expect(api.completed[0]).toMatchObject({
+      classification: {
+        suggestedFolderPath: ['服务器运维', '磁盘'],
+        suggestedTags: ['Linux', 'ext4'],
+        sensitivitySuggestion: 'normal',
+        sensitivityReason: '原文包含部署命令，需要人工确认。',
+      },
+      blocks: [{ sourceFragmentIds: [fragmentId] }],
+      review: { limitations: expect.arrayContaining([limitation]) },
+    })
+  })
+
+  it('normalizes a sourceTRefs typo and a titled top-level commands block', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.blocks = [{
+      title: '启动服务', commands: [{ shell: 'bash', command: 'docker compose up -d' }],
+      instruction: '先核对 compose 文件。', sourceTRefs: ['S1'],
+    }]
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(contract.validate(api.completed[0])).toBe(true)
+    expect(api.completed[0]).toMatchObject({
+      blocks: [{
+        type: 'command_steps', title: '启动服务', sourceFragmentIds: [fragmentId],
+        steps: [{
+          title: '启动服务', instruction: '先核对 compose 文件。',
+          commands: [{ shell: 'bash', command: 'docker compose up -d' }],
+          sourceFragmentIds: [fragmentId],
+        }],
+      }],
+    })
+  })
+
+  it('normalizes singular S# source aliases without consuming prose references', async () => {
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.blocks = [{ type: 'markdown', markdown: '部署说明。', sourceRef: 'S1' }]
+    draft.warnings = [{
+      severity: 'warning', title: '核对配置', message: '部署前检查参数。',
+      basis: 'source_evidence', sourceRef: 'S1', reference: 'S1',
+    }]
+    const api = new FakeTaskApi()
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed[0]).toMatchObject({
+      blocks: [{ sourceFragmentIds: [fragmentId] }],
+      warnings: [{ sourceFragmentIds: [fragmentId] }],
+    })
+
+    const proseReferenceDraft = organizedDraft() as Record<string, any>
+    proseReferenceDraft.warnings = [{
+      severity: 'warning', title: '核对配置', message: '部署前检查参数。',
+      basis: 'model_knowledge', sourceRefs: [], reference: '官方部署文档',
+    }]
+    const proseReferenceApi = new FakeTaskApi()
+    const proseReferenceRunner = createRunner(proseReferenceApi, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(proseReferenceDraft) }]),
+      attempts: 1,
+    }))
+
+    await proseReferenceRunner.run(claim)
+
+    expect(proseReferenceApi.completed).toEqual([])
+    expect(proseReferenceApi.failures.at(-1)?.detail).toContain('reference')
+  })
+
+  it('normalizes a bash field used as a typed body without hiding conflicts', async () => {
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.blocks = [{ type: 'code', bash: 'docker compose up -d', sourceRefs: ['S1'] }]
+    const api = new FakeTaskApi()
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(api.completed[0]).toMatchObject({
+      blocks: [{ type: 'code', language: 'bash', code: 'docker compose up -d' }],
+    })
+
+    const commandDraft = organizedDraft() as Record<string, any>
+    commandDraft.blocks = [{ type: 'command', bash: 'docker compose ps', sourceRefs: ['S1'] }]
+    const commandApi = new FakeTaskApi()
+    const commandRunner = createRunner(commandApi, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(commandDraft) }]),
+      attempts: 1,
+    }))
+
+    await commandRunner.run(claim)
+
+    expect(commandApi.failures).toEqual([])
+    expect(commandApi.completed[0]).toMatchObject({
+      blocks: [{ type: 'command', shell: 'bash', command: 'docker compose ps' }],
+    })
+
+    const conflictingDraft = organizedDraft() as Record<string, any>
+    conflictingDraft.blocks = [{
+      type: 'code', language: 'bash', code: 'docker compose up -d', bash: 'docker compose down',
+      sourceRefs: ['S1'],
+    }]
+    const conflictingApi = new FakeTaskApi()
+    const conflictingRunner = createRunner(conflictingApi, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(conflictingDraft) }]),
+      attempts: 1,
+    }))
+
+    await conflictingRunner.run(claim)
+
+    expect(conflictingApi.completed).toEqual([])
+    expect(conflictingApi.failures.at(-1)?.detail).toContain('bash')
+  })
+
+  it('normalizes an error warning alias and defaults its severity without hiding conflicts', async () => {
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.warnings = [{
+      title: '配置风险', error: '部署前需要替换占位符。', basis: 'source_evidence', sourceRefs: ['S1'],
+    }]
+    const api = new FakeTaskApi()
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed[0]).toMatchObject({
+      warnings: [{ severity: 'warning', title: '配置风险', message: '部署前需要替换占位符。' }],
+    })
+
+    const conflictingDraft = organizedDraft() as Record<string, any>
+    conflictingDraft.warnings = [{
+      title: '配置风险', message: '保留现有说明。', error: '不同的错误说明。',
+      basis: 'source_evidence', sourceRefs: ['S1'],
+    }]
+    const conflictingApi = new FakeTaskApi()
+    const conflictingRunner = createRunner(conflictingApi, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(conflictingDraft) }]),
+      attempts: 1,
+    }))
+
+    await conflictingRunner.run(claim)
+
+    expect(conflictingApi.completed).toEqual([])
+    expect(conflictingApi.failures.at(-1)?.detail).toContain('error')
+  })
+
+  it('preserves or omits empty code blocks with an explicit review limitation', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    ;(draft.blocks as Array<Record<string, unknown>>).push(
+      {
+        type: 'code', language: 'yaml', summary: '该配置片段只返回了说明。',
+        sourceRefs: ['S1'],
+      },
+      { type: 'code', language: 'yaml', sourceRefs: ['S1'] },
+    )
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(contract.validate(api.completed[0])).toBe(true)
+    expect(api.completed[0]).toMatchObject({
+      blocks: [{ type: 'command_steps' }],
+      review: {
+        limitations: expect.arrayContaining([
+          '模型第 2 个 code block 未提供代码正文，当前版本已忽略该 block；原说明：该配置片段只返回了说明。',
+          '模型第 3 个 code block 未提供代码正文或说明，当前版本已忽略该空 block。',
+        ]),
+      },
+    })
+  })
+
+  it('keeps strict validation for empty code blocks with unknown fields', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    ;(draft.blocks as Array<Record<string, unknown>>).push({
+      type: 'code', language: 'yaml', sourceRefs: ['S1'], providerPayload: true,
+    })
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.completed).toEqual([])
+    expect(api.failures).toHaveLength(1)
+    expect(api.failures[0]?.detail).toContain('providerPayload')
+  })
+
+  it('does not create an Artifact when every block is empty', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.blocks = [{ type: 'code', language: 'yaml', sourceRefs: ['S1'] }]
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.completed).toEqual([])
+    expect(api.failures).toHaveLength(1)
+    expect(api.failures[0]?.detail).toContain('/blocks')
+  })
+
+  it('caps aggregate source references at the result-contract limit and records the limitation', async () => {
+    const fragments = Array.from({ length: 101 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      rawRecordId: recordId,
+      sourceKind: 'raw_text' as const,
+      ordinal: index,
+      content: `source ${index + 1}`,
+    }))
+    const base = taskClaim({ fragments })
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.blocks = [
+      {
+        type: 'markdown', markdown: '前一百个来源。',
+        sourceRefs: Array.from({ length: 100 }, (_, index) => `S${index + 1}`),
+      },
+      { type: 'markdown', markdown: '第一百零一个来源。', sourceRefs: ['S101'] },
+    ]
+    const api = new FakeTaskApi()
+    const runner = createRunner(api, async () => ({
+      message: assistant([{ type: 'text', text: JSON.stringify(draft) }]),
+      attempts: 1,
+    }))
+
+    await runner.run(claim)
+
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(contract.validate(api.completed[0])).toBe(true)
+    expect(api.completed[0]?.sourceFragmentIds).toHaveLength(100)
+    expect((api.completed[0]?.blocks as Record<string, unknown>[])[1]?.sourceFragmentIds).toEqual([])
+    expect((api.completed[0]?.review as Record<string, unknown>).limitations).toContain(
+      '来源引用超过结果契约上限，当前版本仅保留前 100 个唯一来源片段的引用。',
+    )
+  })
+
+  it('accepts an exact single JSON code fence but not prose around JSON', async () => {
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const fencedApi = new FakeTaskApi()
+    const fencedRunner = createRunner(fencedApi, async () => ({
+      message: assistant([{ type: 'text', text: `\`\`\`json\n${JSON.stringify(organizedDraft())}\n\`\`\`` }]),
+      attempts: 1,
+    }))
+
+    await fencedRunner.run(claim)
+
+    expect(fencedApi.failures).toEqual([])
+    expect(fencedApi.completed).toHaveLength(1)
+
+    const proseApi = new FakeTaskApi()
+    let proseCalls = 0
+    const proseRunner = createRunner(proseApi, async () => {
+      proseCalls += 1
+      return {
+        message: assistant([{
+          type: 'text',
+          text: `整理结果如下：\n\`\`\`json\n${JSON.stringify(organizedDraft())}\n\`\`\``,
+        }]),
+        attempts: 1,
+      }
+    })
+
+    await proseRunner.run(claim)
+
+    expect(proseCalls).toBe(2)
+    expect(proseApi.completed).toEqual([])
+    expect(proseApi.failures.at(-1)?.code).toBe('AI_ARTIFACT_SCHEMA_INVALID')
+  })
+
+  it('does not invent a missing source reference during Draft normalization', async () => {
+    const api = new FakeTaskApi()
+    const base = taskClaim()
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, promptVersion: 'organize-v2' },
+      provider: { ...base.provider, supportsTools: false },
+    }
+    const draft = organizedDraft() as Record<string, any>
+    draft.blocks = [{ type: 'markdown', markdown: '没有来源引用的内容。' }]
+    let calls = 0
+    const runner = createRunner(api, async () => {
+      calls += 1
+      return { message: assistant([{ type: 'text', text: JSON.stringify(draft) }]), attempts: 1 }
+    })
+
+    await runner.run(claim)
+
+    expect(calls).toBe(2)
+    expect(api.completed).toEqual([])
+    expect(api.failures.at(-1)?.code).toBe('AI_ARTIFACT_SCHEMA_INVALID')
+    expect(api.failures.at(-1)?.detail).toContain('sourceRefs')
+  })
+
   it('completes a valid candidate after reading the controlled context', async () => {
     const api = new FakeTaskApi()
     const messages = [
