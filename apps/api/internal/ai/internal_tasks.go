@@ -234,7 +234,7 @@ func (service *Service) claimTask(response http.ResponseWriter, request *http.Re
 func (service *Service) buildClaimInput(request *http.Request, tx pgx.Tx, itemID uuid.UUID, sensitivity, policy string, snapshot taskInputSnapshot) (claimInput, int, error) {
 	result := claimInput{ItemID: itemID, Sensitivity: sensitivity, SensitivePolicy: policy,
 		RawRecords: []claimRawRecord{}, Fragments: []claimFragment{}, Attachments: []claimAttachment{}, RelatedRecords: []claimRelatedRecord{}}
-	redactor := newTextRedactor()
+	redactor := NewTextRedactor()
 	rows, err := tx.Query(request.Context(), `
 		SELECT id, record_role, content_format, body FROM raw_records
 		WHERE item_id = $1 AND id = ANY($2) ORDER BY effective_captured_at, id

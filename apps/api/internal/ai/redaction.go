@@ -18,7 +18,10 @@ var (
 	privateIPPattern  = regexp.MustCompile(`\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b`)
 )
 
-func newTextRedactor() *textRedactor {
+// NewTextRedactor builds a per-request redactor. The assistant module reuses this
+// exported entry so knowledge snippets follow the same deterministic rules; the
+// placeholder format and algorithms must stay identical to the one-shot behavior.
+func NewTextRedactor() *textRedactor {
 	return &textRedactor{values: map[string]string{}, counters: map[string]int{}}
 }
 

@@ -9,7 +9,7 @@ import (
 )
 
 func TestTextRedactorRedactsNamespacedCredentialKeys(t *testing.T) {
-	redacted := newTextRedactor().Redact(strings.Join([]string{
+	redacted := NewTextRedactor().Redact(strings.Join([]string{
 		"KAFKA_MANAGER_USERNAME: demo-user",
 		"KAFKA_MANAGER_PASSWORD: DemoPassword-2026",
 		"APPLICATION_SECRET=DemoApplicationSecret",
@@ -52,7 +52,7 @@ func TestTextRedactorRedactsNestedArtifactStrings(t *testing.T) {
 		},
 	}
 
-	newTextRedactor().RedactArtifact(artifact)
+	NewTextRedactor().RedactArtifact(artifact)
 
 	encoded := artifact["blocks"].([]any)
 	first := encoded[0].(map[string]any)["text"].(string)
@@ -86,7 +86,7 @@ func TestRedactedArtifactPlaceholdersRemainValidMarkdown(t *testing.T) {
 		}},
 	}
 
-	newTextRedactor().RedactArtifact(artifact)
+	NewTextRedactor().RedactArtifact(artifact)
 
 	if !validateArtifactStructure(artifact, map[uuid.UUID]struct{}{fragmentID: {}}) {
 		t.Fatal("server-generated redaction placeholders were rejected as raw HTML")

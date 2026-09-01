@@ -179,6 +179,20 @@ func (service *Service) purgeItem(response http.ResponseWriter, request *http.Re
 		moved = append(moved, quarantinedFile{originalPath: originalPath, quarantinePath: quarantinePath})
 	}
 
+	// V3 knowledge assistant: erase historical run source snapshots for this
+	// item inside the same transaction, before the item itself is deleted.
+	// Historical answers are never rewritten; the drawer shows "来源已删除"
+	// (docs/16 §8.11).
+	if _, err := tx.Exec(request.Context(), `
+		UPDATE assistant_run_sources SET fragment_id = NULL, item_id = NULL, artifact_id = NULL,
+		       title_snapshot = '来源已删除', excerpt_snapshot = '',
+		       locator_snapshot = '{"status":"unavailable"}'::jsonb
+		WHERE item_id = $1
+	`, itemID); err != nil {
+		restoreMoved()
+		writeItemInternal(response, request)
+		return
+	}
 	if _, err := tx.Exec(request.Context(), "DELETE FROM knowledge_items WHERE id = $1", itemID); err != nil {
 		restoreMoved()
 		writeItemInternal(response, request)
