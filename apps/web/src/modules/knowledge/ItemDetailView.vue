@@ -463,6 +463,7 @@ function formatBytes(bytes: number) {
 
 <style scoped>
 .detail-page { min-height: calc(100dvh - 79px); padding: var(--space-5); }
+.detail-page--embedded { min-height: 0; }
 .detail-state { display: grid; min-height: 60dvh; place-content: center; justify-items: center; color: var(--text-secondary); text-align: center; }
 .detail-state--error > svg { color: var(--danger); }
 .spinner { width: 28px; height: 28px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }

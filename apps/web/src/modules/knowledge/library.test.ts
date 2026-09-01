@@ -2,7 +2,16 @@ import { createPinia, setActivePinia } from 'pinia'
 import { vi } from 'vitest'
 
 import { useAuthStore } from '../../app/auth'
-import { useLibraryStore } from './library'
+import { resolveLibraryView, useLibraryStore } from './library'
+
+describe('library browse view', () => {
+  it('does not combine inbox with a folder or tag scope', () => {
+    expect(resolveLibraryView(undefined, 'folder-1', undefined)).toBe('')
+    expect(resolveLibraryView(undefined, undefined, 'tag-1')).toBe('')
+    expect(resolveLibraryView(undefined, undefined, undefined)).toBe('inbox')
+    expect(resolveLibraryView('favorites', 'folder-1', undefined)).toBe('favorites')
+  })
+})
 
 describe('library search privacy', () => {
   beforeEach(() => {

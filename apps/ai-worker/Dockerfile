@@ -3,6 +3,7 @@ FROM node:24.20.0-alpine3.23 AS build
 RUN corepack enable
 WORKDIR /src
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY patches patches
 COPY apps/ai-worker/package.json apps/ai-worker/package.json
 COPY apps/web/package.json apps/web/package.json
 RUN pnpm install --frozen-lockfile --filter @dev-toolbox/ai-worker...

@@ -77,6 +77,15 @@ export interface LibraryFilters {
   to?: string
 }
 
+export function resolveLibraryView(view: unknown, folderId: unknown, tagId: unknown): string {
+  const explicitView = typeof view === 'string' ? view.trim() : ''
+  if (explicitView) return explicitView
+
+  const hasFolder = typeof folderId === 'string' && folderId.trim() !== ''
+  const hasTag = typeof tagId === 'string' && tagId.trim() !== ''
+  return hasFolder || hasTag ? '' : 'inbox'
+}
+
 type ResultEntry =
   | { kind: 'library'; item: LibraryItem }
   | { kind: 'search'; item: SearchItem }

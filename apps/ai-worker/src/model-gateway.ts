@@ -129,6 +129,17 @@ export async function testProviderConnection(
 }
 
 export async function runProviderTurn(request: ProviderTurnRequest): Promise<ProviderTurnResult> {
+  return runProviderTurnWithAttempts(request, 3)
+}
+
+export async function runProviderTurnOnce(request: ProviderTurnRequest): Promise<ProviderTurnResult> {
+  return runProviderTurnWithAttempts(request, 1)
+}
+
+async function runProviderTurnWithAttempts(
+  request: ProviderTurnRequest,
+  maximumAttempts: 1 | 3,
+): Promise<ProviderTurnResult> {
   const provider = request.provider
   const baseUrl = normalizeBaseUrl(provider.baseUrl, request.allowInsecureHttp)
   if (
@@ -177,7 +188,7 @@ export async function runProviderTurn(request: ProviderTurnRequest): Promise<Pro
     maxTokens: provider.maxOutputTokens,
   }
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
     if (request.signal?.aborted) throw new ProviderGatewayError('unavailable', request.signal.reason)
     const remainingMs = request.deadlineAt.getTime() - Date.now()
     if (remainingMs <= 0) throw new ProviderGatewayError('unavailable')
@@ -206,7 +217,7 @@ export async function runProviderTurn(request: ProviderTurnRequest): Promise<Pro
     } catch (error) {
       if (request.signal?.aborted) throw new ProviderGatewayError('unavailable', error)
       const failure = classifyTaskFailure(error, responseStatus)
-      if (!failure.retryable || attempt === 3) throw failure.error
+      if (!failure.retryable || attempt === maximumAttempts) throw failure.error
       const afterRequestMs = request.deadlineAt.getTime() - Date.now()
       const backoffMs = Math.min(attempt === 1 ? 250 : 500, afterRequestMs - 1)
       if (backoffMs <= 0) throw new ProviderGatewayError('unavailable', error)

@@ -1,8 +1,10 @@
 # 开发百宝箱（Dev Toolbox）
 
-开发百宝箱是一个面向个人开发与运维工作的自托管工具集合。它从“快速保存、快速找到、保留原始事实、让 AI 生成可重建的整理结果”起步，后续可以继续容纳彼此独立的小工具，但不会在一期建设动态插件平台。
+开发百宝箱是一个面向个人开发与运维工作的自托管工具集合。它从“快速保存、快速找到、保留原始事实、让 AI 生成可重建的整理结果”起步；第二期已确认将“知识与记录”与“工具箱”调整为平级模块，仍不建设动态插件平台。
 
 一期 `v1.0.3` 已正式部署。当前 **M0–M5 已完成并验证，`v1.0.0` 已由八项门禁全部通过的 `v1.0-baseline` 原样晋级；`v1.0.1` 修复会话活跃时间刷新；`v1.0.2` 放宽 Provider 连接测试超时；`v1.0.3` 增加工具调用与严格 JSON 双通道的多模型 Artifact 兼容**。目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及京东云 OSS 异地加密备份与回读均已有真实证据，详见 [一期验收记录](./docs/08-V1-ACCEPTANCE-REPORT.md)。Edge、Firefox 不属于一期发布验收范围，不安装、不宣称已验证兼容。
+
+第二期九项 RC 审计问题已关闭，修复后的候选已命名并部署为 `v2.0.0-rc.2`。该候选尚未创建 Git commit/tag，也未正式发布；真实 Provider 留待 owner 配置后验证。旧候选 `v2.0.0-rc.1` 的部署、恢复和升级记录仍只代表修复前字节；V2.1/V2.2 尚未实现。入口见 [V2 工具箱总基线](./docs/09-V2-TOOLBOX-BASELINE.md)、[V2 交付验收记录](./docs/13-V2-TOOLBOX-DELIVERY-AND-ACCEPTANCE.md) 与 [RC 审计修复执行文档](./docs/15-V2-RC-AUDIT-REMEDIATION.md)。
 
 ## 一期核心闭环
 
@@ -48,6 +50,7 @@ make rebuild-search # 确定性重建当前搜索分片，保留历史片段用�
 make m1-integration-test # 在隔离测试库验证 M1 认证与录入闭环
 make m2-integration-test # 在隔离测试库验证 M2 检索、附件与资料库闭环
 make m3-integration-test # 在隔离测试库验证 M3 Provider、PAT 与外部 Artifact 闭环
+make v2-integration-test # 在隔离测试库验证 V2.0 JSON AI 窄同步调用链
 make m4-integration-test # 在隔离测试库验证 M4 任务、Artifact、批量与调度闭环
 make m5-integration-test # 验证迁移、状态页、完整性、存储故障和真实 ENOSPC 原子性
 make m5-performance-test # 生成 5 万记录/50 万片段/20 GiB 稀疏附件的固定规模报告
@@ -58,7 +61,7 @@ make reset-dev    # 停止服务并清空本地开发数据，保留配置与 Se
 
 `make reset-dev` 只用于本地开发数据。执行后再次运行 `make up`，即可从空 PostgreSQL 数据目录重新迁移。
 
-登录后可在 `/settings/operations` 查看服务、Provider、附件卷、备份、恢复和发布门禁的只读状态；`/help` 说明原始记录、AI 候选结果与一期安全边界。宿主机脚本只把经过严格 JSON 校验的摘要写入状态目录，Web 不提供 Shell、SSH、SQL 或任意系统命令入口。门禁证据变化后先审核 `deploy/release-status.v1.json`，再运行 `make publish-release-status`；脚本会拒绝未知门禁、无效时间和部署版本不匹配。
+登录后可在 `/settings/operations` 查看服务、Provider、附件卷、备份、恢复和发布门禁的只读状态；`/help` 说明原始记录、AI 候选结果、V2.0 本地处理/JSON AI 发送边界与一期安全边界。宿主机脚本只把经过严格 JSON 校验的摘要写入状态目录，Web 不提供 Shell、SSH、SQL 或任意系统命令入口。门禁证据变化后先审核 `deploy/release-status.v1.json`，再运行 `make publish-release-status`；脚本会拒绝未知门禁、无效时间和部署版本不匹配。
 
 ## 生产部署
 
@@ -128,7 +131,7 @@ REHEARSAL_REPORT_FILE=/absolute/path/to/restore-report.json \
 
 在“设置 → Provider”中选择 OpenAI Responses、OpenAI Chat Completions 或 Anthropic Messages 协议，填写 HTTPS Base URL、API Key 和模型能力后执行连接测试。Key 使用应用主密钥加密，状态页只显示最近结果和稳定失败分类。默认测试全部使用本地 mock，不调用付费模型；真实模型烟测需要维护者明确启用并承担费用。
 
-一期仍有这些明确边界：单所有者、非端到端加密、无高可用/PITR/病毒扫描/OCR/语义搜索/插件系统；AI 只能读取已授权上下文和附件、检索相关记录并提交候选 Artifact，不能执行 Shell、SSH、SQL、浏览器、任意 HTTP、任意文件系统或代码。延期能力以 [BACKLOG](./docs/BACKLOG.md) 为准。
+一期仍有这些历史边界：单所有者、非端到端加密、无高可用/PITR/病毒扫描/知识附件 OCR/语义搜索/插件系统；AI 只能读取已授权上下文和附件、检索相关记录并提交候选 Artifact，不能执行 Shell、SSH、SQL、浏览器、任意 HTTP、任意文件系统或代码。V2.2 只例外新增独立工具箱 OCR，不改造知识模块。其他延期能力以 [BACKLOG](./docs/BACKLOG.md) 为准。
 
 ## 文档入口
 
@@ -146,7 +149,13 @@ REHEARSAL_REPORT_FILE=/absolute/path/to/restore-report.json \
 | [docs/06-DELIVERY-AND-ACCEPTANCE.md](./docs/06-DELIVERY-AND-ACCEPTANCE.md) | 里程碑、完成定义、测试策略和验收用例 |
 | [docs/07-DESIGN-HANDOFF.md](./docs/07-DESIGN-HANDOFF.md) | Stitch 项目入口、01–33 规范画面 ID、里程碑映射和开发使用规则 |
 | [docs/08-V1-ACCEPTANCE-REPORT.md](./docs/08-V1-ACCEPTANCE-REPORT.md) | `v1.0.0` 的门禁证据、实测结果与正式发布结论 |
-| [docs/BACKLOG.md](./docs/BACKLOG.md) | 明确推迟到一期之后的能力，防止开发越界 |
+| [docs/09-V2-TOOLBOX-BASELINE.md](./docs/09-V2-TOOLBOX-BASELINE.md) | V2 工具箱范围、版本、每个工具的做/不做与硬边界 |
+| [docs/10-V2-TOOLBOX-ARCHITECTURE.md](./docs/10-V2-TOOLBOX-ARCHITECTURE.md) | V2 模块、依赖、编辑器/Worker、Go 调用链与资源边界 |
+| [docs/11-V2-CLOUD-SERVICES-CONTRACTS.md](./docs/11-V2-CLOUD-SERVICES-CONTRACTS.md) | 阿里云设置、数据表、额度事务、队列、API 与 JSON AI 契约 |
+| [docs/12-V2-TOOLBOX-UX-AND-STITCH.md](./docs/12-V2-TOOLBOX-UX-AND-STITCH.md) | Stitch 34–42 规范 Screen ID、页面母版、状态、响应式和文案 |
+| [docs/13-V2-TOOLBOX-DELIVERY-AND-ACCEPTANCE.md](./docs/13-V2-TOOLBOX-DELIVERY-AND-ACCEPTANCE.md) | V2.0/V2.1/V2.2 实施顺序、测试矩阵和发布门槛 |
+| [docs/14-V2-AGENT-RUNBOOK.md](./docs/14-V2-AGENT-RUNBOOK.md) | 多 Agent ownership、共享文件、停止点、交付格式和可复制任务模板 |
+| [docs/BACKLOG.md](./docs/BACKLOG.md) | 已确认版本之外的候选和产品方向变更，防止开发越界 |
 | [AGENTS.md](./AGENTS.md) | 所有编码 Agent 必须遵守的仓库级规则 |
 
 ## 决策优先级
@@ -155,12 +164,13 @@ REHEARSAL_REPORT_FILE=/absolute/path/to/restore-report.json \
 
 1. 用户当前明确要求。
 2. `AGENTS.md` 中的仓库级约束。
-3. `docs/00-V1-BASELINE.md` 中的一期范围和冻结决策。
-4. 专题文档中的具体契约。
-5. `PRODUCT.md` 中的长期产品事实。
-6. 代码中的既有实现。
+3. 当前任务对应的版本基线：V2 使用 `docs/09`，一期使用 `docs/00`。
+4. 对应版本专题文档中的具体契约。
+5. 未被 V2 明确覆盖的一期冻结约束。
+6. `PRODUCT.md` 中的长期产品事实。
+7. 代码中的既有实现。
 
-任何会扩大一期范围、改变原始数据不可变原则、增加运行服务或改变安全模型的决定，都必须先更新基线并由用户确认，不能由实现 Agent 自行推断。
+任何会扩大当前确认版本、改变原始数据不可变原则、增加运行服务、改变外发/额度或安全模型的决定，都必须先更新基线并由用户确认，不能由实现 Agent 自行推断。
 
 ## 重要说明
 

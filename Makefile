@@ -1,4 +1,4 @@
-.PHONY: install check test build init-dev up down logs migrate init-owner reset-auth rebuild-search reset-dev api-test m1-integration-test m2-integration-test m3-integration-test m4-integration-test m5-integration-test m5-performance-test m5-recovery-test m5-deployment-contract-test web-test worker-test production-init production-init-owner production-reset-auth build-release production-check production-up production-down backup check-backup prune-backups restore check-integrity verify-https publish-release-status release-check
+.PHONY: install check test build init-dev up down logs migrate init-owner reset-auth rebuild-search reset-dev api-test m1-integration-test m2-integration-test m3-integration-test m4-integration-test m5-integration-test v2-integration-test m5-performance-test m5-recovery-test m5-deployment-contract-test web-test worker-test production-init production-init-owner production-reset-auth build-release production-check production-up production-down backup check-backup prune-backups restore check-integrity verify-https publish-release-status release-check
 
 install:
 	pnpm install --frozen-lockfile
@@ -64,6 +64,10 @@ m4-integration-test: init-dev
 m5-integration-test: init-dev
 	docker compose --env-file deploy/.env -f deploy/compose.yaml build api
 	./deploy/scripts/test-m5-integration.sh
+
+v2-integration-test: init-dev
+	docker compose --env-file deploy/.env -f deploy/compose.yaml build api
+	GO_TEST_RUN='^TestM3V2JSONAINarrowSynchronousPath$$|^TestV2Aliyun' ./deploy/scripts/test-m3-integration.sh
 
 m5-performance-test: init-dev
 	pnpm --filter @dev-toolbox/web build

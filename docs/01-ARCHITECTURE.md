@@ -401,6 +401,10 @@ dev-toolbox/
 - 模块独立部署。
 - 跨模块消息总线。
 
+### 10.1 V2 已确认的覆盖范围
+
+第二期工具箱已从“未来工具”提升为确认范围。它的组件边界、懒加载、Monaco/CodeMirror 6、浏览器 Tesseract.js、Go 直连阿里云与 JSON AI 窄路径统一由 `10-V2-TOOLBOX-ARCHITECTURE.md` 覆盖定义。一期的知识模块、四服务拓扑和“不建设动态插件/新微服务”约束不变。
+
 ## 11. 架构变更触发条件
 
 以下变化必须先更新本文并取得用户确认：
@@ -448,6 +452,8 @@ dev-toolbox/
 | 测试 | Vitest + Vue Test Utils；关键流程 Playwright | 只用截图或大批脆弱 DOM 快照 |
 
 Reka UI 是无样式、可渐进使用的 Vue 可访问原语，适合在不继承现成视觉主题的前提下实现统一组件：<https://www.reka-ui.com/docs/overview/introduction>。Markdown 渲染器来源：<https://github.com/markdown-it/markdown-it>。
+
+上表“一期不引入 Monaco/CodeMirror”仍是 V1 历史基线。V2 仅在 JSON/YAML 工具路由中按设备懒加载 Monaco 或 CodeMirror 6，不得进入首页或知识模块 bundle；精确依赖和销毁责任见 `10-V2-TOOLBOX-ARCHITECTURE.md`。
 
 ### 12.3 AI worker
 

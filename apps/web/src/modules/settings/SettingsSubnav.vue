@@ -8,6 +8,7 @@ const links = [
   { name: 'token-settings', to: '/settings/tokens', label: '外部 Agent' },
   { name: 'ai-security-settings', to: '/settings/ai-security', label: 'AI 与敏感数据' },
   { name: 'ai-schedule-settings', to: '/settings/ai-schedule', label: '自动整理' },
+  { name: 'aliyun-settings', to: '/settings/aliyun', label: '阿里云服务' },
   { name: 'security-settings', to: '/settings/security', label: '登录安全' },
   { name: 'appearance-settings', to: '/settings/appearance', label: '外观' },
   { name: 'operations-settings', to: '/settings/operations', label: '系统状态' },
@@ -32,11 +33,12 @@ const links = [
   display: none;
   gap: var(--space-2);
   margin-bottom: var(--space-4);
-  overflow-x: auto;
-  padding-bottom: var(--space-1);
 }
 
 .settings-subnav a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
   flex: 0 0 auto;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border-subtle);
@@ -51,7 +53,14 @@ const links = [
   color: var(--accent);
 }
 
-@media (max-width: 1099px) {
-  .settings-subnav { display: flex; }
+@media (max-width: 1279px) {
+  .settings-subnav {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr));
+  }
+}
+
+@media (max-width: 599px) {
+  .settings-subnav { display: none; }
 }
 </style>

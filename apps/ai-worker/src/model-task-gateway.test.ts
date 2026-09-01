@@ -6,6 +6,7 @@ import type { Context, Tool } from '@earendil-works/pi-ai'
 import {
   ProviderGatewayError,
   runProviderTurn,
+  runProviderTurnOnce,
   type ProviderProtocol,
   type ProviderTurnRequest,
 } from './model-gateway.js'
@@ -27,6 +28,20 @@ afterEach(async () => {
 })
 
 describe('ModelGateway task turns', () => {
+  it('makes exactly one attempt for the narrow synchronous path', async () => {
+    let requests = 0
+    const baseUrl = await startMock((_request, response) => {
+      requests += 1
+      response.writeHead(503, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: 'synthetic temporary failure' } }))
+    })
+
+    await expect(runProviderTurnOnce(taskRequest(baseUrl, 'openai-completions'))).rejects.toMatchObject({
+      category: 'unavailable',
+    })
+    expect(requests).toBe(1)
+  })
+
   for (const protocol of protocols) {
     it(`accepts only a declared tool call from ${protocol}`, async () => {
       let requests = 0

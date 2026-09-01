@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import UiIcon from '../../components/ui/UiIcon.vue'
 
-const version = import.meta.env.VITE_APP_VERSION || 'v1.0.3'
+const version = import.meta.env.VITE_APP_VERSION || 'v2.2.0-rc.1'
 </script>
 
 <template>
@@ -26,6 +26,16 @@ const version = import.meta.env.VITE_APP_VERSION || 'v1.0.3'
         <p><strong>可见入口优先。</strong>工作台始终显示搜索框和“快速记录”按钮，不依赖快捷键才能完成操作。</p>
         <p><strong>当前快捷键。</strong><kbd>/</kbd> 聚焦搜索；<kbd>⌘/Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd> 打开快速记录；编辑器中 <kbd>⌘/Ctrl</kbd> + <kbd>Enter</kbd> 保存。</p>
         <p><strong>字面搜索。</strong>引号、路径、百分号和下划线都按普通字符处理；查询词只进入请求正文，不写入 URL 或浏览器持久化存储。</p>
+      </div>
+    </section>
+
+    <section id="local-tools" class="help-section" aria-labelledby="local-tools-title">
+      <header><UiIcon name="wrench" /><div><p>V2.0 TOOLBOX</p><h2 id="local-tools-title">本地工具与 JSON AI</h2></div></header>
+      <div class="help-list">
+        <p><strong>默认只在浏览器本地处理。</strong>Base64、URL、JWT、JSON、YAML、时间与 Cron、摘要与校验和、正则测试的确定性操作不把正文发送到业务 API，也不写入浏览器持久化存储。</p>
+        <p><strong>编辑器按设备加载。</strong>桌面使用 Monaco，手机使用 CodeMirror 6；离开页面后编辑器、Worker 和待处理任务会释放，刷新或关闭页面无法恢复输入与结果。</p>
+        <p><strong>JSON AI 必须显式确认。</strong>只有主动切换到 AI、选择 Provider/模型、查看接收方、目标语言、发送模式和字节数，并在确认对话框提交后，JSON 才会发送到窄类型生成接口。结果只是普通文本，不会执行、编译或保存。</p>
+        <p><strong>结构模式不发送值。</strong>它只发送字段名、容器关系和原始类型；完整 JSON 模式会发送当前输入全文，并要求二次勾选确认。</p>
       </div>
     </section>
 
@@ -66,12 +76,13 @@ const version = import.meta.env.VITE_APP_VERSION || 'v1.0.3'
     </section>
 
     <section id="boundaries" class="help-section help-boundaries" aria-labelledby="boundary-title">
-      <header><UiIcon name="shield-check" /><div><p>V1 BOUNDARIES</p><h2 id="boundary-title">一期明确边界</h2></div></header>
+      <header><UiIcon name="shield-check" /><div><p>PRODUCT BOUNDARIES</p><h2 id="boundary-title">当前明确边界</h2></div></header>
       <ul>
         <li>不执行 Shell、SSH、SQL、任意 HTTP、任意文件系统或其他高权限工具。</li>
         <li>不自动联网核验外部数据真实性；AI 候选必须由用户判断。</li>
         <li>不提供向量语义搜索、OCR/PDF 正文解析、通用导入向导、插件市场或多用户协作。</li>
         <li>不提供在线 `.env` 编辑、Web 备份控制台或自动部署；运维脚本由宿主机所有者显式调用。</li>
+        <li>机器翻译与云 OCR 只通过用户明确操作进入额度受控的阿里云路径；不提供翻译/OCR 历史、后台任务、Agent loop、代码执行或代码编译。</li>
       </ul>
     </section>
   </article>

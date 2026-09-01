@@ -1,12 +1,18 @@
 packages:
   - apps/web
   - apps/ai-worker
+overrides:
+  'monaco-editor>dompurify': 3.4.14
 allowBuilds:
   '@google/genai': false
   esbuild: true
   protobufjs: true
+  # tesseract.js 的 postinstall 仅输出 opencollective 提示，无构建产物，显式跳过。
+  tesseract.js: false
   vue-demi: true
 minimumReleaseAgeExclude:
   - '@earendil-works/pi-agent-core@0.84.4'
   - '@earendil-works/pi-ai@0.84.4'
   - '@earendil-works/pi-telemetry@0.84.4'
+patchedDependencies:
+  monaco-editor@0.56.0: patches/monaco-editor@0.56.0.patch

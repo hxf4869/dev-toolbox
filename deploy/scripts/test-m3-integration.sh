@@ -8,6 +8,7 @@ compose_file="$deploy_dir/compose.yaml"
 env_file="$deploy_dir/.env"
 test_database="dev_toolbox_m3_test"
 test_container="dev-toolbox-m3-integration"
+test_pattern=${GO_TEST_RUN:-TestM3}
 
 if [ ! -f "$env_file" ] || [ ! -f "$deploy_dir/secrets/postgres_password" ]; then
   echo "请先运行 make init-dev" >&2
@@ -33,6 +34,7 @@ docker compose --env-file "$env_file" -f "$compose_file" run --rm --no-deps \
   -e PGDATABASE="$test_database" api /app/migrate >/dev/null
 
 docker run -d --rm --name "$test_container" \
+  -e GO_TEST_RUN="$test_pattern" \
   -v "$project_dir:/repo" \
   -v "$env_file:/run/config/dev.env:ro" \
   -v "$deploy_dir/secrets/postgres_password:/run/secrets/test_pg_password:ro" \
@@ -43,5 +45,5 @@ docker exec "$test_container" sh -c '
   test_password=$(tr -d "\n" </run/secrets/test_pg_password)
   export TEST_DATABASE_URL="host=postgres port=5432 dbname=dev_toolbox_m3_test user=$POSTGRES_USER password=$test_password sslmode=disable"
   unset test_password
-  go test -tags=integration ./integration -run TestM3 -count=1 -v
+  go test -tags=integration ./integration -run "$GO_TEST_RUN" -count=1 -v
 '

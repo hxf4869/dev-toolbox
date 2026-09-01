@@ -5,7 +5,7 @@ import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { apiRequest, jsonRequest } from '../../lib/api'
-import SettingsSubnav from './SettingsSubnav.vue'
+import SettingsPageShell from './SettingsPageShell.vue'
 
 type TokenScope =
   | 'records:read'
@@ -229,24 +229,26 @@ function messageFor(error: unknown) {
 </script>
 
 <template>
-  <section class="settings-page" aria-labelledby="token-title">
-    <SettingsSubnav />
-    <header class="settings-page__header">
-      <div>
-        <p class="settings-kicker">SETTINGS · EXTERNAL AGENTS</p>
-        <h2 id="token-title">Personal Access Token</h2>
-        <p>为迁移脚本、浏览器扩展或外部 Agent 分配最小权限；明文只展示一次。</p>
-      </div>
+  <SettingsPageShell
+    title-id="token-title"
+    title="Personal Access Token"
+    description="为脚本或外部工具创建和撤销访问令牌；明文只显示一次。"
+    :show-aside="!loading"
+    :surface="false"
+  >
+    <template #actions>
       <UiButton variant="primary" @click="openCreate"><UiIcon name="plus" /> 创建 Token</UiButton>
-    </header>
+    </template>
 
-    <div class="settings-notice" role="note">
-      <UiIcon name="shield-check" />
-      <span><strong>固定边界：</strong>PAT 不能修改既有原文、标题、目录、标签或敏感状态，也不能管理 Provider 与登录安全。</span>
-    </div>
-    <div v-if="pageError" class="settings-notice settings-notice--danger" role="alert">
-      <UiIcon name="triangle-alert" /><span>{{ pageError }}</span><button type="button" @click="loadTokens">重试</button>
-    </div>
+    <template #notices>
+      <div class="settings-notice" role="note">
+        <UiIcon name="shield-check" />
+        <span><strong>固定边界：</strong>PAT 不能修改既有原文、标题、目录、标签或敏感状态，也不能管理 Provider 与登录安全。</span>
+      </div>
+      <div v-if="pageError" class="settings-notice settings-notice--danger" role="alert">
+        <UiIcon name="triangle-alert" /><span>{{ pageError }}</span><button type="button" @click="loadTokens">重试</button>
+      </div>
+    </template>
 
     <div class="settings-toolbar"><p>{{ activeCount }} 个有效 Token · {{ tokens.length }} 个历史记录</p></div>
     <div v-if="loading" class="settings-loading" aria-live="polite"><span class="settings-spinner" aria-hidden="true" />正在读取 Token…</div>
@@ -267,12 +269,32 @@ function messageFor(error: unknown) {
         <footer><UiButton variant="danger" :disabled="Boolean(token.revokedAt)" @click="revokeTarget = token">{{ token.revokedAt ? '已撤销' : '撤销 Token' }}</UiButton></footer>
       </article>
     </div>
-  </section>
+
+    <template #aside>
+      <section>
+        <h3>访问边界摘要</h3>
+        <dl class="settings-context__list">
+          <div><dt>有效 Token</dt><dd>{{ activeCount }}</dd></div>
+          <div><dt>历史记录</dt><dd>{{ tokens.length }}</dd></div>
+          <div><dt>可选 Scope</dt><dd>{{ scopeOptions.length }}</dd></div>
+          <div><dt>明文回显</dt><dd>仅创建时一次</dd></div>
+        </dl>
+      </section>
+      <section class="settings-context__notice settings-context__notice--success">
+        <UiIcon name="shield-check" />
+        <div>
+          <strong>最小权限优先</strong>
+          <p>为每个脚本或 Agent 单独创建 Token，用完即撤销；不要跨用途共享。</p>
+        </div>
+      </section>
+      <p class="settings-context__footnote">读取敏感内容需要普通读取 scope 与 `sensitive:read` 同时满足，后者不会单独赋予读取能力。</p>
+    </template>
+  </SettingsPageShell>
 
   <Teleport to="body">
     <div v-if="createOpen" class="settings-overlay" @click.self="closeCreate">
       <section ref="dialogRoot" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="token-create-title" @keydown="onDialogKeydown($event, closeCreate)">
-        <header><div><p class="settings-kicker">LEAST PRIVILEGE</p><h2 id="token-create-title">创建 Personal Access Token</h2></div><button class="settings-icon-button" type="button" aria-label="关闭" @click="closeCreate"><UiIcon name="x" /></button></header>
+        <header><div><h2 id="token-create-title">创建 Personal Access Token</h2></div><button class="settings-icon-button" type="button" aria-label="关闭" @click="closeCreate"><UiIcon name="x" /></button></header>
         <div class="settings-drawer__body">
           <form id="token-form" class="settings-form" @submit.prevent="createToken">
             <label class="settings-field"><span>Token 名称</span><input v-model="name" required maxlength="120" autocomplete="off" placeholder="例如：Notion 一次性迁移" /></label>

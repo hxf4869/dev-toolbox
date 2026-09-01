@@ -48,7 +48,7 @@ header_value() {
 case "$(header_value Strict-Transport-Security)" in max-age=*) ;; *) fail "HTTPS 缺少有效 HSTS" ;; esac
 [ "$(header_value Referrer-Policy)" = no-referrer ] || fail "HTTPS 缺少 Referrer-Policy: no-referrer"
 csp=$(header_value Content-Security-Policy)
-for directive in "default-src 'self'" "script-src 'self'" "object-src 'none'" "frame-ancestors 'none'" "form-action 'self'"; do
+for directive in "default-src 'self'" "script-src 'self' 'wasm-unsafe-eval'" "worker-src 'self' blob:" "object-src 'none'" "frame-ancestors 'none'" "form-action 'self'"; do
   case "$csp" in *"$directive"*) ;; *) fail "HTTPS CSP 缺少约束：$directive" ;; esac
 done
 

@@ -5,7 +5,7 @@ import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { ApiError, apiRequest, jsonRequest } from '../../lib/api'
-import SettingsSubnav from './SettingsSubnav.vue'
+import SettingsPageShell from './SettingsPageShell.vue'
 
 type ProviderProtocol = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
 
@@ -84,6 +84,15 @@ const previousFocus = ref<HTMLElement | null>(null)
 const editingProvider = computed(() => Boolean(providerDraft.value.id))
 const editingModel = computed(() => Boolean(modelDraft.value.id))
 const modelOwner = computed(() => providers.value.find((provider) => provider.id === modelOwnerID.value))
+const enabledProviderCount = computed(() => providers.value.filter((provider) => provider.enabled).length)
+const modelCount = computed(() => providers.value.reduce((total, provider) => total + provider.models.length, 0))
+const enabledModelCount = computed(() =>
+  providers.value.reduce(
+    (total, provider) => total + provider.models.filter((model) => model.enabled).length,
+    0,
+  ),
+)
+const configuredKeyCount = computed(() => providers.value.filter((provider) => provider.hasApiKey).length)
 
 watch(
   () => providerEditorOpen.value || modelEditorOpen.value || Boolean(pendingDelete.value),
@@ -411,24 +420,26 @@ function messageFor(error: unknown) {
 </script>
 
 <template>
-  <section class="settings-page" aria-labelledby="provider-title">
-    <SettingsSubnav />
-    <header class="settings-page__header">
-      <div>
-        <p class="settings-kicker">SETTINGS · MODEL GATEWAY</p>
-        <h2 id="provider-title">Provider 与模型</h2>
-        <p>配置受控协议、模型能力与连接状态；密钥保存后只显示末尾掩码。</p>
-      </div>
+  <SettingsPageShell
+    title-id="provider-title"
+    title="Provider 与模型"
+    description="管理 AI 服务、连接凭据和可用模型。"
+    :show-aside="!loading"
+    :surface="false"
+  >
+    <template #actions>
       <UiButton variant="primary" @click="openCreateProvider"><UiIcon name="plus" /> 新增 Provider</UiButton>
-    </header>
+    </template>
 
-    <div v-if="allowInsecureHttp" class="settings-notice settings-notice--warning" role="status">
-      <UiIcon name="triangle-alert" />
-      <span>部署者已允许 HTTP Provider。未加密连接可能泄露 API Key，仅用于明确配置的内网网关。</span>
-    </div>
-    <div v-if="pageError" class="settings-notice settings-notice--danger" role="alert">
-      <UiIcon name="triangle-alert" /><span>{{ pageError }}</span><button type="button" @click="loadProviders">重试</button>
-    </div>
+    <template #notices>
+      <div v-if="allowInsecureHttp" class="settings-notice settings-notice--warning" role="status">
+        <UiIcon name="triangle-alert" />
+        <span>部署者已允许 HTTP Provider。未加密连接可能泄露 API Key，仅用于明确配置的内网网关。</span>
+      </div>
+      <div v-if="pageError" class="settings-notice settings-notice--danger" role="alert">
+        <UiIcon name="triangle-alert" /><span>{{ pageError }}</span><button type="button" @click="loadProviders">重试</button>
+      </div>
+    </template>
 
     <div v-if="loading" class="settings-loading" aria-live="polite">
       <span class="settings-spinner" aria-hidden="true" />正在读取 Provider 配置…
@@ -511,13 +522,36 @@ function messageFor(error: unknown) {
         <UiButton variant="danger" @click="pendingDelete = { kind: 'provider', id: provider.id, label: provider.displayName }">删除 Provider</UiButton>
       </footer>
     </article>
-  </section>
+
+    <template #aside>
+      <section>
+        <h3>配置摘要</h3>
+        <dl class="settings-context__list">
+          <div><dt>已启用 Provider</dt><dd>{{ enabledProviderCount }} / {{ providers.length }}</dd></div>
+          <div><dt>已启用模型</dt><dd>{{ enabledModelCount }} / {{ modelCount }}</dd></div>
+          <div><dt>已保存密钥</dt><dd>{{ configuredKeyCount }}</dd></div>
+          <div><dt>HTTP Provider</dt><dd>{{ allowInsecureHttp ? '部署者已允许' : '禁止' }}</dd></div>
+        </dl>
+      </section>
+      <section
+        class="settings-context__notice"
+        :class="allowInsecureHttp ? 'settings-context__notice--warning' : 'settings-context__notice--success'"
+      >
+        <UiIcon :name="allowInsecureHttp ? 'triangle-alert' : 'shield-check'" />
+        <div>
+          <strong>{{ allowInsecureHttp ? '存在明文传输风险' : '密钥边界受控' }}</strong>
+          <p>{{ allowInsecureHttp ? '只在你确认的内网网关使用 HTTP，公网 Provider 应保持 HTTPS。' : 'API Key 加密保存，页面只读取掩码；明文不会再次返回。' }}</p>
+        </div>
+      </section>
+      <p class="settings-context__footnote">连接测试只在你点击后发送一次最小请求，可能产生所选 Provider 的调用费用。</p>
+    </template>
+  </SettingsPageShell>
 
   <Teleport to="body">
     <div v-if="providerEditorOpen" class="settings-overlay" @click.self="closeProviderEditor">
       <section ref="dialogRoot" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="provider-editor-title" @keydown="onDialogKeydown($event, closeProviderEditor)">
         <header>
-          <div><p class="settings-kicker">PROVIDER CONFIGURATION</p><h2 id="provider-editor-title">{{ editingProvider ? '编辑 Provider' : '新增 Provider' }}</h2></div>
+          <div><h2 id="provider-editor-title">{{ editingProvider ? '编辑 Provider' : '新增 Provider' }}</h2></div>
           <button class="settings-icon-button" type="button" aria-label="关闭" @click="closeProviderEditor"><UiIcon name="x" /></button>
         </header>
         <div class="settings-drawer__body">

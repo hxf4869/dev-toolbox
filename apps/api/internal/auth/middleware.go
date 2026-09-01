@@ -66,17 +66,21 @@ func (service *Service) OriginOnly(next http.Handler) http.Handler {
 
 // Authenticate is deliberately session-only and protects owner administration.
 func (service *Service) Authenticate(next http.Handler) http.Handler {
-	return service.withAuthentication(false, nil, next)
+	return service.withAuthentication(false, nil, "FORBIDDEN", next)
 }
 
-func (service *Service) AuthenticateMutation(next http.Handler) http.Handler {
-	return service.withAuthentication(true, nil, next)
+func (service *Service) AuthenticateMutation(next http.Handler, mutationForbiddenCode ...string) http.Handler {
+	forbiddenCode := "FORBIDDEN"
+	if len(mutationForbiddenCode) == 1 && mutationForbiddenCode[0] != "" {
+		forbiddenCode = mutationForbiddenCode[0]
+	}
+	return service.withAuthentication(true, nil, forbiddenCode, next)
 }
 
 // Authorize accepts either the owner session or a PAT carrying every listed scope.
 func (service *Service) Authorize(requiredScopes ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return service.withAuthentication(false, requiredScopes, next)
+		return service.withAuthentication(false, requiredScopes, "FORBIDDEN", next)
 	}
 }
 
@@ -84,11 +88,11 @@ func (service *Service) Authorize(requiredScopes ...string) func(http.Handler) h
 // authenticated by their header and therefore do not use browser CSRF tokens.
 func (service *Service) AuthorizeMutation(requiredScopes ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return service.withAuthentication(true, requiredScopes, next)
+		return service.withAuthentication(true, requiredScopes, "FORBIDDEN", next)
 	}
 }
 
-func (service *Service) withAuthentication(mutation bool, requiredScopes []string, next http.Handler) http.Handler {
+func (service *Service) withAuthentication(mutation bool, requiredScopes []string, mutationForbiddenCode string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		sessionCookie, cookieErr := request.Cookie(sessionCookieName)
 		authorization := strings.TrimSpace(request.Header.Get("Authorization"))
@@ -105,7 +109,7 @@ func (service *Service) withAuthentication(mutation bool, requiredScopes []strin
 				return
 			}
 			if requiredScopes == nil {
-				httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 不能执行所有者设置操作")
+				httpapi.WriteError(response, request, http.StatusForbidden, mutationForbiddenCode, "Token 不能执行所有者设置操作")
 				return
 			}
 			for _, scope := range requiredScopes {
@@ -131,12 +135,12 @@ func (service *Service) withAuthentication(mutation bool, requiredScopes []strin
 		}
 		if mutation {
 			if !service.validOrigin(request) {
-				httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "请求来源未通过校验")
+				httpapi.WriteError(response, request, http.StatusForbidden, mutationForbiddenCode, "请求来源未通过校验")
 				return
 			}
 			provided := request.Header.Get("X-CSRF-Token")
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(session.CSRFToken)) != 1 {
-				httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "CSRF Token 无效")
+				httpapi.WriteError(response, request, http.StatusForbidden, mutationForbiddenCode, "CSRF Token 无效")
 				return
 			}
 		}

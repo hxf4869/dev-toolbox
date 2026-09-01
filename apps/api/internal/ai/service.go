@@ -68,6 +68,7 @@ func (service *Service) RegisterRoutes(router *http.ServeMux, authService *auth.
 	router.Handle("POST /api/v1/ai/tasks/{id}/retry", authService.AuthorizeMutation("tasks:run")(http.HandlerFunc(service.retryTask)))
 	router.Handle("GET /api/v1/ai/schedule", authService.Authenticate(http.HandlerFunc(service.getSchedule)))
 	router.Handle("PUT /api/v1/ai/schedule", authService.AuthenticateMutation(http.HandlerFunc(service.updateSchedule)))
+	router.Handle("POST /api/v1/tools/json/type-generation/ai", authService.AuthenticateMutation(http.HandlerFunc(service.generateJSONTypesWithAI), "MUTATION_NOT_ALLOWED"))
 
 	router.Handle("POST /internal/ai/tasks/claim", service.internalOnly(http.HandlerFunc(service.claimTask)))
 	router.Handle("POST /internal/ai/tasks/{id}/heartbeat", service.internalOnly(http.HandlerFunc(service.heartbeatTask)))

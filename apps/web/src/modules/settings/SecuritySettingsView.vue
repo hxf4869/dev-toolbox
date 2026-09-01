@@ -5,7 +5,7 @@ import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { apiRequest, jsonRequest } from '../../lib/api'
-import SettingsSubnav from './SettingsSubnav.vue'
+import SettingsPageShell from './SettingsPageShell.vue'
 
 interface TrustedDevice {
   id: string
@@ -265,32 +265,33 @@ function messageFor(error: unknown) {
 </script>
 
 <template>
-  <section class="security" aria-labelledby="security-title">
-    <SettingsSubnav />
-    <header class="security__header">
-      <div>
-        <p>设置 · 登录安全</p>
-        <h2 id="security-title">安全与会话</h2>
-        <span>管理双因素认证、可信设备与当前登录会话。</span>
+  <SettingsPageShell
+    title-id="security-title"
+    title="安全与会话"
+    description="管理双因素认证、可信设备与当前登录会话。"
+    :show-aside="!loading"
+    :surface="false"
+  >
+    <template #actions>
+      <span class="settings-status settings-status--success"><UiIcon name="shield-check" /> TOTP 已启用</span>
+    </template>
+
+    <template #notices>
+      <div v-if="pageError" class="settings-notice settings-notice--danger" role="alert">
+        <UiIcon name="triangle-alert" />
+        <span>{{ pageError }}</span>
+        <button type="button" @click="loadSecurityState">重试</button>
       </div>
-      <span class="security-status"><UiIcon name="shield-check" /> TOTP 已启用</span>
-    </header>
+    </template>
 
-    <div v-if="pageError" class="page-notice" role="alert">
-      <UiIcon name="triangle-alert" />
-      <span>{{ pageError }}</span>
-      <button type="button" @click="loadSecurityState">重试</button>
-    </div>
-
-    <div v-if="loading" class="security__loading" aria-live="polite">
-      <span class="spinner" aria-hidden="true" /> 正在读取安全状态…
+    <div v-if="loading" class="settings-loading" aria-live="polite">
+      <span class="settings-spinner" aria-hidden="true" /> 正在读取安全状态…
     </div>
 
     <template v-else>
       <section class="security-card" aria-labelledby="authentication-title">
         <header>
           <div>
-            <p>LOGIN AUTHENTICATION</p>
             <h3 id="authentication-title">登录验证</h3>
           </div>
         </header>
@@ -313,7 +314,7 @@ function messageFor(error: unknown) {
 
       <section class="security-card" aria-labelledby="devices-title">
         <header>
-          <div><p>TRUSTED DEVICES</p><h3 id="devices-title">可信设备</h3></div>
+          <div><h3 id="devices-title">可信设备</h3></div>
           <span>{{ devices.length }} 台有效设备</span>
         </header>
         <div v-if="devices.length === 0" class="empty-row">没有有效的可信设备；下次登录仍需 TOTP。</div>
@@ -337,7 +338,7 @@ function messageFor(error: unknown) {
 
       <section class="security-card" aria-labelledby="sessions-title">
         <header>
-          <div><p>ACTIVE SESSIONS</p><h3 id="sessions-title">活跃会话</h3></div>
+          <div><h3 id="sessions-title">活跃会话</h3></div>
           <UiButton variant="danger" :disabled="busy" @click="logoutAll">退出全部设备</UiButton>
         </header>
         <div v-for="session in sessions" :key="session.id" class="security-row">
@@ -352,13 +353,34 @@ function messageFor(error: unknown) {
         </div>
       </section>
     </template>
-  </section>
+
+    <template #aside>
+      <section>
+        <h3>登录安全摘要</h3>
+        <dl class="settings-context__list">
+          <div><dt>双重认证</dt><dd>已启用</dd></div>
+          <div><dt>可信设备</dt><dd>{{ devices.length }}</dd></div>
+          <div><dt>活跃会话</dt><dd>{{ sessions.length }}</dd></div>
+          <div><dt>当前会话</dt><dd>{{ sessions.filter((session) => session.current).length }}</dd></div>
+          <div><dt>可信期限</dt><dd>90 天</dd></div>
+        </dl>
+      </section>
+      <section class="settings-context__notice settings-context__notice--warning">
+        <UiIcon name="shield-alert" />
+        <div>
+          <strong>敏感操作需要重新验证</strong>
+          <p>重置 TOTP、恢复码和修改密码都需要当前密码与第二因素。</p>
+        </div>
+      </section>
+      <p class="settings-context__footnote">修改密码会撤销全部会话与可信设备；单独撤销设备只影响该设备下次登录。</p>
+    </template>
+  </SettingsPageShell>
 
   <Teleport to="body">
     <div v-if="action" class="action-overlay" @click.self="closeAction">
       <section ref="actionDialog" class="action-drawer" role="dialog" aria-modal="true" aria-labelledby="action-title" @keydown="onDialogKeydown">
         <header>
-          <div><p>RE-AUTHENTICATION</p><h2 id="action-title">{{ actionTitle }}</h2></div>
+          <div><h2 id="action-title">{{ actionTitle }}</h2></div>
           <button type="button" aria-label="关闭" @click="closeAction"><UiIcon name="x" /></button>
         </header>
         <div class="action-drawer__body">
@@ -405,18 +427,7 @@ function messageFor(error: unknown) {
 </template>
 
 <style scoped>
-.security { width: min(100%, 900px); min-height: 100dvh; padding: var(--space-6); }
-.security__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); padding-bottom: var(--space-5); border-bottom: 1px solid var(--border-subtle); }
-.security__header p, .security__header h2, .security__header span { margin: 0; }
-.security__header p, .security-card header p { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em; }
-.security__header h2 { font-size: 22px; }
-.security__header > div > span { color: var(--text-secondary); }
-.security-status { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: 999px; background: color-mix(in srgb, var(--success) 12%, var(--bg-elevated)); color: var(--success); font-size: 12px; font-weight: 700; }
-.page-notice { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-4); padding: var(--space-3); border: 1px solid var(--danger); border-radius: var(--radius-control); color: var(--danger); }
-.page-notice button { margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; }
-.security__loading { display: flex; min-height: 320px; align-items: center; justify-content: center; gap: var(--space-3); color: var(--text-secondary); }
-.spinner { width: 26px; height: 26px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+.security-card header p { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em; }
 .security-card { margin-top: var(--space-5); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--bg-elevated); overflow: hidden; }
 .security-card > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4); border-bottom: 1px solid var(--border-subtle); }
 .security-card header p, .security-card header h3 { margin: 0; }
@@ -461,9 +472,6 @@ fieldset label { color: var(--text-secondary); }
 .confirm-overlay p { margin: 0 0 var(--space-5); color: var(--text-secondary); }
 .confirm-overlay button { width: 100%; margin-top: var(--space-2); }
 @media (max-width: 599px) {
-  .security { padding: var(--space-4); }
-  .security__header { display: block; }
-  .security-status { margin-top: var(--space-3); }
   .security-row { grid-template-columns: auto minmax(0, 1fr); }
   .security-row > button, .row-actions { grid-column: 2; justify-self: start; }
   .action-drawer { width: 100vw; border-left: 0; }

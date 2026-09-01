@@ -69,9 +69,12 @@
   --motion-base: 160ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 
-  --rail-width: 56px;
-  --module-nav-width: 236px;
-  --content-max: 1180px;
+  --global-header-height: 64px;
+  --module-nav-width: clamp(236px, 15vw, 292px);
+  --page-gutter: clamp(16px, 1.6vw, 32px);
+  --reading-max: 1180px;
+  --configuration-max: 1760px;
+  --content-max: 1280px;
   --layer-focus: 10;
   --layer-overlay: 40;
   --layer-toast: 100;

@@ -282,7 +282,7 @@ function messageFor(error: unknown) {
 <template>
   <section class="task-center" aria-labelledby="task-center-title">
     <header class="task-center__header">
-      <div><p>AI OPERATIONS · CONTROLLED LOOP</p><h1 id="task-center-title">AI 任务中心</h1><span>查看队列、运行阶段和终态；模型只能读取受控上下文并提交候选 Artifact。</span></div>
+      <div><h1 id="task-center-title">AI 任务中心</h1><span>查看任务进度、结果和失败原因。</span></div>
       <div><UiButton variant="secondary" @click="batchOpen = !batchOpen"><UiIcon name="boxes" />批量整理</UiButton><RouterLink class="schedule-link" to="/settings/ai-schedule"><UiIcon name="settings" />自动整理设置</RouterLink></div>
     </header>
 
@@ -291,7 +291,7 @@ function messageFor(error: unknown) {
     <p v-if="notice" class="center-notice" role="status"><UiIcon name="check" />{{ notice }}</p>
 
     <section v-if="batchOpen" class="batch-panel" aria-labelledby="batch-title">
-      <header><div><p>BATCH ORGANIZE</p><h2 id="batch-title">选择要整理的记录</h2><span>手动批量最多 100 条；正文与图片分开创建子任务，一条失败不影响其他条目。</span></div><button type="button" aria-label="关闭批量整理" @click="batchOpen = false"><UiIcon name="x" /></button></header>
+      <header><div><h2 id="batch-title">选择要整理的记录</h2><span>最多选择 100 条；单条失败不会影响其他记录。</span></div><button type="button" aria-label="关闭批量整理" @click="batchOpen = false"><UiIcon name="x" /></button></header>
       <div class="batch-config">
         <label><span>正文整理模型</span><select v-model="organizeModelID"><option value="">选择模型</option><option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select></label>
         <label><span>视觉模型（可选）</span><select v-model="visionModelID"><option value="">未配置，图片将跳过</option><option v-for="model in visionOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select></label>
@@ -348,19 +348,19 @@ function messageFor(error: unknown) {
 </template>
 
 <style scoped>
-.task-center { min-height: 100dvh; padding: var(--space-6); background: var(--bg-surface); }
-.task-center__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); max-width: var(--content-max); margin: 0 auto var(--space-5); }
+.task-center { display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; padding: var(--space-5) var(--page-gutter); background: var(--bg-surface); }
+.task-center__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); width: 100%; margin: 0 0 var(--space-5); }
 .task-center__header p, .task-center__header h1, .task-center__header span { margin: 0; }
-.task-center__header p, .batch-panel header p, .task-detail header p { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .07em; }
+.task-detail header p { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .07em; }
 .task-center__header h1 { font-size: 25px; }
-.task-center__header span { color: var(--text-secondary); }
+.task-center__header span { display: block; max-width: 75ch; color: var(--text-secondary); }
 .task-center__header > div:last-child { display: flex; flex: none; gap: var(--space-2); }
 .schedule-link { display: inline-flex; min-height: 40px; align-items: center; gap: var(--space-2); padding: 0 var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--text-primary); text-decoration: none; }
-.center-notice, .filter-chip { display: flex; max-width: var(--content-max); align-items: center; gap: var(--space-2); margin: 0 auto var(--space-3); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--success) 55%, var(--border-subtle)); border-radius: var(--radius-control); color: var(--success); }
+.center-notice, .filter-chip { display: flex; width: 100%; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--success) 55%, var(--border-subtle)); border-radius: var(--radius-control); color: var(--success); }
 .center-notice--warning { border-color: var(--warning); color: var(--warning); }
 .center-notice--error { border-color: var(--danger); color: var(--danger); }
 .center-notice button { margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; text-decoration: underline; }
-.batch-panel { max-width: var(--content-max); margin: 0 auto var(--space-4); padding: var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-card); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); }
+.batch-panel { width: 100%; max-height: min(460px, 55dvh); flex: none; margin: 0 0 var(--space-4); overflow-y: auto; padding: var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-card); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); overscroll-behavior: contain; }
 .batch-panel > header { display: flex; align-items: flex-start; justify-content: space-between; }
 .batch-panel header p, .batch-panel header h2, .batch-panel header span { margin: 0; }
 .batch-panel header h2 { font-size: 18px; }
@@ -369,20 +369,20 @@ function messageFor(error: unknown) {
 .batch-config { display: grid; grid-template-columns: 1fr 1fr .7fr; gap: var(--space-3); margin: var(--space-4) 0; }
 .batch-config label { display: grid; gap: var(--space-1); color: var(--text-muted); font-size: 11px; }
 .batch-config select { min-height: 40px; padding: 0 var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); }
-.batch-list { display: grid; max-height: 300px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); overflow-y: auto; padding: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); }
+.batch-list { display: grid; max-height: min(220px, 26dvh); grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); overflow-y: auto; padding: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); }
 .batch-list label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-control); background: var(--bg-code); cursor: pointer; }
 .batch-list label span { display: grid; min-width: 0; }
 .batch-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-list small { color: var(--text-muted); }
 .batch-panel > footer { display: flex; align-items: center; justify-content: space-between; margin-top: var(--space-3); color: var(--text-muted); }
-.status-tabs { display: flex; max-width: var(--content-max); gap: 2px; margin: 0 auto; overflow-x: auto; border-bottom: 1px solid var(--border-subtle); }
+.status-tabs { display: flex; width: 100%; gap: 2px; margin: 0; overflow-x: auto; border-bottom: 1px solid var(--border-subtle); }
 .status-tabs button { display: inline-flex; min-height: 44px; flex: none; align-items: center; gap: var(--space-2); padding: 0 var(--space-3); border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); cursor: pointer; }
 .status-tabs button[aria-current='page'] { border-color: var(--accent); color: var(--text-primary); }
 .status-tabs button span { min-width: 22px; padding: 1px var(--space-1); border-radius: 999px; background: var(--bg-elevated); font-size: 10px; }
 .filter-chip { justify-content: space-between; margin-top: var(--space-3); border-color: var(--accent); color: var(--text-secondary); }
 .filter-chip button { display: inline-flex; align-items: center; gap: var(--space-1); border: 0; background: transparent; color: var(--accent); cursor: pointer; }
-.task-layout { display: grid; max-width: var(--content-max); min-height: 560px; grid-template-columns: minmax(360px, .9fr) minmax(400px, 1.1fr); margin: var(--space-4) auto 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--bg-elevated); }
-.task-list { max-height: calc(100dvh - 190px); overflow-y: auto; border-right: 1px solid var(--border-subtle); }
+.task-layout { display: grid; width: 100%; min-height: 0; flex: 1; grid-template-columns: minmax(340px, clamp(380px, 32%, 620px)) minmax(440px, 1fr); margin: var(--space-4) 0 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--bg-elevated); }
+.task-list { min-height: 0; overflow-y: auto; border-right: 1px solid var(--border-subtle); overscroll-behavior: contain; scrollbar-color: var(--border-strong) transparent; }
 .task-list > button { display: grid; width: 100%; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); padding: var(--space-3); border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); cursor: pointer; text-align: left; }
 .task-list > button:hover, .task-list > button.active { background: var(--accent-soft); }
 .task-list > button.active { box-shadow: inset 3px 0 0 var(--accent); }
@@ -391,12 +391,12 @@ function messageFor(error: unknown) {
 .status-mark--succeeded { background: var(--success); }
 .status-mark--failed { background: var(--danger); }
 .task-list__body, .task-list__meta { display: grid; min-width: 0; }
-.task-list__body strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-list__body strong { display: -webkit-box; overflow: hidden; line-height: 1.4; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .task-list__body small, .task-list__body em, .task-list__meta small { color: var(--text-muted); font-size: 10px; font-style: normal; }
 .task-list__body em { margin-top: var(--space-1); color: var(--text-secondary); }
 .task-list__meta { justify-items: end; }
 .task-list__meta strong { color: var(--text-secondary); font-size: 10px; }
-.task-detail { min-width: 0; padding: var(--space-5); overflow-y: auto; }
+.task-detail { min-width: 0; min-height: 0; padding: clamp(var(--space-4), 1.5vw, var(--space-6)); overflow-y: auto; overscroll-behavior: contain; scrollbar-color: var(--border-strong) transparent; }
 .task-detail > header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border-subtle); }
 .task-detail header p, .task-detail header h2, .task-detail header span { margin: 0; }
 .task-detail header h2 { overflow-wrap: anywhere; font-size: 19px; }
@@ -431,10 +431,10 @@ function messageFor(error: unknown) {
 .retry-link { color: var(--text-muted); }
 .retry-link button { border: 0; background: transparent; color: var(--accent); cursor: pointer; }
 .center-loading, .center-empty { display: grid; min-height: 240px; place-content: center; justify-items: center; gap: var(--space-2); color: var(--text-muted); text-align: center; }
-.center-loading { display: flex; max-width: var(--content-max); margin: 0 auto; }
+.center-loading { display: flex; width: 100%; flex: 1; margin: 0; }
 .center-spinner { width: 22px; height: 22px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .center-empty h2, .center-empty p { margin: 0; }
-@media (max-width: 900px) { .task-center { padding: var(--space-4); } .task-layout { grid-template-columns: 1fr; } .task-list { max-height: none; border-right: 0; border-bottom: 1px solid var(--border-subtle); } .batch-config { grid-template-columns: 1fr; } }
+@media (max-width: 1000px) { .task-center { display: block; height: auto; min-height: 100%; overflow: visible; padding: var(--space-4); } .batch-panel { max-height: none; overflow: visible; } .task-layout { height: auto; min-height: 0; grid-template-columns: 1fr; } .task-list { max-height: min(480px, 52dvh); border-right: 0; border-bottom: 1px solid var(--border-subtle); } .task-detail { overflow: visible; } .batch-config { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .task-center { padding: var(--space-3); } .task-center__header { display: grid; } .task-center__header > div:last-child { flex-wrap: wrap; } .batch-list { grid-template-columns: 1fr; } .task-list > button { grid-template-columns: auto minmax(0, 1fr); } .task-list__meta { grid-column: 2; justify-items: start; } .task-detail { padding: var(--space-3); } .task-detail dl { grid-template-columns: 1fr; } }
 </style>

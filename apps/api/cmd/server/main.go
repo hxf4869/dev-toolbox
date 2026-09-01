@@ -14,6 +14,7 @@ import (
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/ai"
 	artifactcontract "github.com/hxf4869/dev-toolbox/apps/api/internal/ai/schema"
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/aliyun"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/knowledge"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/operations"
@@ -66,9 +67,12 @@ func main() {
 		cfg.AllowInsecureProviderHTTP,
 	)
 
+	aliyunService := aliyun.NewService(pool, cfg.MasterKey)
+
 	router := http.NewServeMux()
 	operations.RegisterRoutes(router, pool)
 	authService.RegisterRoutes(router)
+	aliyunService.RegisterRoutes(router, authService)
 	knowledgeService.RegisterRoutes(router, authService)
 	aiService.RegisterRoutes(router, authService)
 	operations.NewStatusService(
@@ -82,8 +86,9 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// 45s Aliyun deadline + bounded settlement and response headroom.
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	serverErrors := make(chan error, 1)

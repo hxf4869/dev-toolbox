@@ -6,7 +6,7 @@ import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { apiRequest, jsonRequest } from '../../lib/api'
-import SettingsSubnav from '../settings/SettingsSubnav.vue'
+import SettingsPageShell from '../settings/SettingsPageShell.vue'
 import {
   type AISettings,
   type AISchedule,
@@ -34,6 +34,21 @@ const saved = ref(false)
 const modelOptions = computed(() => availableModels(providers.value))
 const visionOptions = computed(() => availableModels(providers.value, true))
 const allowedPolicies = computed(() => policiesWithin(settings.value?.sensitiveAiPolicy ?? 'block'))
+const frequencyLabel = computed(() =>
+  frequency.value === 'off' ? '关闭' : frequency.value === 'daily' ? '每日' : '每周',
+)
+const weekdayLabel = computed(() =>
+  ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'][weekday.value - 1] ?? '未设置',
+)
+const organizeModelLabel = computed(() =>
+  modelOptions.value.find((model) => model.id === organizeModelID.value)?.label ?? '未配置',
+)
+const visionModelLabel = computed(() =>
+  visionOptions.value.find((model) => model.id === visionModelID.value)?.label ?? '未配置',
+)
+const policyLabel = computed(() =>
+  policy.value === 'block' ? '阻止外发' : policy.value === 'redact' ? '遮挡后外发' : '允许原文外发',
+)
 
 onMounted(() => void loadState())
 
@@ -106,27 +121,33 @@ function messageFor(error: unknown) {
 </script>
 
 <template>
-  <section class="settings-page" aria-labelledby="schedule-title">
-    <SettingsSubnav />
-    <header class="settings-page__header">
-      <div><p class="settings-kicker">SETTINGS · SCHEDULED AI</p><h2 id="schedule-title">批量与自动整理</h2><p>按当前输入集合识别待处理条目，生成新的候选版本；不会替你删除或判废旧版本。</p></div>
+  <SettingsPageShell
+    title-id="schedule-title"
+    title="批量与自动整理"
+    description="设置自动整理的运行时间和所用模型。"
+    :show-aside="!loading"
+  >
+    <template #actions>
       <UiButton variant="primary" :disabled="loading || busy || (frequency !== 'off' && !organizeModelID)" @click="saveSchedule"><UiIcon name="save" />{{ busy ? '正在保存…' : '保存设置' }}</UiButton>
-    </header>
+    </template>
 
-    <div v-if="errorMessage" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" /><span>{{ errorMessage }}</span><button type="button" @click="loadState">重新读取</button></div>
-    <div v-if="saved" class="settings-notice schedule-saved" role="status"><UiIcon name="check" />自动整理设置已保存。</div>
+    <template #notices>
+      <div v-if="errorMessage" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" /><span>{{ errorMessage }}</span><button type="button" @click="loadState">重新读取</button></div>
+      <div v-if="saved" class="settings-notice schedule-saved" role="status"><UiIcon name="check" />自动整理设置已保存。</div>
+    </template>
+
     <div v-if="loading" class="settings-loading"><span class="settings-spinner" />正在读取调度设置…</div>
 
     <template v-else>
       <section class="settings-card" aria-labelledby="frequency-title">
-        <header class="settings-card__header"><div><p class="settings-kicker">FREQUENCY</p><h3 id="frequency-title">运行频率</h3><p>一期默认关闭。每日或每周只在配置时区的时间窗建立一次批次。</p></div><span class="settings-status" :class="frequency === 'off' ? '' : 'settings-status--success'">{{ frequency === 'off' ? '已关闭' : frequency === 'daily' ? '每日' : '每周' }}</span></header>
+        <header class="settings-card__header"><div><h3 id="frequency-title">运行频率</h3><p>选择关闭、每日或每周。</p></div><span class="settings-status" :class="frequency === 'off' ? '' : 'settings-status--success'">{{ frequency === 'off' ? '已关闭' : frequency === 'daily' ? '每日' : '每周' }}</span></header>
         <div class="settings-card__body frequency-grid">
           <label v-for="choice in ([{ value: 'off', label: '关闭', detail: '不自动创建任务' }, { value: 'daily', label: '每日', detail: '每天一个时间窗' }, { value: 'weekly', label: '每周', detail: '指定星期与时间' }] as const)" :key="choice.value" :class="{ selected: frequency === choice.value }"><input v-model="frequency" type="radio" :value="choice.value" /><span><strong>{{ choice.label }}</strong><small>{{ choice.detail }}</small></span></label>
         </div>
       </section>
 
       <section class="settings-card" aria-labelledby="window-title">
-        <header class="settings-card__header"><div><p class="settings-kicker">RUN WINDOW</p><h3 id="window-title">时间窗与模型</h3><p>每个定期批次最多选择 20 条；应用重启不会重复同一时间窗。</p></div></header>
+        <header class="settings-card__header"><div><h3 id="window-title">时间与模型</h3><p>设置运行时区、时间和整理模型。</p></div></header>
         <div class="settings-card__body schedule-form">
           <label><span>IANA 时区</span><input v-model.trim="timezone" list="timezone-suggestions" maxlength="120" required /><small>使用如 Asia/Shanghai、UTC、America/Los_Angeles 的 IANA 名称。</small></label>
           <datalist id="timezone-suggestions"><option value="Asia/Shanghai" /><option value="UTC" /><option value="Asia/Tokyo" /><option value="Europe/London" /><option value="America/Los_Angeles" /></datalist>
@@ -139,17 +160,42 @@ function messageFor(error: unknown) {
       </section>
 
       <section class="settings-card" aria-labelledby="schedule-boundary-title">
-        <header class="settings-card__header"><div><p class="settings-kicker">SELECTION RULE</p><h3 id="schedule-boundary-title">处理边界</h3><p>服务端按 Artifact 输入快照判断，不以页面打开状态为依据。</p></div></header>
+        <header class="settings-card__header"><div><h3 id="schedule-boundary-title">处理范围</h3><p>只处理需要更新的内容。</p></div></header>
         <div class="settings-card__body boundary-list">
-          <article><UiIcon name="check" /><div><strong>只处理未被当前版本覆盖的正文或 ready 图片</strong><p>过期版本仍可查看并继续参与搜索，直到你主动切换或作废。</p></div></article>
-          <article><UiIcon name="shield-alert" /><div><strong>敏感策略在创建子任务前执行</strong><p>阻止或无法遮挡的分支零外部请求，并在批次中显示稳定跳过原因。</p></div></article>
-          <article><UiIcon name="boxes" /><div><strong>正文与图片分支相互独立</strong><p>没有视觉模型不会阻塞正文整理；纯文件条目不会误发给模型。</p></div></article>
-          <article><UiIcon name="clock" /><div><strong>同一时间窗只创建一次</strong><p>Worker 或 Provider 离线时，录入、搜索、浏览和下载仍可使用。</p></div></article>
+          <article><UiIcon name="check" /><div><strong>只处理当前版本未覆盖的内容</strong><p>有新增内容时才再次整理。</p></div></article>
+          <article><UiIcon name="shield-alert" /><div><strong>先执行敏感内容策略</strong><p>阻止外发时不会请求模型。</p></div></article>
+          <article><UiIcon name="boxes" /><div><strong>正文与图片分别处理</strong><p>没有视觉模型时会跳过图片。</p></div></article>
+          <article><UiIcon name="clock" /><div><strong>同一时间窗只创建一次</strong><p>应用重启不会重复创建。</p></div></article>
         </div>
         <footer class="schedule-footer"><RouterLink to="/ai/tasks"><UiIcon name="sparkles" />查看任务中心与手动批量整理</RouterLink></footer>
       </section>
     </template>
-  </section>
+
+    <template #aside>
+      <section>
+        <h3>当前调度摘要</h3>
+        <dl class="settings-context__list">
+          <div><dt>运行频率</dt><dd>{{ frequencyLabel }}</dd></div>
+          <div><dt>运行时间</dt><dd>{{ frequency === 'off' ? '不创建任务' : `${frequency === 'weekly' ? `${weekdayLabel} · ` : ''}${localTime}` }}</dd></div>
+          <div><dt>时区</dt><dd>{{ timezone || '未设置' }}</dd></div>
+          <div><dt>正文模型</dt><dd>{{ organizeModelLabel }}</dd></div>
+          <div><dt>视觉模型</dt><dd>{{ visionModelLabel }}</dd></div>
+          <div><dt>敏感策略</dt><dd>{{ policyLabel }}</dd></div>
+        </dl>
+      </section>
+      <section
+        class="settings-context__notice"
+        :class="frequency === 'off' ? '' : 'settings-context__notice--success'"
+      >
+        <UiIcon :name="frequency === 'off' ? 'clock' : 'check'" />
+        <div>
+          <strong>{{ frequency === 'off' ? '自动整理保持关闭' : '同一时间窗只创建一次' }}</strong>
+          <p>{{ frequency === 'off' ? '仍可在任务中心手动发起批量整理。' : '每个批次最多选择 20 条，重启不会重复同一窗口。' }}</p>
+        </div>
+      </section>
+      <p class="settings-context__footnote">自动整理只生成候选 Artifact；旧版本不会被自动删除、替换或判废。</p>
+    </template>
+  </SettingsPageShell>
 </template>
 
 <style scoped>
@@ -171,5 +217,5 @@ function messageFor(error: unknown) {
 .boundary-list p { margin: var(--space-1) 0 0; color: var(--text-muted); }
 .schedule-footer { padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border-subtle); }
 .schedule-footer a { display: inline-flex; align-items: center; gap: var(--space-2); text-decoration: none; }
-@media (max-width: 720px) { .settings-page { padding: var(--space-4); } .frequency-grid, .schedule-form, .boundary-list { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .frequency-grid, .schedule-form, .boundary-list { grid-template-columns: 1fr; } }
 </style>
