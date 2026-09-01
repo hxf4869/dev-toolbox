@@ -30,6 +30,7 @@ const provider = {
       supportsTools: true,
       supportsVision: true,
       enabled: true,
+      reasoningOptions: [],
       createdAt: '2026-08-30T01:00:00Z',
       updatedAt: '2026-08-30T01:00:00Z',
     },
