@@ -68,7 +68,15 @@ grep -F 'limit_req_zone $binary_remote_addr zone=dev_toolbox_login_per_ip:10m ra
 grep -F 'limit_req zone=dev_toolbox_login_per_ip burst=5 nodelay;' "$rendered_config" >/dev/null
 grep -F 'proxy_set_header X-Forwarded-For $remote_addr;' "$rendered_config" >/dev/null
 grep -F 'proxy_read_timeout 65s;' "$rendered_config" >/dev/null
+grep -F 'location ~ ^/api/v1/assistant/(runs/[^/]+/events|temporary/stream)$ {' "$rendered_config" >/dev/null
+grep -F 'proxy_buffering off;' "$rendered_config" >/dev/null
+grep -F 'proxy_pass_header X-Accel-Buffering;' "$rendered_config" >/dev/null
 grep -F 'proxy_pass http://dev-toolbox-gateway:80;' "$rendered_config" >/dev/null
+grep -F 'handle /api/* {' "$deploy_dir/Caddyfile" >/dev/null
+if grep -F 'flush_interval -1' "$deploy_dir/Caddyfile" >/dev/null; then
+  printf '%s\n' 'Caddy 不得为 Assistant SSE 设置全局 flush_interval -1' >&2
+  exit 1
+fi
 
 rendered_filter="$test_root/fail2ban-filter.conf"
 rendered_jail="$test_root/fail2ban-jail.conf"
@@ -79,4 +87,4 @@ grep -F 'logpath = /var/log/nginx/access.log' "$rendered_jail" >/dev/null
 grep -F 'maxretry = 12' "$rendered_jail" >/dev/null
 grep -F 'bantime.maxtime = 24h' "$rendered_jail" >/dev/null
 
-printf '%s\n' '生产边缘契约通过：Caddy 直连端口、外置 Nginx 零宿主机端口及登录防护配置均有效'
+printf '%s\n' '生产边缘契约通过：Caddy 直连端口、外置 Nginx 零宿主机端口、Assistant SSE 与登录防护配置均有效'

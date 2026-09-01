@@ -12,6 +12,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jackc/tern/v2 v2.4.3
 	github.com/pgvector/pgvector-go v0.4.1
+	github.com/pgvector/pgvector-go/pgx v0.4.1
 	github.com/pquerna/otp v1.5.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/crypto v0.55.0
@@ -43,6 +44,7 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

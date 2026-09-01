@@ -41,7 +41,7 @@ describe('V2 route migration', () => {
   it('uses lazy components for root module routes and returns a normal not-found route', async () => {
     const router = createAppRouter(createMemoryHistory())
     const names = [
-      'home', 'workspace', 'tools', 'tool-base64', 'tool-url', 'tool-jwt', 'tool-json',
+      'home', 'workspace', 'assistant', 'tools', 'tool-base64', 'tool-url', 'tool-jwt', 'tool-json',
       'tool-yaml', 'tool-time', 'tool-digest', 'tool-regex',
     ]
 

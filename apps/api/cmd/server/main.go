@@ -10,11 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgxvector "github.com/pgvector/pgvector-go/pgx"
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/ai"
 	artifactcontract "github.com/hxf4869/dev-toolbox/apps/api/internal/ai/schema"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/aliyun"
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/assistant"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/auth"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/knowledge"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/operations"
@@ -45,7 +48,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("database_pool_failed", "errorType", "database")
+		os.Exit(1)
+	}
+	poolConfig.AfterConnect = func(connectionContext context.Context, connection *pgx.Conn) error {
+		return pgxvector.RegisterTypes(connectionContext, connection)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		logger.Error("database_pool_failed", "errorType", "database")
 		os.Exit(1)
@@ -66,6 +77,10 @@ func main() {
 		pool, cfg.MasterKey, artifactValidator, cfg.AIWorkerURL, cfg.InternalServiceToken, cfg.AttachmentRoot,
 		cfg.AllowInsecureProviderHTTP,
 	)
+	assistantService := assistant.NewService(
+		pool, cfg.MasterKey, cfg.AIWorkerURL, cfg.InternalServiceToken, cfg.AllowInsecureProviderHTTP,
+	)
+	ai.SensitivePolicyChangeHook = assistantService.NotifySensitivePolicyChanged
 
 	aliyunService := aliyun.NewService(pool, cfg.MasterKey)
 
@@ -75,10 +90,12 @@ func main() {
 	aliyunService.RegisterRoutes(router, authService)
 	knowledgeService.RegisterRoutes(router, authService)
 	aiService.RegisterRoutes(router, authService)
+	assistantService.RegisterRoutes(router, authService)
 	operations.NewStatusService(
 		pool, cfg.AttachmentRoot, cfg.OperationsStatusRoot, cfg.AIWorkerURL, cfg.AppVersion,
 	).RegisterRoutes(router, authService)
 	go aiService.RunScheduler(ctx, logger)
+	go assistantService.Run(ctx, logger)
 
 	handler := httpapi.RequestID(httpapi.Recover(logger, httpapi.RequestLog(logger, router)))
 	server := &http.Server{

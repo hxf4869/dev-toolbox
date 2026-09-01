@@ -25,11 +25,15 @@ let focusTimer: number | undefined
 const KnowledgeModuleNav = defineAsyncComponent(
   () => import('../../modules/knowledge/KnowledgeModuleNav.vue'),
 )
+const AssistantModuleNav = defineAsyncComponent(
+  () => import('../../modules/assistant/AssistantModuleNav.vue'),
+)
 
 const moduleName = computed(() => String(route.meta.module ?? 'not-found'))
 const header = computed(() => ({
   home: { eyebrow: '开发百宝箱', title: '工作入口' },
   knowledge: { eyebrow: '知识与记录', title: '资料库' },
+  assistant: { eyebrow: '有出处的多轮问答', title: '知识助手' },
   tools: { eyebrow: '本地与在线工具', title: '工具箱' },
   ai: { eyebrow: '受控 AI 工作流', title: 'AI 任务' },
   settings: { eyebrow: '实例与偏好', title: '设置' },
@@ -172,6 +176,7 @@ function onWindowKeydown(event: KeyboardEvent) {
           <nav>
             <RouterLink to="/" :class="{ active: route.name === 'home' }"><UiIcon name="house" /> 首页</RouterLink>
             <RouterLink to="/knowledge"><UiIcon name="book-open" /> 知识与记录</RouterLink>
+            <RouterLink to="/assistant"><UiIcon name="sparkles" /> 知识助手</RouterLink>
             <RouterLink to="/tools"><UiIcon name="wrench" /> 工具箱</RouterLink>
           </nav>
         </section>
@@ -179,6 +184,8 @@ function onWindowKeydown(event: KeyboardEvent) {
       </template>
 
       <KnowledgeModuleNav v-else-if="moduleName === 'knowledge'" />
+
+      <AssistantModuleNav v-else-if="moduleName === 'assistant'" @navigate="close" />
 
       <template v-else-if="moduleName === 'tools'">
         <label class="module-nav__search">

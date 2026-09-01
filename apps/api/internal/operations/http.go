@@ -10,7 +10,7 @@ import (
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
 )
 
-const RequiredSchemaVersion = 7
+const RequiredSchemaVersion = 8
 
 type databasePinger interface {
 	Ping(context.Context) error

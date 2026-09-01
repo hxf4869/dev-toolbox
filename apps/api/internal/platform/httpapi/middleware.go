@@ -21,6 +21,14 @@ func (writer *statusWriter) WriteHeader(status int) {
 	writer.ResponseWriter.WriteHeader(status)
 }
 
+func (writer *statusWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *statusWriter) Flush() {
+	_ = http.NewResponseController(writer.ResponseWriter).Flush()
+}
+
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requestID := strings.TrimSpace(request.Header.Get("X-Request-ID"))

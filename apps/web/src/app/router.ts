@@ -38,6 +38,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { module: 'knowledge' },
   },
   {
+    path: '/assistant',
+    name: 'assistant',
+    component: () => import('../modules/assistant/AssistantView.vue'),
+    meta: { module: 'assistant' },
+  },
+  {
     path: '/items/:itemId',
     name: 'item-detail',
     component: () => import('../modules/knowledge/WorkspaceView.vue'),

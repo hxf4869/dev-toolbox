@@ -21,6 +21,13 @@ const links = [
     active: () => route.meta.module === 'knowledge',
   },
   {
+    label: '知识助手',
+    title: '知识助手',
+    to: '/assistant',
+    icon: 'sparkles' as const,
+    active: () => route.meta.module === 'assistant',
+  },
+  {
     label: '工具箱',
     title: '工具箱',
     to: '/tools',

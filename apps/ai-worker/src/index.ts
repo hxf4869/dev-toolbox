@@ -3,6 +3,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { isInteger, isLosslessNumber, isSafeNumber, parse as parseLosslessJson } from 'lossless-json'
 
 import { loadArtifactContract } from './artifact-schema.js'
+import {
+  handleAssistantInternalRequest,
+  startAssistantRunners,
+  type AssistantRunnerOptions,
+} from './assistant/index.js'
 import { loadConfig } from './config.js'
 import { log } from './logger.js'
 import {
@@ -31,6 +36,13 @@ const taskRunner = new TaskRunner(
   config.allowInsecureProviderHttp,
 )
 const taskLoopController = new AbortController()
+const assistantOptions: AssistantRunnerOptions = {
+  apiInternalUrl: config.apiInternalUrl,
+  serviceToken: config.serviceToken,
+  workerId: config.workerId,
+  allowInsecureProviderHttp: config.allowInsecureProviderHttp,
+}
+const assistantRunners = startAssistantRunners(assistantOptions)
 
 const [host, rawPort] = config.address.split(':')
 const port = Number(rawPort)
@@ -106,6 +118,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
     return
   }
+
+  if (await handleAssistantInternalRequest(request, response, assistantOptions)) return
 
   writeJson(response, 404, { error: { code: 'NOT_FOUND', message: '资源不存在' } })
 }
@@ -268,6 +282,7 @@ server.listen(port, host, () => {
 function shutdown(signal: string): void {
   log('info', 'worker_stopping', { signal })
   taskLoopController.abort(new Error(`worker received ${signal}`))
+  assistantRunners.stop()
   server.close((error) => {
     if (error) {
       log('error', 'worker_stop_failed', { errorType: error.name })

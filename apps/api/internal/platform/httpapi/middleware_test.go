@@ -61,3 +61,19 @@ func TestRequestIDRejectsUnsafeHeaderValue(t *testing.T) {
 
 	handler.ServeHTTP(httptest.NewRecorder(), request)
 }
+
+func TestStatusWriterPreservesStreamingCapabilities(t *testing.T) {
+	underlying := httptest.NewRecorder()
+	writer := &statusWriter{ResponseWriter: underlying, status: http.StatusOK}
+
+	if writer.Unwrap() != underlying {
+		t.Fatal("status writer did not expose its wrapped response writer")
+	}
+	if _, ok := any(writer).(http.Flusher); !ok {
+		t.Fatal("status writer does not implement http.Flusher")
+	}
+	writer.Flush()
+	if !underlying.Flushed {
+		t.Fatal("flush was not forwarded to the underlying response writer")
+	}
+}

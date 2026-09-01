@@ -1,4 +1,4 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, shallowMount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { nextTick } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -53,6 +53,25 @@ describe('responsive application shell', () => {
 
     expect(dialog.classes()).not.toContain('module-nav--open')
     expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('keeps the assistant workspace in its dedicated single-scroll layout', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/assistant', name: 'assistant', component: { template: '<div>assistant</div>' }, meta: { module: 'assistant' } },
+      ],
+    })
+    await router.push('/assistant')
+    await router.isReady()
+
+    const wrapper = shallowMount(AppShell, {
+      global: { plugins: [createPinia(), router] },
+    })
+
+    expect(wrapper.get('.shell__main').attributes('data-layout')).toBe('assistant')
+    expect(wrapper.get('.shell__compact-bar button').text()).toContain('知识助手会话')
     wrapper.unmount()
   })
 })

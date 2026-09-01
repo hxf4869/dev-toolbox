@@ -13,6 +13,7 @@ const navigationTrigger = ref<HTMLButtonElement | null>(null)
 const navigationLabel = computed(() => ({
   home: '工作入口',
   knowledge: '资料库导航',
+  assistant: '知识助手会话',
   tools: '工具列表',
   ai: 'AI 任务导航',
   settings: '设置分类',
@@ -22,6 +23,7 @@ const navigationLabel = computed(() => ({
 
 const layoutMode = computed(() => {
   if (route.meta.module === 'settings') return 'configuration'
+  if (route.meta.module === 'assistant') return 'assistant'
   if (
     route.meta.module === 'knowledge' ||
     route.meta.module === 'ai' ||
@@ -89,7 +91,8 @@ async function closeNavigation() {
   scrollbar-color: var(--border-strong) transparent;
 }
 
-.shell__main[data-layout='contained'] {
+.shell__main[data-layout='contained'],
+.shell__main[data-layout='assistant'] {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
