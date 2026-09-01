@@ -4,10 +4,11 @@
 
 本文件适用于整个 `dev-toolbox` 仓库。用户当前明确要求优先；其后依次遵循：
 
-1. 第二期工具箱范围先遵循 `docs/09-V2-TOOLBOX-BASELINE.md`，再遵循 `docs/10-V2-TOOLBOX-ARCHITECTURE.md` 至 `docs/14-V2-AGENT-RUNBOOK.md`。
-2. 一期范围与历史事实遵循 `docs/00-V1-BASELINE.md`；V2 未明确覆盖的一期约束继续有效。
-3. 对应专题文档中的具体契约。
-4. `PRODUCT.md` 的长期产品事实。
+1. 第三期知识助手范围遵循 `docs/16-V3-KNOWLEDGE-ASSISTANT-IMPLEMENTATION.md`；它只覆盖其中明确列出的 V1/V2 限制，未提及的历史约束继续有效。
+2. 第二期工具箱范围先遵循 `docs/09-V2-TOOLBOX-BASELINE.md`，再遵循 `docs/10-V2-TOOLBOX-ARCHITECTURE.md` 至 `docs/14-V2-AGENT-RUNBOOK.md`。
+3. 一期范围与历史事实遵循 `docs/00-V1-BASELINE.md`；V2/V3 未明确覆盖的一期约束继续有效。
+4. 对应专题文档中的具体契约。
+5. `PRODUCT.md` 的长期产品事实。
 
 发现文档之间不一致时，先停止扩大实现，指出冲突并更新权威文档；不得挑选最方便实现的一份解释。
 
@@ -60,6 +61,7 @@
 - 一期不得宣称端到端加密。服务端为了搜索和 AI 处理会读取明文。
 - 一期不得实现多用户、注册、RBAC、组织、租户、SSO、动态插件市场、实时协作、Notion/企业微信通用导入、浏览器扩展或桌面壳。
 - 一期不得引入 Redis、Kafka/RabbitMQ、Elasticsearch/OpenSearch、Meilisearch、MinIO、Kubernetes、服务网格、pgvector、本地 OCR 或本地大模型。
+- V3 只在 `docs/16` 冻结的知识助手索引与检索范围内批准 pgvector；这不是对第二数据库、缓存、消息队列、ANN 索引、新微服务、本地模型或其他基础设施的通用授权。
 - 不得为了“未来可能有很多小工具”把核心服务拆成微服务。新增工具先作为 Go 单体和 Vue 应用内的编译期模块。
 - V2 只在工具箱范围例外允许浏览器端 Monaco、CodeMirror 6 和 Tesseract.js，以及 Go 直连阿里云翻译/OCR；具体依赖、懒加载、额度和内容边界必须遵循 `docs/09`–`14`，不将 OCR 并入知识附件流水线。
 
@@ -69,7 +71,7 @@
 - API：Go 模块化单体。模块间通过明确接口协作，不创建无业务含义的 `common`、`utils` 或万能 service。
 - AI worker：Node.js + TypeScript，只依赖已注册的模型和领域工具。可以借鉴/使用 `pi-ai` 与 `pi-agent-core`，不得引入 `pi-coding-agent` 的 Shell、编辑器和多 Agent 能力。
 - 数据：PostgreSQL 是唯一业务数据库和任务状态源；附件存宿主机映射卷。禁止未经确认增加第二数据库、缓存或消息队列。
-- 搜索：一期只实现 PostgreSQL 关键词、子串、模糊和结构化过滤。不得把 AI 生成关键词描述成真正语义搜索。
+- 搜索：一期只实现 PostgreSQL 关键词、子串、模糊和结构化过滤。不得把 AI 生成关键词描述成真正语义搜索。V3 知识助手按 `docs/16` 例外使用 PostgreSQL + pgvector 混合召回，不改变普通资料库搜索合同。
 - 部署：Docker Compose；只有 Caddy 暴露公网端口，API、AI worker 和数据库只在内部网络通信。
 
 ## 数据与安全
@@ -92,7 +94,7 @@
 
 ## 前端一致性
 
-- 实现或评审页面、组件、样式与响应式之前先读取根目录 `DESIGN.md`；一期页面再读取 `docs/07-DESIGN-HANDOFF.md`，V2 工具页再读取 `docs/12-V2-TOOLBOX-UX-AND-STITCH.md`，并使用其中仍有效的精确 Screen ID。R1 Screen 决定当前页面骨架，历史 Screen 只补充未被覆盖的状态与内容；Stitch 生成 HTML 不能直接作为生产代码。
+- 实现或评审页面、组件、样式与响应式之前先读取根目录 `DESIGN.md`；一期页面再读取 `docs/07-DESIGN-HANDOFF.md`，V2 工具页再读取 `docs/12-V2-TOOLBOX-UX-AND-STITCH.md`，V3 知识助手再读取 `docs/16-V3-KNOWLEDGE-ASSISTANT-IMPLEMENTATION.md`。R1 Screen 决定已有页面骨架，历史 Screen 只补充未被覆盖的状态与内容；Stitch 生成 HTML 不能直接作为生产代码。
 - 默认深色，支持浅色；除技术专有名词外统一简体中文。
 - 原始记录与 AI 派生结果必须使用明显不同的标签、来源栏和只读提示。
 - Markdown fenced code block 与 AI Artifact 的 `command`、`command_steps`、`code` block 提供逐块复制、复制反馈、换行切换和横向滚动；普通纯文本只按原文展示并提供复制全部，不启发式猜测命令。
