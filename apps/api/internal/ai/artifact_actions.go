@@ -128,7 +128,7 @@ func (service *Service) completeTask(response http.ResponseWriter, request *http
 		return
 	}
 	if sensitivePolicy == "redact" && sensitivity != "normal" {
-		newTextRedactor().RedactArtifact(content)
+		NewTextRedactor().RedactArtifact(content)
 		input.Artifact, err = json.Marshal(content)
 		if err != nil || len(input.Artifact) > maximumArtifactBytes {
 			writeInternalValidation(response, request)

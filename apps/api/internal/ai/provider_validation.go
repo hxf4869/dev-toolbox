@@ -12,7 +12,9 @@ var providerKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 var errInvalidProviderInput = errors.New("invalid provider input")
 
-func normalizeProviderBaseURL(value string, allowHTTP bool) (string, error) {
+// NormalizeProviderBaseURL is the exported URL validation entry reused by the
+// assistant module; the security rules must stay identical for both paths.
+func NormalizeProviderBaseURL(value string, allowHTTP bool) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 2048 {
 		return "", errInvalidProviderInput

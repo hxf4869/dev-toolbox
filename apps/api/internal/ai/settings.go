@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -9,6 +10,16 @@ import (
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
 )
+
+// SensitivePolicyChangeHook is wired by the integrator after both services
+// exist (main.go):
+//
+//	ai.SensitivePolicyChangeHook = assistantService.NotifySensitivePolicyChanged
+//
+// It bumps the knowledge-assistant embedding generation whenever the global
+// sensitive AI policy changes (docs/16 §7.3). A package-level hook keeps the
+// ai→assistant wiring without an import cycle and without touching service.go.
+var SensitivePolicyChangeHook func(ctx context.Context, previous, current string) error
 
 type aiSettings struct {
 	SensitiveDisplayMode   string     `json:"sensitiveDisplayMode"`
@@ -95,6 +106,17 @@ func (service *Service) updateSettings(response http.ResponseWriter, request *ht
 	if err != nil {
 		writeProviderInternal(response, request)
 		return
+	}
+	if input.SensitiveAIPolicy != nil && current.SensitiveAIPolicy != policy {
+		// V3: a sensitive policy change bumps the embedding generation. The hook
+		// is wired by the integrator to (*assistant.Service).NotifySensitivePolicyChanged;
+		// without wiring the update itself still succeeds.
+		if SensitivePolicyChangeHook != nil {
+			if err := SensitivePolicyChangeHook(request.Context(), current.SensitiveAIPolicy, policy); err != nil {
+				writeProviderInternal(response, request)
+				return
+			}
+		}
 	}
 	settings, err := service.loadSettings(request)
 	if err != nil {

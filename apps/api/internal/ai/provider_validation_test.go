@@ -19,9 +19,9 @@ func TestNormalizeProviderBaseURL(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := normalizeProviderBaseURL(test.value, test.allowHTTP)
+			got, err := NormalizeProviderBaseURL(test.value, test.allowHTTP)
 			if err != nil || got != test.want {
-				t.Fatalf("normalizeProviderBaseURL(%q) = %q, %v; want %q", test.value, got, err, test.want)
+				t.Fatalf("NormalizeProviderBaseURL(%q) = %q, %v; want %q", test.value, got, err, test.want)
 			}
 		})
 	}
@@ -38,8 +38,8 @@ func TestNormalizeProviderBaseURLRejectsUnsafeValues(t *testing.T) {
 		"/relative/path",
 	} {
 		t.Run(value, func(t *testing.T) {
-			if _, err := normalizeProviderBaseURL(value, false); err == nil {
-				t.Fatalf("normalizeProviderBaseURL(%q) unexpectedly succeeded", value)
+			if _, err := NormalizeProviderBaseURL(value, false); err == nil {
+				t.Fatalf("NormalizeProviderBaseURL(%q) unexpectedly succeeded", value)
 			}
 		})
 	}

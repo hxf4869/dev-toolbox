@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,27 +20,29 @@ import (
 )
 
 type modelInput struct {
-	ModelID         string `json:"modelId"`
-	DisplayName     string `json:"displayName"`
-	ContextWindow   *int   `json:"contextWindow"`
-	MaxOutputTokens *int   `json:"maxOutputTokens"`
-	SupportsTools   bool   `json:"supportsTools"`
-	SupportsVision  bool   `json:"supportsVision"`
-	Enabled         *bool  `json:"enabled"`
+	ModelID          string                 `json:"modelId"`
+	DisplayName      string                 `json:"displayName"`
+	ContextWindow    *int                   `json:"contextWindow"`
+	MaxOutputTokens  *int                   `json:"maxOutputTokens"`
+	SupportsTools    bool                   `json:"supportsTools"`
+	SupportsVision   bool                   `json:"supportsVision"`
+	Enabled          *bool                  `json:"enabled"`
+	ReasoningOptions []reasoningOptionInput `json:"reasoningOptions"`
 }
 
 type modelEntry struct {
-	ID              uuid.UUID `json:"id"`
-	ProviderID      uuid.UUID `json:"providerId"`
-	ModelID         string    `json:"modelId"`
-	DisplayName     string    `json:"displayName"`
-	ContextWindow   *int      `json:"contextWindow"`
-	MaxOutputTokens *int      `json:"maxOutputTokens"`
-	SupportsTools   bool      `json:"supportsTools"`
-	SupportsVision  bool      `json:"supportsVision"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID               uuid.UUID              `json:"id"`
+	ProviderID       uuid.UUID              `json:"providerId"`
+	ModelID          string                 `json:"modelId"`
+	DisplayName      string                 `json:"displayName"`
+	ContextWindow    *int                   `json:"contextWindow"`
+	MaxOutputTokens  *int                   `json:"maxOutputTokens"`
+	SupportsTools    bool                   `json:"supportsTools"`
+	SupportsVision   bool                   `json:"supportsVision"`
+	Enabled          bool                   `json:"enabled"`
+	ReasoningOptions []reasoningOptionEntry `json:"reasoningOptions"`
+	CreatedAt        time.Time              `json:"createdAt"`
+	UpdatedAt        time.Time              `json:"updatedAt"`
 }
 
 type providerEntry struct {
@@ -123,7 +126,7 @@ func (service *Service) createProvider(response http.ResponseWriter, request *ht
 		writeProviderValidation(response, request)
 		return
 	}
-	baseURL, err := normalizeProviderBaseURL(input.BaseURL, service.allowInsecureProviderHTTP)
+	baseURL, err := NormalizeProviderBaseURL(input.BaseURL, service.allowInsecureProviderHTTP)
 	if err != nil || len(input.Models) > 100 {
 		writeProviderValidation(response, request)
 		return
@@ -140,6 +143,10 @@ func (service *Service) createProvider(response http.ResponseWriter, request *ht
 			return
 		}
 		seenModels[model.ModelID] = struct{}{}
+		if _, valid := validReasoningOptions(model.ReasoningOptions); !valid {
+			writeProviderValidation(response, request)
+			return
+		}
 	}
 	ciphertext, err := secretbox.Seal(service.masterKey, input.APIKey)
 	if err != nil {
@@ -216,7 +223,7 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 	var enabled bool
 	err = service.database.QueryRow(request.Context(), `
 		SELECT display_name, protocol, base_url, api_key_ciphertext, api_key_tail, enabled
-		FROM provider_configs WHERE id = $1 AND deleted_at IS NULL
+		FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
 	`, id).Scan(&displayName, &protocol, &baseURL, &ciphertext, &tail, &enabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeProviderNotFound(response, request)
@@ -226,6 +233,11 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		writeProviderInternal(response, request)
 		return
 	}
+	// Track destructive execution changes against the stored values before the
+	// fields below are overwritten with the incoming request values (docs/16 §7).
+	protocolChanged := input.Protocol != nil && *input.Protocol != protocol
+	baseURLChanged := false
+	disabling := input.Enabled != nil && !*input.Enabled && enabled
 	if input.DisplayName != nil {
 		if !validProviderName(*input.DisplayName) {
 			writeProviderValidation(response, request)
@@ -241,11 +253,13 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		protocol = *input.Protocol
 	}
 	if input.BaseURL != nil {
-		baseURL, err = normalizeProviderBaseURL(*input.BaseURL, service.allowInsecureProviderHTTP)
+		normalized, err := NormalizeProviderBaseURL(*input.BaseURL, service.allowInsecureProviderHTTP)
 		if err != nil {
 			writeProviderValidation(response, request)
 			return
 		}
+		baseURLChanged = normalized != baseURL
+		baseURL = normalized
 	}
 	if input.APIKey != nil {
 		if !validAPIKey(*input.APIKey) {
@@ -264,6 +278,19 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		enabled = *input.Enabled
 	}
 	now := service.now().UTC()
+	executionChanged := protocolChanged || baseURLChanged ||
+		input.APIKey != nil || disabling
+	if executionChanged {
+		inUse, err := queuedAssistantRunsExist(request.Context(), service.database, &id, nil)
+		if err != nil {
+			writeProviderInternal(response, request)
+			return
+		}
+		if inUse {
+			writeAssistantInUse(response, request)
+			return
+		}
+	}
 	connectivityChanged := input.Protocol != nil || input.BaseURL != nil || input.APIKey != nil || input.Enabled != nil
 	if _, err := service.database.Exec(request.Context(), `
 		UPDATE provider_configs SET display_name = $2, protocol = $3, base_url = $4,
@@ -311,6 +338,9 @@ func (service *Service) deleteProvider(response http.ResponseWriter, request *ht
 		SELECT EXISTS (
 			SELECT 1 FROM ai_task_runs task JOIN provider_models model ON model.id = task.model_id
 			WHERE model.provider_config_id = $1 AND task.status IN ('queued', 'running')
+		) OR EXISTS (
+			SELECT 1 FROM assistant_runs run JOIN provider_models model ON model.id = run.model_id
+			WHERE model.provider_config_id = $1 AND run.status = 'queued'
 		)
 	`, id).Scan(&inUse); err != nil {
 		writeProviderInternal(response, request)
@@ -322,6 +352,13 @@ func (service *Service) deleteProvider(response http.ResponseWriter, request *ht
 	}
 	now := service.now().UTC()
 	if _, err := tx.Exec(request.Context(), `UPDATE provider_models SET enabled = false, deleted_at = $2, updated_at = $2 WHERE provider_config_id = $1 AND deleted_at IS NULL`, id, now); err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
+	if _, err := tx.Exec(request.Context(), `
+		UPDATE assistant_conversations SET selected_model_id = NULL, selected_reasoning_effort = NULL, updated_at = $2
+		WHERE selected_model_id IN (SELECT id FROM provider_models WHERE provider_config_id = $1)
+	`, id, now); err != nil {
 		writeProviderInternal(response, request)
 		return
 	}
@@ -446,6 +483,40 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 	httpapi.WriteJSON(response, http.StatusOK, map[string]any{"status": "ok", "latencyMs": result.LatencyMS, "usage": result.Usage})
 }
 
+// rowQuerier abstracts *pgxpool.Pool and pgx.Tx for the queued-run guard.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
+}
+
+// queuedAssistantRunsExist implements the V3 PROVIDER_IN_USE narrowing
+// (docs/16 §7.2): only queued assistant runs are protected, and only against
+// execution-relevant configuration changes. Running runs keep their in-memory
+// snapshot; display fields and reasoningOptions never block. Callers must
+// already hold the provider row lock in the fixed provider_config →
+// provider_model order.
+func queuedAssistantRunsExist(ctx context.Context, querier rowQuerier, providerID, modelID *uuid.UUID) (bool, error) {
+	query := `SELECT EXISTS (
+		SELECT 1 FROM assistant_runs run JOIN provider_models model ON model.id = run.model_id
+		WHERE run.status = 'queued'`
+	args := []any{}
+	if providerID != nil {
+		args = append(args, *providerID)
+		query += ` AND model.provider_config_id = $1`
+	}
+	if modelID != nil {
+		args = append(args, *modelID)
+		query += ` AND run.model_id = $` + strconv.Itoa(len(args))
+	}
+	query += `)`
+	var inUse bool
+	err := querier.QueryRow(ctx, query, args...).Scan(&inUse)
+	return inUse, err
+}
+
+func writeAssistantInUse(response http.ResponseWriter, request *http.Request) {
+	httpapi.WriteError(response, request, http.StatusConflict, "PROVIDER_IN_USE", "配置正被排队中的知识助手回答使用")
+}
+
 func (service *Service) recordProviderTest(ctx context.Context, providerID uuid.UUID, status string, latency *int, failureCategory string) error {
 	var failure *string
 	if failureCategory != "" {
@@ -500,9 +571,41 @@ func (service *Service) modelsForProvider(ctx context.Context, providerID uuid.U
 			&entry.Enabled, &entry.CreatedAt, &entry.UpdatedAt); err != nil {
 			return nil, err
 		}
+		entry.ReasoningOptions = []reasoningOptionEntry{}
 		items = append(items, entry)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range items {
+		options, err := service.reasoningOptionsForModel(ctx, items[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		items[index].ReasoningOptions = options
+	}
+	return items, nil
+}
+
+func (service *Service) reasoningOptionsForModel(ctx context.Context, modelID uuid.UUID) ([]reasoningOptionEntry, error) {
+	rows, err := service.database.Query(ctx, `
+		SELECT reasoning_effort, display_name, sort_order
+		FROM provider_model_reasoning_options WHERE model_id = $1
+		ORDER BY sort_order, reasoning_effort
+	`, modelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	options := make([]reasoningOptionEntry, 0)
+	for rows.Next() {
+		var option reasoningOptionEntry
+		if err := rows.Scan(&option.Reasoning, &option.DisplayName, &option.SortOrder); err != nil {
+			return nil, err
+		}
+		options = append(options, option)
+	}
+	return options, rows.Err()
 }
 
 func writeProviderValidation(response http.ResponseWriter, request *http.Request) {

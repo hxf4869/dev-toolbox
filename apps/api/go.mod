@@ -6,10 +6,12 @@ require (
 	github.com/alibabacloud-go/alimt-20181012/v2 v2.4.2
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.4
 	github.com/alibabacloud-go/ocr-api-20210707/v3 v3.1.3
+	github.com/alibabacloud-go/openapi-util v0.1.1
 	github.com/alibabacloud-go/tea v1.5.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jackc/tern/v2 v2.4.3
+	github.com/pgvector/pgvector-go v0.4.1
 	github.com/pquerna/otp v1.5.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/crypto v0.55.0
@@ -24,7 +26,6 @@ require (
 	github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5 // indirect
 	github.com/alibabacloud-go/debug v1.0.1 // indirect
 	github.com/alibabacloud-go/endpoint-util v1.1.0 // indirect
-	github.com/alibabacloud-go/openapi-util v0.1.1 // indirect
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.9 // indirect
 	github.com/aliyun/credentials-go v1.4.5 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect

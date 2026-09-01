@@ -6,12 +6,25 @@ import type {
   Model,
   SimpleStreamOptions,
 } from '@earendil-works/pi-ai'
-import { streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages'
-import { streamSimple as streamOpenAICompletions } from '@earendil-works/pi-ai/api/openai-completions'
-import { streamSimple as streamOpenAIResponses } from '@earendil-works/pi-ai/api/openai-responses'
+import { stream as streamAnthropicRaw, streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages'
+import { stream as streamOpenAICompletionsRaw, streamSimple as streamOpenAICompletions } from '@earendil-works/pi-ai/api/openai-completions'
+import { stream as streamOpenAIResponsesRaw, streamSimple as streamOpenAIResponses } from '@earendil-works/pi-ai/api/openai-responses'
 
 const maximumResponseBytes = 4 * 1024 * 1024
 const maximumProviderTestWindowMs = 65_000
+const maximumEmbeddingResponseBytes = 32 * 1024 * 1024
+
+// V3 assistant: deterministic Anthropic thinking budgets per reasoning level.
+// The six contract levels map to fixed budgets; nothing is silently clamped.
+const anthropicThinkingBudgets: Record<string, number> = {
+  minimal: 1024,
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+  xhigh: 24576,
+  max: 32768,
+}
+const minimumAnswerTokens = 1024
 
 export type ProviderProtocol = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
 
@@ -54,6 +67,9 @@ export type ProviderFailureCategory =
   | 'unavailable'
   | 'protocol_error'
   | 'capability_mismatch'
+  | 'reasoning_unsupported'
+  | 'embedding_dimension_mismatch'
+  | 'embedding_response_invalid'
 
 export class ProviderGatewayError extends Error {
   constructor(readonly category: ProviderFailureCategory, cause?: unknown) {
@@ -366,4 +382,245 @@ function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', abort, { once: true })
   })
+}
+
+// ---------------------------------------------------------------------------
+// V3 assistant chat streaming (docs/16 §7.2). The low-level protocol stream()
+// entry points are used directly with explicit per-protocol reasoning options
+// so the configured effort is sent verbatim — streamSimple would silently
+// clamp unsupported levels, which the contract forbids.
+// ---------------------------------------------------------------------------
+
+export type AssistantReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export interface AssistantStreamRequest {
+  readonly protocol: ProviderProtocol
+  readonly baseUrl: string
+  readonly apiKey: string
+  readonly modelId: string
+  readonly contextWindow: number
+  readonly maxOutputTokens: number
+  readonly reasoning: AssistantReasoningLevel
+  readonly context: Context
+  readonly deadlineAt: Date
+  readonly allowInsecureHttp: boolean
+  readonly signal?: AbortSignal
+}
+
+export function anthropicBudgetFor(level: AssistantReasoningLevel): number | null {
+  if (level === 'off') return null
+  return anthropicThinkingBudgets[level] ?? null
+}
+
+// Builds the shared pi-ai Model for assistant requests. reasoning is enabled
+// so protocol adapters accept thinking options; supportsReasoningEffort is
+// pinned so custom endpoints always receive reasoning_effort.
+function assistantModel(request: AssistantStreamRequest, baseUrl: string): Model<Api> {
+  return {
+    id: request.modelId,
+    name: request.modelId,
+    api: request.protocol,
+    provider: 'dev-toolbox-custom',
+    baseUrl,
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: request.contextWindow,
+    maxTokens: request.maxOutputTokens,
+    ...(request.protocol === 'openai-completions'
+      ? { compat: { supportsReasoningEffort: true } }
+      : {}),
+    thinkingLevelMap: { xhigh: 'xhigh', max: 'max' },
+  } as unknown as Model<Api>
+}
+
+function verifyOutboundReasoning(
+  protocol: ProviderProtocol,
+  level: AssistantReasoningLevel,
+): (payload: unknown) => void {
+  return (payload) => {
+    if (!isObjectPayload(payload)) {
+      throw new ProviderGatewayError('reasoning_unsupported')
+    }
+    if (protocol === 'openai-completions') {
+      const sent = payload['reasoning_effort']
+      if (level === 'off' ? sent !== undefined : sent !== level) {
+        throw new ProviderGatewayError('reasoning_unsupported')
+      }
+      return
+    }
+    if (protocol === 'openai-responses') {
+      const reasoning = payload['reasoning'] as Record<string, unknown> | undefined
+      const sent = reasoning?.['effort']
+      if (level === 'off' ? sent !== undefined : sent !== level) {
+        throw new ProviderGatewayError('reasoning_unsupported')
+      }
+      return
+    }
+    const thinking = payload['thinking'] as Record<string, unknown> | undefined
+    if (level === 'off') {
+      if (thinking !== undefined && thinking['type'] !== 'disabled') {
+        throw new ProviderGatewayError('reasoning_unsupported')
+      }
+      return
+    }
+    const budget = anthropicThinkingBudgets[level]
+    if (
+      !thinking ||
+      thinking['type'] !== 'enabled' ||
+      thinking['budget_tokens'] !== budget
+    ) {
+      throw new ProviderGatewayError('reasoning_unsupported')
+    }
+  }
+}
+
+function isObjectPayload(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export function assistantStreamChat(request: AssistantStreamRequest): AssistantMessageEventStream {
+  const baseUrl = normalizeBaseUrl(request.baseUrl, request.allowInsecureHttp)
+  const expectedUrl = new URL(endpointFor(request.protocol), `${baseUrl}/`).toString()
+  const allowedAdapterUrl = sdkRequestUrl(request.protocol, baseUrl)
+  const model = assistantModel(request, baseUrl)
+  const verify = verifyOutboundReasoning(request.protocol, request.reasoning)
+  const base = {
+    apiKey: request.apiKey,
+    maxRetries: 0,
+    fetch: boundedFetch(expectedUrl, allowedAdapterUrl, () => {}),
+    onPayload: (payload: unknown) => {
+      verify(payload)
+      return undefined
+    },
+    ...(request.signal === undefined ? {} : { signal: request.signal }),
+  }
+  const maxTokens = Math.min(request.maxOutputTokens, request.maxOutputTokens)
+  if (request.protocol === 'anthropic-messages') {
+    const budget = anthropicBudgetFor(request.reasoning)
+    if (request.reasoning !== 'off') {
+      if (budget === null || budget + minimumAnswerTokens > request.maxOutputTokens) {
+        throw new ProviderGatewayError('reasoning_unsupported')
+      }
+    }
+    return streamAnthropicRaw(model as Model<'anthropic-messages'>, request.context, {
+      ...base,
+      maxTokens,
+      thinkingEnabled: request.reasoning !== 'off',
+      ...(request.reasoning === 'off' ? {} : { thinkingBudgetTokens: budget! }),
+    })
+  }
+  const effort = request.reasoning === 'off' ? undefined : request.reasoning
+  if (request.protocol === 'openai-completions') {
+    return streamOpenAICompletionsRaw(model as Model<'openai-completions'>, request.context, {
+      ...base,
+      maxTokens,
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
+    })
+  }
+  return streamOpenAIResponsesRaw(model as Model<'openai-responses'>, request.context, {
+    ...base,
+    maxTokens,
+    ...(effort === undefined ? {} : { reasoningEffort: effort }),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// V3 embeddings (docs/16 §7.3): one bounded POST to `${baseUrl}/embeddings`
+// with the OpenAI-compatible {model, input, dimensions} shape. Redirects are
+// refused, response size is bounded, every element must be finite and every
+// vector must match the expected dimension.
+// ---------------------------------------------------------------------------
+
+export interface EmbeddingRequest {
+  readonly baseUrl: string
+  readonly apiKey: string
+  readonly modelId: string
+  readonly input: readonly string[]
+  readonly dimensions: number
+  readonly allowInsecureHttp: boolean
+  readonly signal?: AbortSignal
+}
+
+export interface EmbeddingResult {
+  readonly embeddings: readonly (readonly number[])[]
+  readonly usage: { readonly inputTokens: number | null; readonly totalTokens: number | null } | null
+}
+
+export async function generateEmbeddings(request: EmbeddingRequest): Promise<EmbeddingResult> {
+  const baseUrl = normalizeBaseUrl(request.baseUrl, request.allowInsecureHttp)
+  if (!request.apiKey || !request.modelId || request.input.length === 0 || request.input.length > 16) {
+    throw new ProviderGatewayError('unavailable')
+  }
+  const url = new URL('embeddings', `${baseUrl}/`).toString()
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 60_000)
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      redirect: 'manual',
+      signal: request.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, request.signal]),
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${request.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: request.modelId,
+        input: request.input,
+        dimensions: request.dimensions,
+      }),
+    })
+    if (response.status >= 300 && response.status < 400) {
+      throw new ProviderGatewayError('unavailable')
+    }
+    const declared = Number(response.headers.get('content-length') ?? '0')
+    if (declared > maximumEmbeddingResponseBytes) throw new ProviderGatewayError('unavailable')
+    const raw = await response.arrayBuffer()
+    if (raw.byteLength > maximumEmbeddingResponseBytes) throw new ProviderGatewayError('unavailable')
+    if (response.status === 401 || response.status === 403) {
+      throw new ProviderGatewayError('credentials_invalid')
+    }
+    if (response.status !== 200) {
+      throw new ProviderGatewayError('unavailable')
+    }
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(new TextDecoder().decode(raw))
+    } catch (error) {
+      throw new ProviderGatewayError('protocol_error', error)
+    }
+    if (!isObjectPayload(decoded) || !Array.isArray(decoded['data'])) {
+      throw new ProviderGatewayError('protocol_error')
+    }
+    const data = decoded['data'] as unknown[]
+    if (data.length !== request.input.length) {
+      throw new ProviderGatewayError('protocol_error')
+    }
+    const embeddings: number[][] = []
+    for (const entry of data) {
+      if (!isObjectPayload(entry) || !Array.isArray(entry['embedding'])) {
+        throw new ProviderGatewayError('protocol_error')
+      }
+      const vector = (entry['embedding'] as unknown[]).map((value) => Number(value))
+      if (vector.length !== request.dimensions) {
+        throw new ProviderGatewayError('embedding_dimension_mismatch')
+      }
+      if (vector.some((value) => !Number.isFinite(value))) {
+        throw new ProviderGatewayError('embedding_response_invalid')
+      }
+      const norm = vector.reduce((sum, value) => sum + value * value, 0)
+      if (norm === 0) throw new ProviderGatewayError('embedding_response_invalid')
+      embeddings.push(vector)
+    }
+    let usage: { inputTokens: number | null; totalTokens: number | null } | null = null
+    if (isObjectPayload(decoded['usage'])) {
+      const rawUsage = decoded['usage'] as Record<string, unknown>
+      const inputTokens = typeof rawUsage['prompt_tokens'] === 'number' ? rawUsage['prompt_tokens'] : null
+      const totalTokens = typeof rawUsage['total_tokens'] === 'number' ? rawUsage['total_tokens'] : null
+      usage = { inputTokens, totalTokens }
+    }
+    return { embeddings, usage }
+  } finally {
+    clearTimeout(timeout)
+  }
 }
