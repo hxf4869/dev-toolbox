@@ -4,7 +4,7 @@
 
 一期 `v1.0.3` 已正式部署。当前 **M0–M5 已完成并验证，`v1.0.0` 已由八项门禁全部通过的 `v1.0-baseline` 原样晋级；`v1.0.1` 修复会话活跃时间刷新；`v1.0.2` 放宽 Provider 连接测试超时；`v1.0.3` 增加工具调用与严格 JSON 双通道的多模型 Artifact 兼容**。目标主机性能、Chrome/Safari 核心 E2E、VoiceOver 基础抽查，以及京东云 OSS 异地加密备份与回读均已有真实证据，详见 [一期验收记录](./docs/08-V1-ACCEPTANCE-REPORT.md)。Edge、Firefox 不属于一期发布验收范围，不安装、不宣称已验证兼容。
 
-第二期九项 RC 审计问题已关闭，修复后的候选已命名并部署为 `v2.0.0-rc.2`。该候选尚未创建 Git commit/tag，也未正式发布；真实 Provider 留待 owner 配置后验证。旧候选 `v2.0.0-rc.1` 的部署、恢复和升级记录仍只代表修复前字节；V2.1/V2.2 尚未实现。入口见 [V2 工具箱总基线](./docs/09-V2-TOOLBOX-BASELINE.md)、[V2 交付验收记录](./docs/13-V2-TOOLBOX-DELIVERY-AND-ACCEPTANCE.md) 与 [RC 审计修复执行文档](./docs/15-V2-RC-AUDIT-REMEDIATION.md)。
+第二期 V2.0–V2.2 已实现，并于 2026-09-01 以 `v2.2.0-rc.1` 发布候选部署：包含中立首页、八个本地工具、JSON AI 类型生成、阿里云额度保护与文本翻译，以及本地/云 OCR 翻译。当前自动化、隔离数据库集成、生产静态契约、应用健康与正式 HTTPS 已通过；真实阿里云、目标版本备份恢复/性能门禁、完整浏览器矩阵和 `release-check` 尚未执行，因此未标记为稳定版。入口见 [V2 工具箱总基线](./docs/09-V2-TOOLBOX-BASELINE.md)、[V2 交付验收记录](./docs/13-V2-TOOLBOX-DELIVERY-AND-ACCEPTANCE.md) 与 [RC 审计修复执行文档](./docs/15-V2-RC-AUDIT-REMEDIATION.md)。
 
 ## 一期核心闭环
 

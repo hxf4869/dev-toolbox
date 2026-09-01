@@ -1,62 +1,62 @@
 {
-  "candidateVersion": "v1.0.3",
-  "generatedAt": "2026-08-30T12:47:12Z",
+  "candidateVersion": "v2.2.0-rc.1",
+  "generatedAt": "2026-09-01T13:08:23Z",
   "checks": [
     {
       "id": "data_integrity",
       "label": "原始数据与附件",
       "status": "passed",
-      "summary": "迁移、原始记录不可变、附件原字节与 SHA-256、失败原子性和完整性检查均已通过。",
-      "checkedAt": "2026-08-30T00:07:51Z"
+      "summary": "当前 Go 全包测试与 V2 隔离数据库集成通过；迁移 007 只新增阿里云配置、额度和调用元数据，不改写原始记录或附件。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "auth_security",
       "label": "认证与安全会话",
       "status": "passed",
-      "summary": "密码、TOTP、恢复码、可信设备、会话撤销、CSRF 与凭据密文/哈希门禁已通过；v1.0.1 新增真实 PostgreSQL 会话活跃时间刷新回归验证。",
-      "checkedAt": "2026-08-30T09:44:45Z"
+      "summary": "当前认证与 secretbox 单元测试通过；密码、TOTP、恢复码、可信设备、会话撤销、CSRF 及云凭据密文边界保持覆盖。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "search_privacy",
       "label": "搜索与隐私脱敏",
       "status": "passed",
-      "summary": "字面与模糊检索、固定排序、敏感遮挡、no-store 和日志/URL/浏览器存储边界已通过。",
-      "checkedAt": "2026-08-29T23:59:22Z"
+      "summary": "当前知识与工具相关自动化通过；字面检索、敏感遮挡、no-store，以及工具正文不进入 URL、浏览器持久化存储和日志的边界保持覆盖。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "ai_policy",
       "label": "AI 策略与版本",
-      "status": "passed",
-      "summary": "v1.0.3 本地 mock 覆盖工具、严格 JSON、协议拒绝/忽略工具回退与一次格式修复；DeepSeek V4 Flash 实测两轮成功，旧任务保留 v1 行为。",
-      "checkedAt": "2026-08-30T12:47:12Z"
+      "status": "review",
+      "summary": "JSON AI 窄接口与既有 AI worker 的 mock/本地集成通过；v2.2.0-rc.1 未调用真实 Provider，需 owner 配置后再验证。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "backup_restore",
       "label": "备份与灾难恢复",
-      "status": "passed",
-      "summary": "v1.0.2 已完成正式 OSS 隔离恢复、加密备份、restic check 与空机恢复，10/10 附件及认证、组织、AI 状态一致；v1.0.3 未重跑且未访问对象存储。",
-      "checkedAt": "2026-08-30T11:25:25Z"
+      "status": "review",
+      "summary": "v2.2.0-rc.1 本次未访问 OSS，也未运行目标版本备份或恢复演练；旧版本恢复证据不作为当前候选的新证据。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "browser_accessibility",
       "label": "浏览器与可访问性",
-      "status": "passed",
-      "summary": "Chrome 与 Safari 正式 HTTPS 核心 E2E、响应式、主题、键盘及 VoiceOver 抽查通过；发现的弹窗焦点逃逸已修复并复测。",
-      "checkedAt": "2026-08-30T07:23:41Z"
+      "status": "review",
+      "summary": "V2 桌面与 390/1024/1440 视口、焦点和溢出已有浏览器证据；V2.1/V2.2 的移动 WebKit、浅色主题和完整辅助技术矩阵尚未补齐。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "performance",
       "label": "目标主机性能",
-      "status": "passed",
-      "summary": "京东云完整固定规模实测通过：搜索 P95 335.915 ms、纯文本保存 P95 4.692 ms，实际执行索引重建。",
-      "checkedAt": "2026-08-30T06:53:38Z"
+      "status": "review",
+      "summary": "历史固定规模目标主机指标已通过，但 v2.2.0-rc.1 未重新运行目标版本性能门禁，不能把旧结果标成当前候选实测。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     },
     {
       "id": "deployment_security",
       "label": "生产部署与依赖",
       "status": "passed",
-      "summary": "v1.0.3 三个应用镜像从提交 40c56f2 构建并切换；API、worker 和公网健康检查通过，四容器零重启且启动窗口错误计数为 0；PostgreSQL 未重启。",
-      "checkedAt": "2026-08-30T12:47:12Z"
+      "summary": "v2.2.0-rc.1 三个应用镜像从候选提交 c93b3e3 构建并切换；静态契约、API/worker、公网 HTTPS 与关键路由通过，应用零重启计数，PostgreSQL 未重启。",
+      "checkedAt": "2026-09-01T13:08:23Z"
     }
   ]
 }
