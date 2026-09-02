@@ -151,9 +151,16 @@ func (service *Service) createModel(response http.ResponseWriter, request *http.
 		writeProviderValidation(response, request)
 		return
 	}
+	ctx := request.Context()
+	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
+	defer tx.Rollback(ctx)
 	var exists bool
-	if err := service.database.QueryRow(request.Context(), `
-		SELECT true FROM provider_configs WHERE id = $1 AND deleted_at IS NULL
+	if err := tx.QueryRow(ctx, `
+		SELECT true FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
 	`, providerID).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
 		writeProviderNotFound(response, request)
 		return
@@ -162,7 +169,7 @@ func (service *Service) createModel(response http.ResponseWriter, request *http.
 		return
 	}
 	now := service.now().UTC()
-	entry, err := insertModel(request.Context(), service.database, providerID, input, now)
+	entry, err := insertModel(ctx, tx, providerID, input, now)
 	if err != nil {
 		var databaseError *pgconn.PgError
 		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
@@ -170,6 +177,10 @@ func (service *Service) createModel(response http.ResponseWriter, request *http.
 		} else {
 			writeProviderInternal(response, request)
 		}
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeProviderInternal(response, request)
 		return
 	}
 	entry.CreatedAt = now
@@ -185,14 +196,14 @@ func (service *Service) updateModel(response http.ResponseWriter, request *http.
 		return
 	}
 	var input struct {
-		ModelID          *string                       `json:"modelId"`
-		DisplayName      *string                       `json:"displayName"`
-		ContextWindow    nullableIntPatch              `json:"contextWindow"`
-		MaxOutputTokens  nullableIntPatch              `json:"maxOutputTokens"`
-		SupportsTools    *bool                         `json:"supportsTools"`
-		SupportsVision   *bool                         `json:"supportsVision"`
-		Enabled          *bool                         `json:"enabled"`
-		ReasoningOptions *[]reasoningOptionInput       `json:"reasoningOptions"`
+		ModelID          *string                 `json:"modelId"`
+		DisplayName      *string                 `json:"displayName"`
+		ContextWindow    nullableIntPatch        `json:"contextWindow"`
+		MaxOutputTokens  nullableIntPatch        `json:"maxOutputTokens"`
+		SupportsTools    *bool                   `json:"supportsTools"`
+		SupportsVision   *bool                   `json:"supportsVision"`
+		Enabled          *bool                   `json:"enabled"`
+		ReasoningOptions *[]reasoningOptionInput `json:"reasoningOptions"`
 	}
 	if httpapi.DecodeJSON(response, request, 16*1024, &input) != nil ||
 		input.ModelID == nil && input.DisplayName == nil && !input.ContextWindow.Set && !input.MaxOutputTokens.Set &&

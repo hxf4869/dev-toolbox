@@ -82,41 +82,49 @@ func (service *Service) loadRunOr404(response http.ResponseWriter, request *http
 
 func (service *Service) stopRun(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
-	run, ok := service.loadRunOr404(response, request)
-	if !ok {
+	runID, err := uuid.Parse(request.PathValue("id"))
+	if err != nil {
+		writeAssistantNotFound(response, request)
 		return
 	}
 	ctx := request.Context()
 	now := service.now().UTC()
-	if run.isTerminal() && run.Status != "stopped" {
-		writeAssistantRunNotStoppable(response, request)
-		return
-	}
 	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
 	defer tx.Rollback(ctx)
+	run, err := scanRunRow(tx.QueryRow(ctx,
+		`SELECT `+runColumns+` FROM assistant_runs WHERE id = $1 FOR UPDATE`, runID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeAssistantNotFound(response, request)
+		return
+	}
+	if err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	if run.isTerminal() && run.Status != "stopped" {
+		writeAssistantRunNotStoppable(response, request)
+		return
+	}
 	if run.Status == "queued" {
 		// Stop is idempotent; a queued run becomes stopped immediately.
-		tag, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE assistant_runs SET status = 'stopped', finished_at = $2, phase = NULL,
 			       lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_detail = NULL
-			WHERE id = $1 AND status = 'queued'
-		`, run.ID, now)
-		if err != nil {
+			WHERE id = $1
+		`, run.ID, now); err != nil {
 			writeAssistantInternalFailure(response, request)
 			return
 		}
-		if tag.RowsAffected() == 1 {
-			if _, err := tx.Exec(ctx, `
-				UPDATE assistant_messages SET status = 'stopped', completed_at = $2
-				WHERE id = $1 AND status = 'streaming'
-			`, run.OutputMessageID, now); err != nil {
-				writeAssistantInternalFailure(response, request)
-				return
-			}
+		if _, err := tx.Exec(ctx, `
+			UPDATE assistant_messages SET status = 'stopped', completed_at = $2
+			WHERE id = $1 AND status = 'streaming'
+		`, run.OutputMessageID, now); err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
 		}
 	} else if run.Status == "running" {
 		if _, err := tx.Exec(ctx, `
@@ -130,6 +138,7 @@ func (service *Service) stopRun(response http.ResponseWriter, request *http.Requ
 		writeAssistantInternalFailure(response, request)
 		return
 	}
+	service.broadcast.notify(run.ID)
 	updated, err := service.loadRun(ctx, service.database, run.ID)
 	if err != nil {
 		writeAssistantInternalFailure(response, request)

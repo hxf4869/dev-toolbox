@@ -2,7 +2,6 @@ package assistant
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -21,19 +20,19 @@ type retrievalInput struct {
 }
 
 type retrievalSourcePayload struct {
-	Ordinal       int        `json:"ordinal"`
-	FragmentID    *uuid.UUID `json:"fragmentId"`
-	ItemID        *uuid.UUID `json:"itemId"`
-	SourceKind    string     `json:"sourceKind"`
-	SourceClass   string     `json:"sourceClass"`
-	Title         string     `json:"title"`
-	Content       string     `json:"content"`
-	Sensitivity   string     `json:"sensitivity"`
+	Ordinal     int        `json:"ordinal"`
+	FragmentID  *uuid.UUID `json:"fragmentId"`
+	ItemID      *uuid.UUID `json:"itemId"`
+	SourceKind  string     `json:"sourceKind"`
+	SourceClass string     `json:"sourceClass"`
+	Title       string     `json:"title"`
+	Content     string     `json:"content"`
+	Sensitivity string     `json:"sensitivity"`
 }
 
 type retrievalResult struct {
-	KnowledgeState string                  `json:"knowledgeState"`
-	EvidenceState  string                  `json:"evidenceState"`
+	KnowledgeState string                   `json:"knowledgeState"`
+	EvidenceState  string                   `json:"evidenceState"`
 	Sources        []retrievalSourcePayload `json:"sources"`
 }
 
@@ -161,7 +160,8 @@ func (service *Service) executeRetrieval(ctx context.Context, tx pgx.Tx, run run
 	}
 	// The frozen generation from the claim must still be current; anything else
 	// degrades this run to unavailable without touching the global index state.
-	if !config.Enabled || !config.Configured || config.Generation != input.Generation {
+	if run.KnowledgeGeneration == nil || input.Generation != *run.KnowledgeGeneration ||
+		!config.Enabled || !config.Configured || config.Generation != input.Generation {
 		if _, err := tx.Exec(ctx,
 			`UPDATE assistant_runs SET evidence_state = 'unavailable' WHERE id = $1`, run.ID); err != nil {
 			return nil, &runConflictError{code: "INTERNAL_ERROR"}
@@ -215,64 +215,25 @@ func (service *Service) executeRetrieval(ctx context.Context, tx pgx.Tx, run run
 // cannot hold every candidate (docs/16 §10.2). Returning nil signals a
 // context that cannot fit at all.
 func (service *Service) trimSourcesToBudget(ctx context.Context, tx pgx.Tx, run runRow, snapshots []retrievalCandidate) []retrievalCandidate {
-	budget := contextBudgetTokens(run.ContextWindow, run.MaxOutputTokens)
-	// Recompute the same deterministic history/summary/question cost that the
-	// claim used; sources may then consume the remainder.
-	summaryCost := 0
-	var summaryContent []byte
-	if err := tx.QueryRow(ctx,
-		`SELECT content FROM assistant_conversation_summaries WHERE conversation_id = $1`, run.ConversationID).Scan(&summaryContent); err == nil {
-		summaryCost = estimateTokens(string(summaryContent)) + 4
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+	claimContext, err := service.buildClaimContext(ctx, tx, run)
+	if err != nil || claimContext == nil {
 		return nil
 	}
-	rows, err := tx.Query(ctx, `
-		SELECT role, content FROM assistant_messages
-		WHERE conversation_id = $1 AND id <> $2 AND id <> $3 AND status = 'complete'
-		ORDER BY sequence DESC
-	`, run.ConversationID, run.InputMessageID, run.OutputMessageID)
-	if err != nil {
-		return nil
-	}
-	type historyEntry struct {
-		role    string
-		content string
-	}
-	history := make([]historyEntry, 0)
-	for rows.Next() {
-		var entry historyEntry
-		if err := rows.Scan(&entry.role, &entry.content); err != nil {
-			rows.Close()
+	remaining := inputContextBudgetTokens(run.ContextWindow, run.MaxOutputTokens)
+	remaining -= estimateTokens(claimContext.Question)
+	if claimContext.Summary != nil {
+		encoded, err := jsonMarshal(claimContext.Summary)
+		if err != nil {
 			return nil
 		}
-		history = append(history, entry)
+		remaining -= estimateTokens(string(encoded))
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	for _, message := range claimContext.Messages {
+		remaining -= estimateTokens(message.Content) + 4
+	}
+	if remaining < 0 {
 		return nil
 	}
-	remaining := budget - summaryCost
-	for _, entry := range history {
-		content := entry.content
-		if entry.role == "assistant" {
-			content = stripCitationTokens(content)
-		}
-		cost := estimateTokens(content) + 4
-		if cost > remaining {
-			break
-		}
-		remaining -= cost
-	}
-	var question string
-	if err := tx.QueryRow(ctx,
-		`SELECT content FROM assistant_messages WHERE id = $1`, run.InputMessageID).Scan(&question); err != nil {
-		return nil
-	}
-	questionCost := estimateTokens(question)
-	if questionCost > remaining {
-		return nil
-	}
-	remaining -= questionCost
 	trimmed := make([]retrievalCandidate, 0, len(snapshots))
 	for _, candidate := range snapshots {
 		cost := estimateTokens(candidate.Content) + estimateTokens(candidate.Title) + 8

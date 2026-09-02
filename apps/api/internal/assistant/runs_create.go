@@ -203,6 +203,14 @@ func (service *Service) insertRun(request *http.Request, clientRequestID uuid.UU
 	if conflict != nil {
 		return nil, conflict
 	}
+	// Freeze policy and embedding generation from one consistent configuration
+	// snapshot. Policy/config writers take these locks in the same order.
+	if _, err := tx.Exec(ctx, `SELECT true FROM app_settings WHERE singleton FOR SHARE`); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT true FROM assistant_embedding_config WHERE singleton FOR SHARE`); err != nil {
+		return nil, err
+	}
 	policy, err := service.loadSensitivePolicy(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -215,8 +223,11 @@ func (service *Service) insertRun(request *http.Request, clientRequestID uuid.UU
 		return nil, err
 	}
 	knowledgeState := "unavailable"
+	var knowledgeGeneration *int64
 	if computation.status == "ready" {
 		knowledgeState = "ready"
+		generation := computation.config.Generation
+		knowledgeGeneration = &generation
 	}
 	now := service.now().UTC()
 
@@ -246,14 +257,14 @@ func (service *Service) insertRun(request *http.Request, clientRequestID uuid.UU
 			request_snapshot, status, provider_id, provider_display_name, model_id, model_display_name,
 			upstream_model_id, protocol, base_url, context_window, max_output_tokens,
 			reasoning_effort, reasoning_display_name, sensitive_policy, effective_sensitive_policy,
-			prompt_version, retrieval_version, knowledge_state, created_at, queued_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19, $20, $21, $22, $23, $24)
+			prompt_version, retrieval_version, knowledge_state, knowledge_generation, created_at, queued_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19, $20, $21, $22, $23, $24, $25)
 	`, runID, conversationID, inputMessageID, outputMessageID, snapshot.RetryOfRunID,
 		clientRequestID, encodedSnapshot,
 		execution.providerID, execution.providerDisplayName, execution.modelID, execution.modelDisplayName,
 		execution.upstreamModelID, execution.protocol, execution.baseURL, execution.contextWindow,
 		execution.maxOutputTokens, execution.reasoningEffort, execution.reasoningDisplayName, policy,
-		PromptVersion, RetrievalVersion, knowledgeState, now, queuedAt); err != nil {
+		PromptVersion, RetrievalVersion, knowledgeState, knowledgeGeneration, now, queuedAt); err != nil {
 		var databaseError *pgconn.PgError
 		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
 			return nil, errIdempotencyRace

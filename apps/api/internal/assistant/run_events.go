@@ -172,6 +172,17 @@ func (service *Service) appendRunEvents(response http.ResponseWriter, request *h
 					return
 				}
 			}
+		case "sources.ready":
+			knowledgeState, _ := payload["knowledgeState"].(string)
+			evidenceState, _ := payload["evidenceState"].(string)
+			rewriteFallback, _ := payload["rewriteFallback"].(bool)
+			if _, err := tx.Exec(ctx, `
+				UPDATE assistant_runs SET knowledge_state = $2, evidence_state = $3, rewrite_fallback = $4
+				WHERE id = $1
+			`, run.ID, knowledgeState, evidenceState, rewriteFallback); err != nil {
+				writeAssistantInternalFailure(response, request)
+				return
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO assistant_run_events (run_id, sequence, event_id, event_type, payload, created_at)
@@ -259,8 +270,8 @@ func validEventPayload(eventType string, payload json.RawMessage) bool {
 		delta, ok := decoded["delta"].(string)
 		return ok && delta != "" && len(delta) <= 16*1024
 	case "reasoning.completed":
-		_, ok := decoded["durationMs"].(float64)
-		return ok
+		duration, ok := decoded["durationMs"].(float64)
+		return ok && duration >= 0 && float64(int64(duration)) == duration
 	case "answer.citation":
 		ordinal, ok := decoded["sourceOrdinal"].(float64)
 		return ok && ordinal >= 1 && ordinal <= MaximumRunSources && float64(int(ordinal)) == ordinal
@@ -268,14 +279,26 @@ func validEventPayload(eventType string, payload json.RawMessage) bool {
 		phase, ok := decoded["phase"].(string)
 		return ok && validRunPhase(phase)
 	case "sources.ready":
-		_, state := decoded["knowledgeState"].(string)
-		_, evidence := decoded["evidenceState"].(string)
+		knowledgeState, state := decoded["knowledgeState"].(string)
+		evidenceState, evidence := decoded["evidenceState"].(string)
 		count, countOK := decoded["providedSourceCount"].(float64)
-		return state && evidence && countOK && count >= 0
+		_, fallbackOK := decoded["rewriteFallback"].(bool)
+		return state && (knowledgeState == "ready" || knowledgeState == "unavailable") &&
+			evidence && (evidenceState == "matched" || evidenceState == "not_found" || evidenceState == "unavailable") &&
+			countOK && count >= 0 && count <= MaximumRunSources && float64(int(count)) == count && fallbackOK
 	case "usage.updated":
+		usage, ok := decoded["usage"].(map[string]any)
+		if !ok {
+			return false
+		}
 		for _, key := range []string{"rewriteInputTokens", "rewriteOutputTokens", "answerInputTokens", "answerOutputTokens"} {
-			if value, present := decoded[key]; present && value != nil {
-				if _, ok := value.(float64); !ok {
+			value, present := usage[key]
+			if !present {
+				return false
+			}
+			if value != nil {
+				number, ok := value.(float64)
+				if !ok || number < 0 || float64(int64(number)) != number {
 					return false
 				}
 			}
@@ -323,7 +346,10 @@ func (service *Service) assignCitationNumber(ctx context.Context, tx pgx.Tx, run
 	var existing *int
 	if err := tx.QueryRow(ctx, `
 		SELECT cited_number FROM assistant_run_sources WHERE run_id = $1 AND ordinal = $2
-	`, run.ID, ordinal).Scan(&existing); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	`, run.ID, ordinal).Scan(&existing); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, errors.New("citation source does not belong to run")
+		}
 		return 0, err
 	}
 	if existing != nil {
@@ -340,10 +366,14 @@ func (service *Service) assignCitationNumber(ctx context.Context, tx pgx.Tx, run
 		return 0, errors.New("citation limit exceeded")
 	}
 	next := maxCited + 1
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE assistant_run_sources SET cited_number = $3 WHERE run_id = $1 AND ordinal = $2 AND cited_number IS NULL
-	`, run.ID, ordinal, next); err != nil {
+	`, run.ID, ordinal, next)
+	if err != nil {
 		return 0, err
+	}
+	if tag.RowsAffected() != 1 {
+		return 0, errors.New("citation source assignment lost")
 	}
 	return next, nil
 }

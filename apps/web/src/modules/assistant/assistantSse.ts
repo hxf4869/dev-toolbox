@@ -11,6 +11,7 @@ import type {
   SnapshotEvent,
   SourcesReadyEvent,
   TemporaryAnswerCitationEvent,
+  TemporarySourcesReadyEvent,
   TemporarySourceDTO,
   TemporarySummaryDTO,
   TemporaryTerminalEvent,
@@ -50,6 +51,9 @@ export interface TemporaryStreamState {
   knowledgeState: 'ready' | 'unavailable' | null
   evidenceState: AssistantRunDTO['evidenceState']
   providedSourceCount: number
+  promptVersion: string | null
+  retrievalVersion: string | null
+  rewriteFallback: boolean
   reasoningContent: string
   reasoningDurationMs: number | null
   content: string
@@ -109,6 +113,9 @@ export function createTemporaryStreamState(): TemporaryStreamState {
     knowledgeState: null,
     evidenceState: null,
     providedSourceCount: 0,
+    promptVersion: null,
+    retrievalVersion: null,
+    rewriteFallback: false,
     reasoningContent: '',
     reasoningDurationMs: null,
     content: '',
@@ -191,6 +198,7 @@ export function reducePersistentEvent(
         knowledgeState: payload.knowledgeState,
         evidenceState: payload.evidenceState,
         providedSourceCount: payload.providedSourceCount,
+        rewriteFallback: payload.rewriteFallback === true,
       }
       syncMessageRun(next)
       break
@@ -320,10 +328,13 @@ export function reduceTemporaryEvent(
       break
     }
     case 'sources.ready': {
-      const payload = envelope.data as SourcesReadyEvent
+      const payload = envelope.data as TemporarySourcesReadyEvent
       next.knowledgeState = payload.knowledgeState
       next.evidenceState = payload.evidenceState
       next.providedSourceCount = payload.providedSourceCount
+      next.promptVersion = payload.promptVersion
+      next.retrievalVersion = payload.retrievalVersion
+      next.rewriteFallback = payload.rewriteFallback === true
       break
     }
     case 'reasoning.delta': {

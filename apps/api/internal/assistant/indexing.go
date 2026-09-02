@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"time"
 
@@ -54,13 +55,13 @@ type indexStatusCounts struct {
 }
 
 type knowledgeIndexStatusDTO struct {
-	Status         string            `json:"status"`
-	Available      bool              `json:"available"`
-	Generation     *int64            `json:"generation"`
-	SensitivePolicy string           `json:"sensitivePolicy"`
-	Counts         indexStatusCounts `json:"counts"`
-	LastErrorCode  *string           `json:"lastErrorCode"`
-	UpdatedAt      *time.Time        `json:"updatedAt"`
+	Status          string            `json:"status"`
+	Available       bool              `json:"available"`
+	Generation      *int64            `json:"generation"`
+	SensitivePolicy string            `json:"sensitivePolicy"`
+	Counts          indexStatusCounts `json:"counts"`
+	LastErrorCode   *string           `json:"lastErrorCode"`
+	UpdatedAt       *time.Time        `json:"updatedAt"`
 }
 
 type indexComputation struct {
@@ -169,6 +170,11 @@ func (service *Service) reconcileIndex(ctx context.Context, now time.Time) {
 		return
 	}
 	defer tx.Rollback(ctx)
+	// Global lock order is app_settings -> assistant_embedding_config. Settings
+	// updates use the same order when a policy change bumps the generation.
+	if _, err := tx.Exec(ctx, `SELECT true FROM app_settings WHERE singleton FOR SHARE`); err != nil {
+		return
+	}
 	if _, err := tx.Exec(ctx, `SELECT true FROM assistant_embedding_config WHERE singleton FOR UPDATE`); err != nil {
 		return
 	}
@@ -263,9 +269,11 @@ func (service *Service) requeueIndexRows(ctx context.Context, tx pgx.Tx, generat
 			state = 'pending', embedding = NULL, dimensions = NULL,
 			lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
 			error_code = NULL, error_detail = NULL, updated_at = EXCLUDED.updated_at
-		WHERE assistant_fragment_embeddings.state <> 'running'
-		   OR assistant_fragment_embeddings.lease_expires_at IS NULL
-		   OR assistant_fragment_embeddings.lease_expires_at < $3
+		WHERE assistant_fragment_embeddings.state = 'excluded'
+		   OR assistant_fragment_embeddings.source_created_at IS DISTINCT FROM EXCLUDED.source_created_at
+		   OR assistant_fragment_embeddings.generation IS DISTINCT FROM EXCLUDED.generation
+		   OR assistant_fragment_embeddings.sensitivity_snapshot IS DISTINCT FROM EXCLUDED.sensitivity_snapshot
+		   OR assistant_fragment_embeddings.policy_snapshot IS DISTINCT FROM EXCLUDED.policy_snapshot
 	`, policy, generation, now); err != nil {
 		return err
 	}
@@ -274,7 +282,7 @@ func (service *Service) requeueIndexRows(ctx context.Context, tx pgx.Tx, generat
 		UPDATE assistant_fragment_embeddings e SET state = 'excluded', embedding = NULL, dimensions = NULL,
 		       lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
 		       updated_at = $3
-		WHERE e.state IN ('pending', 'ready')
+		WHERE e.state <> 'excluded'
 		  AND NOT EXISTS (SELECT 1 FROM eligible WHERE eligible.id = e.fragment_id)
 	`, policy, generation, now); err != nil {
 		return err
@@ -299,12 +307,7 @@ func (service *Service) resetIndexForGeneration(ctx context.Context, tx pgx.Tx, 
 
 // bumpGenerationForPolicyChange implements the settings.go hook semantics:
 // every policy change rebuilds, tightening clears derived vectors first.
-func (service *Service) bumpGenerationForPolicyChange(ctx context.Context, previous, current string, now time.Time) error {
-	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
+func (service *Service) bumpGenerationForPolicyChangeTx(ctx context.Context, tx pgx.Tx, previous, current string, now time.Time) error {
 	if _, err := tx.Exec(ctx, `SELECT true FROM assistant_embedding_config WHERE singleton FOR UPDATE`); err != nil {
 		return err
 	}
@@ -328,13 +331,14 @@ func (service *Service) bumpGenerationForPolicyChange(ctx context.Context, previ
 			return err
 		}
 	} else if _, err := tx.Exec(ctx, `
-		UPDATE assistant_fragment_embeddings SET embedding = NULL, dimensions = NULL,
-		       lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, updated_at = $1
-		WHERE state IN ('pending', 'running', 'ready')
+		UPDATE assistant_fragment_embeddings SET state = 'excluded', embedding = NULL, dimensions = NULL,
+		       lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+		       updated_at = $1
+		WHERE state <> 'excluded'
 	`, now); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 type indexClaimInput struct {
@@ -342,12 +346,12 @@ type indexClaimInput struct {
 }
 
 type indexClaimFragment struct {
-	FragmentID     uuid.UUID `json:"fragmentId"`
-	ItemID         uuid.UUID `json:"itemId"`
-	SourceKind     string    `json:"sourceKind"`
-	Sensitivity    string    `json:"sensitivity"`
-	Content        string    `json:"content"`
-	Attempt        int       `json:"attempt"`
+	FragmentID      uuid.UUID `json:"fragmentId"`
+	ItemID          uuid.UUID `json:"itemId"`
+	SourceKind      string    `json:"sourceKind"`
+	Sensitivity     string    `json:"sensitivity"`
+	Content         string    `json:"content"`
+	Attempt         int       `json:"attempt"`
 	SourceCreatedAt time.Time `json:"sourceCreatedAt"`
 }
 
@@ -406,8 +410,8 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 		return
 	}
 	type claimedRow struct {
-		fragment  indexClaimFragment
-		attempt   int
+		fragment indexClaimFragment
+		attempt  int
 	}
 	claimed := make([]claimedRow, 0, IndexBatchSize)
 	for rows.Next() {
@@ -435,9 +439,9 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 		if _, err := tx.Exec(ctx, `
 			UPDATE assistant_fragment_embeddings SET state = 'running', attempt = attempt + 1,
 			       lease_owner = $2, lease_version = attempt + 1, lease_expires_at = $3,
-			       heartbeat_at = $3, updated_at = $3
+			       heartbeat_at = $4, updated_at = $4
 			WHERE fragment_id = $1
-		`, row.fragment.FragmentID, input.WorkerID, expires); err != nil {
+		`, row.fragment.FragmentID, input.WorkerID, expires, now); err != nil {
 			writeAssistantInternalFailure(response, request)
 			return
 		}
@@ -460,7 +464,7 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 		row.fragment.Attempt = row.attempt
 		// One redactor instance per fragment (docs/16 §6.2); block never reaches
 		// the queue because sensitive fragments are ineligible under block policy.
-		if policy == "redact" && row.fragment.Sensitivity != "normal" {
+		if policy == "redact" {
 			row.fragment.Content = ai.NewTextRedactor().Redact(row.fragment.Content)
 		}
 		result.Fragments = append(result.Fragments, row.fragment)
@@ -492,7 +496,7 @@ func (service *Service) heartbeatIndex(response http.ResponseWriter, request *ht
 	now := service.now().UTC()
 	for _, lease := range input.Leases {
 		tag, err := service.database.Exec(request.Context(), `
-			UPDATE assistant_fragment_embeddings SET lease_expires_at = $3, heartbeat_at = $3, updated_at = $3
+			UPDATE assistant_fragment_embeddings SET lease_expires_at = $3, heartbeat_at = $5, updated_at = $5
 			WHERE fragment_id = $1 AND state = 'running' AND lease_owner = $2 AND lease_version = $4
 			  AND lease_expires_at >= $5
 		`, lease.FragmentID, input.WorkerID, now.Add(assistantLeaseDuraton), lease.LeaseVersion, now)
@@ -540,18 +544,39 @@ func (service *Service) completeIndexBatch(response http.ResponseWriter, request
 		return
 	}
 	defer tx.Rollback(ctx)
+	config, err := service.loadEmbeddingConfig(ctx, tx)
+	if err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	currentPolicy, err := service.loadSensitivePolicy(ctx, tx)
+	if err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	if !config.Configured || !config.Enabled || config.Generation != input.Generation ||
+		currentPolicy != input.Policy || config.Dimensions == nil {
+		writeAssistantLeaseConflict(response, request)
+		return
+	}
 	for _, entry := range input.Results {
-		if entry.Dimensions < 1 || entry.Dimensions > 16000 || len(entry.Embedding) != entry.Dimensions ||
+		if entry.Dimensions != *config.Dimensions || len(entry.Embedding) != entry.Dimensions ||
 			entry.LeaseVersion < 1 ||
 			entry.Sensitivity != "normal" && entry.Sensitivity != "sensitive" && entry.Sensitivity != "unknown" {
 			writeEmbeddingDimensionMismatch(response, request)
 			return
 		}
+		var squaredNorm float64
 		for _, value := range entry.Embedding {
 			if !finiteFloat32(value) {
 				writeEmbeddingResponseInvalid(response, request)
 				return
 			}
+			squaredNorm += float64(value) * float64(value)
+		}
+		if squaredNorm == 0 || math.IsInf(squaredNorm, 0) || math.IsNaN(squaredNorm) {
+			writeEmbeddingResponseInvalid(response, request)
+			return
 		}
 	}
 	for _, entry := range input.Results {
@@ -678,7 +703,7 @@ func (service *Service) listIndexFailures(response http.ResponseWriter, request 
 		query += ` AND (e.updated_at, e.fragment_id) < ($1, $2)`
 	}
 	args = append(args, limit+1)
-	query += ` ORDER BY e.updated_at DESC, e.fragment_id DESC LIMIT $3`
+	query += ` ORDER BY e.updated_at DESC, e.fragment_id DESC LIMIT $` + itoa(len(args))
 	rows, err := service.database.Query(request.Context(), query, args...)
 	if err != nil {
 		writeAssistantInternalFailure(response, request)

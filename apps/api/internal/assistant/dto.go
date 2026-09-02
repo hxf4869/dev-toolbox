@@ -38,9 +38,9 @@ type KnowledgeIndexStatusDTO struct {
 }
 
 type AssistantBootstrapDTO struct {
-	Models                   []AssistantModelDTO        `json:"models"`
+	Models                   []AssistantModelDTO         `json:"models"`
 	NewConversationSelection newConversationSelectionDTO `json:"newConversationSelection"`
-	Knowledge                KnowledgeIndexStatusDTO    `json:"knowledge"`
+	Knowledge                KnowledgeIndexStatusDTO     `json:"knowledge"`
 }
 
 type newConversationSelectionDTO struct {
@@ -73,22 +73,22 @@ type RunUsageDTO struct {
 type RunTimingsDTO struct {
 	RewriteMS   *int64 `json:"rewriteMs"`
 	EmbeddingMS *int64 `json:"embeddingMs"`
-	RetrievalMS *int64 `json:"retrievalMS"`
+	RetrievalMS *int64 `json:"retrievalMs"`
 	ReasoningMS *int64 `json:"reasoningMs"`
 	AnswerMS    *int64 `json:"answerMs"`
 	TotalMS     *int64 `json:"totalMs"`
 }
 
 type RunSummaryDTO struct {
-	ID            uuid.UUID     `json:"id"`
-	Status        string        `json:"status"`
-	Phase         *string       `json:"phase"`
-	StopRequested bool          `json:"stopRequested"`
-	CanStop       bool          `json:"canStop"`
-	CanRetry      bool          `json:"canRetry"`
-	Error         *RunErrorDTO  `json:"error"`
-	CreatedAt     time.Time     `json:"createdAt"`
-	FinishedAt    *time.Time    `json:"finishedAt"`
+	ID            uuid.UUID    `json:"id"`
+	Status        string       `json:"status"`
+	Phase         *string      `json:"phase"`
+	StopRequested bool         `json:"stopRequested"`
+	CanStop       bool         `json:"canStop"`
+	CanRetry      bool         `json:"canRetry"`
+	Error         *RunErrorDTO `json:"error"`
+	CreatedAt     time.Time    `json:"createdAt"`
+	FinishedAt    *time.Time   `json:"finishedAt"`
 }
 
 type CitationRefDTO struct {
@@ -113,44 +113,47 @@ type SourceLocatorDTO struct {
 }
 
 type AssistantSourceDTO struct {
-	RunID         uuid.UUID         `json:"runId"`
-	SourceOrdinal int               `json:"sourceOrdinal"`
-	CitationNumber int              `json:"citationNumber"`
-	SourceKind    string            `json:"sourceKind"`
-	SourceClass   string            `json:"sourceClass"`
-	Title         string            `json:"title"`
-	Availability  string            `json:"availability"`
-	CurrentTitle  *string           `json:"currentTitle"`
-	TitleChanged  bool              `json:"titleChanged"`
-	Excerpt       *string           `json:"excerpt"`
-	Locator       *SourceLocatorDTO `json:"locator"`
+	RunID          uuid.UUID         `json:"runId"`
+	SourceOrdinal  int               `json:"sourceOrdinal"`
+	CitationNumber int               `json:"citationNumber"`
+	SourceKind     string            `json:"sourceKind"`
+	SourceClass    string            `json:"sourceClass"`
+	Title          string            `json:"title"`
+	Availability   string            `json:"availability"`
+	CurrentTitle   *string           `json:"currentTitle"`
+	TitleChanged   bool              `json:"titleChanged"`
+	Excerpt        *string           `json:"excerpt"`
+	Locator        *SourceLocatorDTO `json:"locator"`
 }
 
 type AssistantRunDTO struct {
-	ID                  uuid.UUID     `json:"id"`
-	ConversationID      uuid.UUID     `json:"conversationId"`
-	InputMessageID      uuid.UUID     `json:"inputMessageId"`
-	OutputMessageID     uuid.UUID     `json:"outputMessageId"`
-	ClientRequestID     uuid.UUID     `json:"clientRequestId"`
-	RetryOfRunID        *uuid.UUID    `json:"retryOfRunId"`
-	Status              string        `json:"status"`
-	Phase               *string       `json:"phase"`
-	StopRequested       bool          `json:"stopRequested"`
-	Model               RunModelDTO   `json:"model"`
+	ID                  uuid.UUID       `json:"id"`
+	ConversationID      uuid.UUID       `json:"conversationId"`
+	InputMessageID      uuid.UUID       `json:"inputMessageId"`
+	OutputMessageID     uuid.UUID       `json:"outputMessageId"`
+	ClientRequestID     uuid.UUID       `json:"clientRequestId"`
+	RetryOfRunID        *uuid.UUID      `json:"retryOfRunId"`
+	Status              string          `json:"status"`
+	Phase               *string         `json:"phase"`
+	StopRequested       bool            `json:"stopRequested"`
+	Model               RunModelDTO     `json:"model"`
 	Reasoning           RunReasoningDTO `json:"reasoning"`
-	KnowledgeState      string        `json:"knowledgeState"`
-	EvidenceState       *string       `json:"evidenceState"`
-	Usage               RunUsageDTO   `json:"usage"`
-	Timings             RunTimingsDTO `json:"timings"`
-	ProvidedSourceCount int           `json:"providedSourceCount"`
-	CitationCount       int           `json:"citationCount"`
-	LastSequence        int64         `json:"lastSequence"`
-	CanStop             bool          `json:"canStop"`
-	CanRetry            bool          `json:"canRetry"`
-	Error               *RunErrorDTO  `json:"error"`
-	CreatedAt           time.Time     `json:"createdAt"`
-	StartedAt           *time.Time    `json:"startedAt"`
-	FinishedAt          *time.Time    `json:"finishedAt"`
+	PromptVersion       string          `json:"promptVersion"`
+	RetrievalVersion    string          `json:"retrievalVersion"`
+	RewriteFallback     bool            `json:"rewriteFallback"`
+	KnowledgeState      string          `json:"knowledgeState"`
+	EvidenceState       *string         `json:"evidenceState"`
+	Usage               RunUsageDTO     `json:"usage"`
+	Timings             RunTimingsDTO   `json:"timings"`
+	ProvidedSourceCount int             `json:"providedSourceCount"`
+	CitationCount       int             `json:"citationCount"`
+	LastSequence        int64           `json:"lastSequence"`
+	CanStop             bool            `json:"canStop"`
+	CanRetry            bool            `json:"canRetry"`
+	Error               *RunErrorDTO    `json:"error"`
+	CreatedAt           time.Time       `json:"createdAt"`
+	StartedAt           *time.Time      `json:"startedAt"`
+	FinishedAt          *time.Time      `json:"finishedAt"`
 }
 
 type RunModelDTO struct {
@@ -184,18 +187,18 @@ type AssistantConversationDTO struct {
 }
 
 type AssistantMessageDTO struct {
-	ID                  uuid.UUID         `json:"id"`
-	ConversationID      uuid.UUID         `json:"conversationId"`
-	Sequence            int64             `json:"sequence"`
-	Role                string            `json:"role"`
-	Content             string            `json:"content"`
-	ReasoningContent    *string           `json:"reasoningContent"`
-	ReasoningDurationMS *int64            `json:"reasoningDurationMs"`
-	Status              string            `json:"status"`
-	CurrentRun          *AssistantRunDTO  `json:"currentRun"`
-	Citations           []CitationRefDTO  `json:"citations"`
-	CreatedAt           time.Time         `json:"createdAt"`
-	CompletedAt         *time.Time        `json:"completedAt"`
+	ID                  uuid.UUID        `json:"id"`
+	ConversationID      uuid.UUID        `json:"conversationId"`
+	Sequence            int64            `json:"sequence"`
+	Role                string           `json:"role"`
+	Content             string           `json:"content"`
+	ReasoningContent    *string          `json:"reasoningContent"`
+	ReasoningDurationMS *int64           `json:"reasoningDurationMs"`
+	Status              string           `json:"status"`
+	CurrentRun          *AssistantRunDTO `json:"currentRun"`
+	Citations           []CitationRefDTO `json:"citations"`
+	CreatedAt           time.Time        `json:"createdAt"`
+	CompletedAt         *time.Time       `json:"completedAt"`
 }
 
 type RunStartResponseDTO struct {

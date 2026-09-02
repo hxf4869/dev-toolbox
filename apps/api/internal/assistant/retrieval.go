@@ -176,10 +176,10 @@ func fuseCandidates(lexical, vector []retrievalCandidate) []retrievalCandidate {
 	addChannel(vector, false)
 
 	type fused struct {
-		candidate  *retrievalCandidate
-		score      float64
-		channels   int
-		bestRank   int
+		candidate *retrievalCandidate
+		score     float64
+		channels  int
+		bestRank  int
 	}
 	merged := make([]fused, 0, len(order))
 	for _, id := range order {
@@ -239,13 +239,14 @@ func rankOrMax(rank *int) int {
 	return *rank
 }
 
-// buildSourceSnapshots redacts and freezes the retrieved fragments; each
-// fragment gets its own redactor instance (docs/16 §6.2).
+// buildSourceSnapshots redacts and freezes the retrieved fragments. Redact
+// policy applies to every outbound fragment even when the item's sensitivity
+// label is normal: labels do not prove the text itself contains no secret.
 func buildSourceSnapshots(candidates []retrievalCandidate, policy string) []retrievalCandidate {
 	snapshots := make([]retrievalCandidate, len(candidates))
 	copy(snapshots, candidates)
 	for index := range snapshots {
-		if policy == "redact" && snapshots[index].Sensitivity != "normal" {
+		if policy == "redact" {
 			snapshots[index].Content = ai.NewTextRedactor().Redact(snapshots[index].Content)
 		}
 	}

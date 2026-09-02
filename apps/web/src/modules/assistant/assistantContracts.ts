@@ -192,6 +192,9 @@ export interface AssistantRunDTO {
     reasoning: Reasoning
     displayName: string
   }
+  promptVersion: string
+  retrievalVersion: string
+  rewriteFallback: boolean
   knowledgeState: 'ready' | 'unavailable'
   evidenceState: EvidenceState | null
   usage: {
@@ -328,6 +331,12 @@ export interface SourcesReadyEvent {
   knowledgeState: 'ready' | 'unavailable'
   evidenceState: EvidenceState
   providedSourceCount: number
+  rewriteFallback: boolean
+}
+
+export interface TemporarySourcesReadyEvent extends SourcesReadyEvent {
+  promptVersion: string
+  retrievalVersion: string
 }
 
 export interface ReasoningDeltaEvent {

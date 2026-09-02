@@ -3,13 +3,15 @@
 package integration_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
 
@@ -272,6 +275,80 @@ func seedV3Knowledge(t *testing.T, database *pgxpool.Pool, title, content, sensi
 	return itemID
 }
 
+func insertV3RunSource(t *testing.T, database *pgxpool.Pool, runID string, itemID uuid.UUID, title, excerpt string) {
+	t.Helper()
+	parsedRunID, err := uuid.Parse(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fragmentID uuid.UUID
+	if err := database.QueryRow(context.Background(),
+		`SELECT id FROM search_fragments WHERE item_id = $1 ORDER BY id LIMIT 1`, itemID).Scan(&fragmentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(context.Background(), `
+		INSERT INTO assistant_run_sources (
+			run_id, ordinal, fragment_id, item_id, source_kind, title_snapshot,
+			excerpt_snapshot, locator_snapshot, retrieval_rank, created_at
+		) VALUES (
+			$1::uuid, 1, $2::uuid, $3::uuid, 'raw_text', $4, $5,
+			jsonb_build_object('itemId', ($3::uuid)::text, 'fragmentId', ($2::uuid)::text), 1, now()
+		)
+	`, parsedRunID, fragmentID, itemID, title, excerpt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type v3SSEBlock struct {
+	ID    string
+	Event string
+	Data  string
+	Raw   string
+}
+
+func readV3SSEBlock(t *testing.T, reader *bufio.Reader) v3SSEBlock {
+	t.Helper()
+	var block v3SSEBlock
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read SSE block: %v", err)
+		}
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if line == "" {
+			if len(lines) == 0 {
+				continue
+			}
+			block.Raw = strings.Join(lines, "\n")
+			return block
+		}
+		lines = append(lines, line)
+		switch {
+		case strings.HasPrefix(line, "id: "):
+			block.ID = strings.TrimPrefix(line, "id: ")
+		case strings.HasPrefix(line, "event: "):
+			block.Event = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			block.Data = strings.TrimPrefix(line, "data: ")
+		}
+	}
+}
+
+func readV3SSEEvent(t *testing.T, reader *bufio.Reader, eventType string) v3SSEBlock {
+	t.Helper()
+	for {
+		block := readV3SSEBlock(t, reader)
+		if block.Event == "" {
+			continue
+		}
+		if block.Event != eventType {
+			t.Fatalf("SSE event = %s, want %s; block=%q", block.Event, eventType, block.Raw)
+		}
+		return block
+	}
+}
+
 func TestV3BootstrapAndReasoningOptions(t *testing.T) {
 	h := newV3Harness(t)
 	response := h.get(t, "/api/v1/assistant/bootstrap")
@@ -345,6 +422,20 @@ func TestV3EmbeddingSettingsLifecycle(t *testing.T) {
 	if !settings.Configured || settings.Status != "indexing" || settings.Generation == nil || *settings.Generation != 1 {
 		t.Fatalf("unexpected settings state: %+v", settings)
 	}
+	h.assistant.RunOnce(context.Background())
+	response = h.put(t, "/api/v1/assistant/embedding-settings", map[string]any{
+		"displayName": "知识向量（已换密钥）", "baseUrl": "https://embed.example/v1",
+		"apiKey": "rotated-embed-secret", "modelId": "text-embedding-mock", "dimensions": 1536,
+		"enabled": true, "confirmReindex": false,
+	})
+	assertStatus(t, response, http.StatusOK)
+	if err := json.NewDecoder(response.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if settings.Status != "ready" || settings.Generation == nil || *settings.Generation != 1 {
+		t.Fatalf("display/key-only update restarted indexing: %+v", settings)
+	}
 	// Wire the policy hook exactly as the integrator does in main.go, then
 	// change the global sensitive policy: the generation must bump.
 	previousHook := ai.SensitivePolicyChangeHook
@@ -360,6 +451,132 @@ func TestV3EmbeddingSettingsLifecycle(t *testing.T) {
 	response.Body.Close()
 	if settings.Generation == nil || *settings.Generation != 2 {
 		t.Fatalf("policy change did not bump generation: %+v", settings)
+	}
+}
+
+func TestV3SensitivePolicyHookFailureRollsBack(t *testing.T) {
+	h := newV3Harness(t)
+	previousHook := ai.SensitivePolicyChangeHook
+	ai.SensitivePolicyChangeHook = func(context.Context, pgx.Tx, string, string) (func(), error) {
+		return nil, errors.New("synthetic generation failure")
+	}
+	t.Cleanup(func() { ai.SensitivePolicyChangeHook = previousHook })
+
+	response := h.put(t, "/api/v1/ai/settings", map[string]any{"sensitiveAiPolicy": "block"})
+	if status, _ := v3Error(t, response); status != http.StatusInternalServerError {
+		t.Fatalf("hook failure status = %d, want 500", status)
+	}
+	var policy string
+	var generation int64
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT settings.sensitive_ai_policy, embedding.generation
+		FROM app_settings settings CROSS JOIN assistant_embedding_config embedding
+		WHERE settings.singleton AND embedding.singleton
+	`).Scan(&policy, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if policy != "redact" || generation != 0 {
+		t.Fatalf("failed policy update partially committed: policy=%s generation=%d", policy, generation)
+	}
+}
+
+func TestV3SensitivePolicyTighteningUpdatesQueuedAndStopsRunningRuns(t *testing.T) {
+	h := newV3Harness(t)
+	previousHook := ai.SensitivePolicyChangeHook
+	ai.SensitivePolicyChangeHook = h.assistant.NotifySensitivePolicyChanged
+	t.Cleanup(func() { ai.SensitivePolicyChangeHook = previousHook })
+
+	allow := h.put(t, "/api/v1/ai/settings", map[string]any{
+		"sensitiveAiPolicy": "allow", "confirmSensitiveAllow": true,
+	})
+	assertStatus(t, allow, http.StatusOK)
+	allow.Body.Close()
+	_, modelID := h.createProviderModel(t, []map[string]any{})
+	startRun := func(content string) string {
+		response := h.post(t, "/api/v1/assistant/runs", map[string]any{
+			"clientRequestId": uuid.New(), "conversationId": nil,
+			"content": content, "modelId": modelID, "reasoning": "off",
+		})
+		assertStatus(t, response, http.StatusAccepted)
+		var body struct {
+			Run struct {
+				ID string `json:"id"`
+			} `json:"run"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return body.Run.ID
+	}
+	firstRunID := startRun("第一条排队请求")
+	secondRunID := startRun("第二条排队请求")
+	claim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-policy"})
+	assertStatus(t, claim, http.StatusOK)
+	var claimed struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.NewDecoder(claim.Body).Decode(&claimed); err != nil {
+		t.Fatal(err)
+	}
+	claim.Body.Close()
+	queuedRunID := firstRunID
+	if claimed.Run.ID == firstRunID {
+		queuedRunID = secondRunID
+	} else if claimed.Run.ID != secondRunID {
+		t.Fatalf("claimed unexpected run %s", claimed.Run.ID)
+	}
+
+	tighten := h.put(t, "/api/v1/ai/settings", map[string]any{"sensitiveAiPolicy": "redact"})
+	assertStatus(t, tighten, http.StatusOK)
+	tighten.Body.Close()
+	var runningStatus, runningPolicy string
+	var runningError *string
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT status, effective_sensitive_policy, error_code FROM assistant_runs WHERE id = $1
+	`, claimed.Run.ID).Scan(&runningStatus, &runningPolicy, &runningError); err != nil {
+		t.Fatal(err)
+	}
+	if runningStatus != "failed" || runningPolicy != "redact" || runningError == nil ||
+		*runningError != "ASSISTANT_SENSITIVE_POLICY_CHANGED" {
+		t.Fatalf("running run was not stopped by policy tightening: %s %s %v", runningStatus, runningPolicy, runningError)
+	}
+	var messageStatus string
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT message.status FROM assistant_messages message
+		JOIN assistant_runs run ON run.output_message_id = message.id WHERE run.id = $1
+	`, claimed.Run.ID).Scan(&messageStatus); err != nil {
+		t.Fatal(err)
+	}
+	if messageStatus != "failed" {
+		t.Fatalf("policy-stopped output message status = %s", messageStatus)
+	}
+	var queuedStatus, queuedPolicy string
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT status, effective_sensitive_policy FROM assistant_runs WHERE id = $1
+	`, queuedRunID).Scan(&queuedStatus, &queuedPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if queuedStatus != "queued" || queuedPolicy != "redact" {
+		t.Fatalf("queued run did not adopt stricter policy: %s %s", queuedStatus, queuedPolicy)
+	}
+
+	queuedClaim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-policy-next"})
+	assertStatus(t, queuedClaim, http.StatusOK)
+	var queuedClaimBody struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+		SensitivePolicy string `json:"sensitivePolicy"`
+	}
+	if err := json.NewDecoder(queuedClaim.Body).Decode(&queuedClaimBody); err != nil {
+		t.Fatal(err)
+	}
+	queuedClaim.Body.Close()
+	if queuedClaimBody.Run.ID != queuedRunID || queuedClaimBody.SensitivePolicy != "redact" {
+		t.Fatalf("queued claim did not use tightened policy: %+v", queuedClaimBody)
 	}
 }
 
@@ -381,23 +598,34 @@ func TestV3RunIdempotencyAndLifecycle(t *testing.T) {
 			ID string `json:"id"`
 		} `json:"conversation"`
 		Run struct {
-			ID             string `json:"id"`
-			Status         string `json:"status"`
-			KnowledgeState string `json:"knowledgeState"`
+			ID               string `json:"id"`
+			Status           string `json:"status"`
+			KnowledgeState   string `json:"knowledgeState"`
+			PromptVersion    string `json:"promptVersion"`
+			RetrievalVersion string `json:"retrievalVersion"`
+			RewriteFallback  bool   `json:"rewriteFallback"`
 		} `json:"run"`
 		IdempotentReplay bool `json:"idempotentReplay"`
 	}
-	if err := json.NewDecoder(first.Body).Decode(&start); err != nil {
+	firstBody, err := io.ReadAll(first.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(firstBody, &start); err != nil {
 		t.Fatal(err)
 	}
 	first.Body.Close()
-	if start.IdempotentReplay || start.Run.Status != "queued" || start.Run.KnowledgeState != "unavailable" {
+	if start.IdempotentReplay || start.Run.Status != "queued" || start.Run.KnowledgeState != "unavailable" ||
+		start.Run.PromptVersion == "" || start.Run.RetrievalVersion == "" || start.Run.RewriteFallback {
 		t.Fatalf("unexpected first run start: %+v", start)
+	}
+	if !bytes.Contains(firstBody, []byte(`"retrievalMs"`)) || bytes.Contains(firstBody, []byte(`"retrievalMS"`)) {
+		t.Fatalf("run timing JSON uses the wrong retrieval key: %s", firstBody)
 	}
 	replay := h.post(t, "/api/v1/assistant/runs", payload)
 	assertStatus(t, replay, http.StatusAccepted)
 	var replayBody struct {
-		Run              struct {
+		Run struct {
 			ID string `json:"id"`
 		} `json:"run"`
 		IdempotentReplay bool `json:"idempotentReplay"`
@@ -426,14 +654,16 @@ func TestV3RunIdempotencyAndLifecycle(t *testing.T) {
 	stop := h.post(t, "/api/v1/assistant/runs/"+start.Run.ID+"/stop", map[string]any{})
 	assertStatus(t, stop, http.StatusOK)
 	var stopped struct {
-		Status string `json:"status"`
+		Status   string `json:"status"`
+		CanStop  bool   `json:"canStop"`
+		CanRetry bool   `json:"canRetry"`
 	}
 	if err := json.NewDecoder(stop.Body).Decode(&stopped); err != nil {
 		t.Fatal(err)
 	}
 	stop.Body.Close()
-	if stopped.Status != "stopped" {
-		t.Fatalf("queued stop produced %s", stopped.Status)
+	if stopped.Status != "stopped" || stopped.CanStop || !stopped.CanRetry {
+		t.Fatalf("queued stop produced unexpected DTO: %+v", stopped)
 	}
 	retry := h.post(t, "/api/v1/assistant/runs/"+start.Run.ID+"/retry", map[string]any{
 		"clientRequestId": uuid.New(), "modelId": modelID, "reasoning": "off",
@@ -457,6 +687,45 @@ func TestV3RunIdempotencyAndLifecycle(t *testing.T) {
 	if retryBody.Run.RetryOfRunID == nil || *retryBody.Run.RetryOfRunID != start.Run.ID ||
 		retryBody.AssistantMessage.CurrentRun.ID != retryBody.Run.ID {
 		t.Fatalf("retry wiring wrong: %+v", retryBody)
+	}
+	oldRun := h.get(t, "/api/v1/assistant/runs/"+start.Run.ID)
+	assertStatus(t, oldRun, http.StatusOK)
+	var oldRunDTO struct {
+		CanRetry bool `json:"canRetry"`
+	}
+	if err := json.NewDecoder(oldRun.Body).Decode(&oldRunDTO); err != nil {
+		t.Fatal(err)
+	}
+	oldRun.Body.Close()
+	if oldRunDTO.CanRetry {
+		t.Fatal("superseded retry source still advertises canRetry")
+	}
+	claim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-v3-lifecycle"})
+	assertStatus(t, claim, http.StatusOK)
+	claim.Body.Close()
+	runningResponse := h.get(t, "/api/v1/assistant/runs/"+retryBody.Run.ID)
+	assertStatus(t, runningResponse, http.StatusOK)
+	var running struct {
+		Status        string     `json:"status"`
+		StopRequested bool       `json:"stopRequested"`
+		CanStop       bool       `json:"canStop"`
+		StartedAt     *time.Time `json:"startedAt"`
+	}
+	if err := json.NewDecoder(runningResponse.Body).Decode(&running); err != nil {
+		t.Fatal(err)
+	}
+	runningResponse.Body.Close()
+	if running.StartedAt == nil || running.StartedAt.After(time.Now().UTC().Add(time.Second)) {
+		t.Fatalf("claim exposed a future startedAt: %v", running.StartedAt)
+	}
+	stopRunning := h.post(t, "/api/v1/assistant/runs/"+retryBody.Run.ID+"/stop", map[string]any{})
+	assertStatus(t, stopRunning, http.StatusOK)
+	if err := json.NewDecoder(stopRunning.Body).Decode(&running); err != nil {
+		t.Fatal(err)
+	}
+	stopRunning.Body.Close()
+	if running.Status != "running" || !running.StopRequested || running.CanStop {
+		t.Fatalf("running stop produced unexpected DTO: %+v", running)
 	}
 }
 
@@ -497,7 +766,7 @@ func TestV3ProviderInUseNarrowing(t *testing.T) {
 func TestV3InternalEventsCitationValidation(t *testing.T) {
 	h := newV3Harness(t)
 	_, modelID := h.createProviderModel(t, []map[string]any{})
-	seedV3Knowledge(t, h.database, "笔记", "内容", "normal")
+	itemID := seedV3Knowledge(t, h.database, "笔记", "内容", "normal")
 	start := h.post(t, "/api/v1/assistant/runs", map[string]any{
 		"clientRequestId": uuid.New(), "conversationId": nil,
 		"content": "问题", "modelId": modelID, "reasoning": "off",
@@ -551,6 +820,7 @@ func TestV3InternalEventsCitationValidation(t *testing.T) {
 		t.Fatalf("rejected batch wrote %d events", count)
 	}
 	// A valid citation flow writes the canonical token at the right position.
+	insertV3RunSource(t, h.database, runID, itemID, "笔记", "内容")
 	valid := h.internalPost(t, "/internal/assistant/runs/"+runID+"/events", map[string]any{
 		"workerId": "worker-v3", "leaseVersion": claimBody.Run.LeaseVersion,
 		"events": []map[string]any{
@@ -585,6 +855,167 @@ func TestV3InternalEventsCitationValidation(t *testing.T) {
 	})
 	if status, code := v3Error(t, third); status != http.StatusConflict || code != "ASSISTANT_EVENT_CONFLICT" {
 		t.Fatalf("expected cross-request conflict, got %d %s", status, code)
+	}
+}
+
+func TestV3PersistentSSEPublicContract(t *testing.T) {
+	h := newV3Harness(t)
+	_, modelID := h.createProviderModel(t, []map[string]any{})
+	itemID := seedV3Knowledge(t, h.database, "SSE 笔记", "公开流来源内容", "normal")
+	start := h.post(t, "/api/v1/assistant/runs", map[string]any{
+		"clientRequestId": uuid.New(), "conversationId": nil,
+		"content": "流式回答", "modelId": modelID, "reasoning": "off",
+	})
+	assertStatus(t, start, http.StatusAccepted)
+	var startBody struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.NewDecoder(start.Body).Decode(&startBody); err != nil {
+		t.Fatal(err)
+	}
+	start.Body.Close()
+	runID := startBody.Run.ID
+	claim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-v3-sse"})
+	assertStatus(t, claim, http.StatusOK)
+	var claimBody struct {
+		Run struct {
+			LeaseVersion int `json:"leaseVersion"`
+		} `json:"run"`
+	}
+	if err := json.NewDecoder(claim.Body).Decode(&claimBody); err != nil {
+		t.Fatal(err)
+	}
+	claim.Body.Close()
+	insertV3RunSource(t, h.database, runID, itemID, "SSE 笔记", "公开流来源内容")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		h.server.URL+"/api/v1/assistant/runs/"+runID+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Origin", testOrigin)
+	stream, err := h.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	assertStatus(t, stream, http.StatusOK)
+	if stream.Header.Get("Content-Type") != "text/event-stream; charset=utf-8" ||
+		stream.Header.Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("unexpected SSE headers: %v", stream.Header)
+	}
+	reader := bufio.NewReader(stream.Body)
+	snapshot := readV3SSEEvent(t, reader, "snapshot")
+	if snapshot.ID != "" || strings.Contains(snapshot.Raw, "id:") {
+		t.Fatalf("snapshot must not carry an SSE id: %q", snapshot.Raw)
+	}
+	var snapshotPayload struct {
+		LastSequence int64 `json:"lastSequence"`
+		Run          struct {
+			Status           string `json:"status"`
+			PromptVersion    string `json:"promptVersion"`
+			RetrievalVersion string `json:"retrievalVersion"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal([]byte(snapshot.Data), &snapshotPayload); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotPayload.LastSequence != 0 || snapshotPayload.Run.Status != "running" ||
+		snapshotPayload.Run.PromptVersion == "" || snapshotPayload.Run.RetrievalVersion == "" {
+		t.Fatalf("unexpected SSE snapshot: %+v", snapshotPayload)
+	}
+
+	appendResponse := h.internalPost(t, "/internal/assistant/runs/"+runID+"/events", map[string]any{
+		"workerId": "worker-v3-sse", "leaseVersion": claimBody.Run.LeaseVersion,
+		"events": []map[string]any{
+			{"eventId": uuid.New(), "type": "run.status", "payload": map[string]any{"phase": "answer"}},
+			{"eventId": uuid.New(), "type": "sources.ready", "payload": map[string]any{
+				"knowledgeState": "ready", "evidenceState": "matched",
+				"providedSourceCount": 1, "rewriteFallback": true,
+			}},
+			{"eventId": uuid.New(), "type": "answer.delta", "payload": map[string]any{"delta": "依据 "}},
+			{"eventId": uuid.New(), "type": "answer.citation", "payload": map[string]any{"sourceOrdinal": 1}},
+			{"eventId": uuid.New(), "type": "usage.updated", "payload": map[string]any{"usage": map[string]any{
+				"rewriteInputTokens": 2, "rewriteOutputTokens": 3,
+				"answerInputTokens": 11, "answerOutputTokens": 5,
+			}}},
+		},
+	})
+	assertStatus(t, appendResponse, http.StatusOK)
+	appendResponse.Body.Close()
+
+	statusEvent := readV3SSEEvent(t, reader, "run.status")
+	if statusEvent.ID != "1" || !strings.Contains(statusEvent.Data, `"status":"running"`) {
+		t.Fatalf("run.status was not transformed to public shape: %q", statusEvent.Raw)
+	}
+	sourcesEvent := readV3SSEEvent(t, reader, "sources.ready")
+	if sourcesEvent.ID != "2" || !strings.Contains(sourcesEvent.Data, `"rewriteFallback":true`) {
+		t.Fatalf("sources.ready lost runtime trace: %q", sourcesEvent.Raw)
+	}
+	if event := readV3SSEEvent(t, reader, "answer.delta"); event.ID != "3" {
+		t.Fatalf("answer.delta id = %q, want 3", event.ID)
+	}
+	citationEvent := readV3SSEEvent(t, reader, "answer.citation")
+	var citationPayload struct {
+		Sequence       int    `json:"sequence"`
+		CitationNumber int    `json:"citationNumber"`
+		Token          string `json:"token"`
+		Source         struct {
+			RunID        string `json:"runId"`
+			Title        string `json:"title"`
+			Availability string `json:"availability"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal([]byte(citationEvent.Data), &citationPayload); err != nil {
+		t.Fatal(err)
+	}
+	if citationEvent.ID != "4" || citationPayload.Sequence != 4 || citationPayload.CitationNumber != 1 ||
+		citationPayload.Token != "[[C1]]" || citationPayload.Source.RunID != runID ||
+		citationPayload.Source.Title != "SSE 笔记" || citationPayload.Source.Availability != "available" {
+		t.Fatalf("citation event was not converted to public source: %+v", citationPayload)
+	}
+	if event := readV3SSEEvent(t, reader, "usage.updated"); event.ID != "5" {
+		t.Fatalf("usage.updated id = %q, want 5", event.ID)
+	}
+
+	complete := h.internalPost(t, "/internal/assistant/runs/"+runID+"/complete", map[string]any{
+		"workerId": "worker-v3-sse", "leaseVersion": claimBody.Run.LeaseVersion,
+		"usage": map[string]any{
+			"rewriteInputTokens": 2, "rewriteOutputTokens": 3,
+			"answerInputTokens": 11, "answerOutputTokens": 5,
+		},
+		"timings": map[string]any{
+			"rewriteMs": 1, "embeddingMs": 2, "retrievalMs": 7,
+			"reasoningMs": 4, "answerMs": 5,
+		},
+	})
+	assertStatus(t, complete, http.StatusOK)
+	complete.Body.Close()
+	terminal := readV3SSEEvent(t, reader, "run.completed")
+	var terminalPayload struct {
+		Sequence int `json:"sequence"`
+		Run      struct {
+			Status          string `json:"status"`
+			RewriteFallback bool   `json:"rewriteFallback"`
+			LastSequence    int64  `json:"lastSequence"`
+			Timings         struct {
+				RetrievalMS *int64 `json:"retrievalMs"`
+				TotalMS     *int64 `json:"totalMs"`
+			} `json:"timings"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal([]byte(terminal.Data), &terminalPayload); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.ID != "6" || terminalPayload.Sequence != 6 || terminalPayload.Run.Status != "succeeded" ||
+		!terminalPayload.Run.RewriteFallback || terminalPayload.Run.LastSequence != 5 ||
+		terminalPayload.Run.Timings.RetrievalMS == nil || *terminalPayload.Run.Timings.RetrievalMS != 7 ||
+		terminalPayload.Run.Timings.TotalMS == nil || *terminalPayload.Run.Timings.TotalMS != 19 {
+		t.Fatalf("unexpected terminal event: %+v", terminalPayload)
 	}
 }
 
@@ -721,14 +1152,13 @@ func TestV3PurgeErasesSourceSnapshots(t *testing.T) {
 func TestV3HybridRetrievalReadyAndNotReady(t *testing.T) {
 	h := newV3Harness(t)
 	seedV3Knowledge(t, h.database, "Docker 部署指南", "使用 docker compose up -d 启动全部服务并检查健康状态", "normal")
-	if _, err := h.database.Exec(context.Background(), `
-		UPDATE assistant_embedding_config SET base_url = 'https://embed.example/v1',
-		       api_key_ciphertext = NULL, model_id = 'mock-embed', display_name = '向量',
-		       dimensions = 4, enabled = true, generation = 1, status = 'indexing', updated_at = now()
-		WHERE singleton
-	`); err != nil {
-		t.Fatal(err)
-	}
+	configure := h.put(t, "/api/v1/assistant/embedding-settings", map[string]any{
+		"displayName": "向量", "baseUrl": "https://embed.example/v1",
+		"apiKey": "embedding-test-secret", "modelId": "mock-embed", "dimensions": 4,
+		"enabled": true, "confirmReindex": true,
+	})
+	assertStatus(t, configure, http.StatusOK)
+	configure.Body.Close()
 	h.assistant.RunOnce(context.Background())
 	if _, err := h.database.Exec(context.Background(), `
 		UPDATE assistant_fragment_embeddings SET state = 'ready',
@@ -774,6 +1204,15 @@ func TestV3HybridRetrievalReadyAndNotReady(t *testing.T) {
 	if startBody.Run.KnowledgeState != "ready" {
 		t.Fatalf("expected ready knowledge state, got %s", startBody.Run.KnowledgeState)
 	}
+	var frozenGeneration *int64
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT knowledge_generation FROM assistant_runs WHERE id = $1
+	`, startBody.Run.ID).Scan(&frozenGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if frozenGeneration == nil || *frozenGeneration != 1 {
+		t.Fatalf("run did not freeze generation 1: %v", frozenGeneration)
+	}
 	// Claim and run retrieval with a vector below the cosine threshold: the
 	// evidence state must be not_found, not unavailable.
 	claim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-v3"})
@@ -791,6 +1230,9 @@ func TestV3HybridRetrievalReadyAndNotReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim.Body.Close()
+	if claimBody.Knowledge.Generation == nil || *claimBody.Knowledge.Generation != 1 {
+		t.Fatalf("claim did not preserve frozen generation: %+v", claimBody.Knowledge)
+	}
 	retrieval := h.internalPost(t, "/internal/assistant/runs/"+startBody.Run.ID+"/retrieval", map[string]any{
 		"workerId": "worker-v3", "leaseVersion": claimBody.Run.LeaseVersion,
 		"generation": claimBody.Knowledge.Generation, "query": "完全无关的问题内容",
@@ -810,5 +1252,140 @@ func TestV3HybridRetrievalReadyAndNotReady(t *testing.T) {
 	retrieval.Body.Close()
 	if retrievalBody.KnowledgeState != "ready" || retrievalBody.EvidenceState != "not_found" || len(retrievalBody.Sources) != 0 {
 		t.Fatalf("threshold retrieval wrong: %+v", retrievalBody)
+	}
+
+	// A second run freezes generation 1, then the global config moves to 2
+	// before claim. It must degrade instead of silently crossing generations.
+	staleStart := h.post(t, "/api/v1/assistant/runs", map[string]any{
+		"clientRequestId": uuid.New(), "conversationId": nil,
+		"content": "代次切换期间的问题", "modelId": modelID, "reasoning": "off",
+	})
+	assertStatus(t, staleStart, http.StatusAccepted)
+	var staleStartBody struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.NewDecoder(staleStart.Body).Decode(&staleStartBody); err != nil {
+		t.Fatal(err)
+	}
+	staleStart.Body.Close()
+	if _, err := h.database.Exec(context.Background(), `
+		UPDATE assistant_embedding_config SET generation = 2, status = 'indexing', updated_at = now()
+		WHERE singleton
+	`); err != nil {
+		t.Fatal(err)
+	}
+	staleClaim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-v3-stale"})
+	assertStatus(t, staleClaim, http.StatusOK)
+	var staleClaimBody struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+		Knowledge struct {
+			State      string `json:"state"`
+			Generation *int64 `json:"generation"`
+		} `json:"knowledge"`
+	}
+	if err := json.NewDecoder(staleClaim.Body).Decode(&staleClaimBody); err != nil {
+		t.Fatal(err)
+	}
+	staleClaim.Body.Close()
+	if staleClaimBody.Run.ID != staleStartBody.Run.ID || staleClaimBody.Knowledge.State != "unavailable" ||
+		staleClaimBody.Knowledge.Generation != nil {
+		t.Fatalf("stale generation was not degraded: %+v", staleClaimBody)
+	}
+	var storedState string
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT knowledge_state, knowledge_generation FROM assistant_runs WHERE id = $1
+	`, staleStartBody.Run.ID).Scan(&storedState, &frozenGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if storedState != "unavailable" || frozenGeneration == nil || *frozenGeneration != 1 {
+		t.Fatalf("stale run lost its frozen audit generation: state=%s generation=%v", storedState, frozenGeneration)
+	}
+}
+
+func TestV3IndexFailureRequiresExplicitRetry(t *testing.T) {
+	h := newV3Harness(t)
+	itemID := seedV3Knowledge(t, h.database, "失败索引", "需要人工重试的向量", "normal")
+	if _, err := h.database.Exec(context.Background(), `
+		UPDATE assistant_embedding_config SET base_url = 'https://embed.example/v1',
+		       api_key_ciphertext = NULL, model_id = 'mock-embed', display_name = '向量',
+		       dimensions = 4, enabled = true, generation = 1, status = 'indexing', updated_at = now()
+		WHERE singleton
+	`); err != nil {
+		t.Fatal(err)
+	}
+	h.assistant.RunOnce(context.Background())
+	var fragmentID uuid.UUID
+	if err := h.database.QueryRow(context.Background(),
+		`SELECT id FROM search_fragments WHERE item_id = $1`, itemID).Scan(&fragmentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.Exec(context.Background(), `
+		UPDATE assistant_fragment_embeddings SET state = 'failed', attempt = 2,
+		       error_code = 'EMBEDDING_PROVIDER_UNAVAILABLE', error_detail = 'synthetic failure',
+		       updated_at = now()
+		WHERE fragment_id = $1
+	`, fragmentID); err != nil {
+		t.Fatal(err)
+	}
+	h.assistant.RunOnce(context.Background())
+	var state string
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT state FROM assistant_fragment_embeddings WHERE fragment_id = $1
+	`, fragmentID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" {
+		t.Fatalf("reconciler silently requeued a failed fragment: %s", state)
+	}
+
+	list := h.get(t, "/api/v1/assistant/index-failures")
+	assertStatus(t, list, http.StatusOK)
+	var failures struct {
+		Items []struct {
+			FragmentID uuid.UUID `json:"fragmentId"`
+			ErrorCode  string    `json:"errorCode"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(list.Body).Decode(&failures); err != nil {
+		t.Fatal(err)
+	}
+	list.Body.Close()
+	if len(failures.Items) != 1 || failures.Items[0].FragmentID != fragmentID ||
+		failures.Items[0].ErrorCode != "EMBEDDING_PROVIDER_UNAVAILABLE" {
+		t.Fatalf("unexpected first failure page: %+v", failures.Items)
+	}
+	retry := h.post(t, "/api/v1/assistant/index-failures/"+fragmentID.String()+"/retry", map[string]any{})
+	assertStatus(t, retry, http.StatusAccepted)
+	retry.Body.Close()
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT state FROM assistant_fragment_embeddings WHERE fragment_id = $1
+	`, fragmentID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" {
+		t.Fatalf("explicit retry did not reset the fragment: %s", state)
+	}
+	if _, err := h.database.Exec(context.Background(), `
+		UPDATE assistant_fragment_embeddings SET state = 'failed',
+		       error_code = 'EMBEDDING_PROVIDER_UNAVAILABLE', error_detail = 'second synthetic failure'
+		WHERE fragment_id = $1
+	`, fragmentID); err != nil {
+		t.Fatal(err)
+	}
+	deleted := h.delete(t, "/api/v1/assistant/embedding-settings", nil)
+	assertStatus(t, deleted, http.StatusNoContent)
+	deleted.Body.Close()
+	var errorCode *string
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT state, error_code FROM assistant_fragment_embeddings WHERE fragment_id = $1
+	`, fragmentID).Scan(&state, &errorCode); err != nil {
+		t.Fatal(err)
+	}
+	if state != "excluded" || errorCode != nil {
+		t.Fatalf("deleting embedding settings left a failure row behind: state=%s error=%v", state, errorCode)
 	}
 }

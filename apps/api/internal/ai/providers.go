@@ -217,11 +217,18 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		writeProviderValidation(response, request)
 		return
 	}
+	ctx := request.Context()
+	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
+	defer tx.Rollback(ctx)
 	var displayName, protocol, baseURL string
 	var ciphertext []byte
 	var tail *string
 	var enabled bool
-	err = service.database.QueryRow(request.Context(), `
+	err = tx.QueryRow(ctx, `
 		SELECT display_name, protocol, base_url, api_key_ciphertext, api_key_tail, enabled
 		FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
 	`, id).Scan(&displayName, &protocol, &baseURL, &ciphertext, &tail, &enabled)
@@ -281,7 +288,7 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 	executionChanged := protocolChanged || baseURLChanged ||
 		input.APIKey != nil || disabling
 	if executionChanged {
-		inUse, err := queuedAssistantRunsExist(request.Context(), service.database, &id, nil)
+		inUse, err := queuedAssistantRunsExist(ctx, tx, &id, nil)
 		if err != nil {
 			writeProviderInternal(response, request)
 			return
@@ -292,7 +299,7 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		}
 	}
 	connectivityChanged := input.Protocol != nil || input.BaseURL != nil || input.APIKey != nil || input.Enabled != nil
-	if _, err := service.database.Exec(request.Context(), `
+	if _, err := tx.Exec(ctx, `
 		UPDATE provider_configs SET display_name = $2, protocol = $3, base_url = $4,
 		       api_key_ciphertext = $5, api_key_tail = $6, enabled = $7, updated_at = $8,
 		       last_tested_at = CASE WHEN $9 THEN NULL ELSE last_tested_at END,
@@ -304,7 +311,11 @@ func (service *Service) updateProvider(response http.ResponseWriter, request *ht
 		writeProviderInternal(response, request)
 		return
 	}
-	entry, err := service.loadProvider(request.Context(), id)
+	if err := tx.Commit(ctx); err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
+	entry, err := service.loadProvider(ctx, id)
 	if err != nil {
 		writeProviderInternal(response, request)
 		return

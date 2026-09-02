@@ -410,9 +410,18 @@ export const temporaryFixture: {
   },
   events: [
     event('run.status', { sequence: 1, status: 'running', phase: 'answer' }),
-    event('answer.delta', { sequence: 2, delta: '不会保存到 Dev Toolbox。' }),
+    event('sources.ready', {
+      sequence: 2,
+      knowledgeState: 'ready',
+      evidenceState: 'not_found',
+      providedSourceCount: 0,
+      rewriteFallback: true,
+      promptVersion: 'assistant-answer-v1',
+      retrievalVersion: 'hybrid-rrf-v1',
+    }),
+    event('answer.delta', { sequence: 3, delta: '不会保存到 Dev Toolbox。' }),
     event('run.completed', {
-      sequence: 3,
+      sequence: 4,
       status: 'succeeded',
       usage: runFixtures.succeeded.usage,
       timings: runFixtures.succeeded.timings,
@@ -521,6 +530,9 @@ function run(status: AssistantRunDTO['status'], phase: AssistantRunDTO['phase'])
       providerDisplayName: assistantModelFixture.provider.displayName,
     },
     reasoning: { reasoning: 'medium', displayName: '标准' },
+    promptVersion: 'assistant-answer-v1',
+    retrievalVersion: 'hybrid-rrf-v1',
+    rewriteFallback: false,
     knowledgeState: 'ready',
     evidenceState: null,
     usage: {

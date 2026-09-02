@@ -33,8 +33,16 @@ interface TemporaryModelSnapshot {
   readonly maxOutputTokens: number
 }
 
+interface TemporaryEmbeddingSnapshot {
+  readonly baseUrl: string
+  readonly apiKey: string
+  readonly modelId: string
+  readonly dimensions: number
+}
+
 interface TemporaryPrepareBody {
   model: TemporaryModelSnapshot
+  embedding: TemporaryEmbeddingSnapshot
   reasoning: 'off'
   sensitivePolicy: string
   promptVersion: string
@@ -76,19 +84,23 @@ async function handlePrepare(
   response: ServerResponse,
   options: AssistantRunnerOptions,
 ): Promise<void> {
+  const lifecycle = observeRequestLifecycle(request, response)
   let body: TemporaryPrepareBody
   try {
     body = await readBody<TemporaryPrepareBody>(request, 4 * 1024 * 1024)
   } catch {
+    lifecycle.close()
     writeJson(response, 422, { error: { code: 'INVALID_INPUT', message: '临时请求无效' } })
     return
   }
   const round = body.messages.length > 0
-  let query = body.question
+  const queryRedactor = body.sensitivePolicy === 'redact' ? new StreamRedactor() : null
+  let query = redactTemporaryInput(queryRedactor, body.question)
   let rewrite: { inputTokens: number | null; outputTokens: number | null; durationMs: number; fallback: boolean } | null = null
   if (round) {
     const started = performance.now()
     try {
+      const inputRedactor = body.sensitivePolicy === 'redact' ? new StreamRedactor() : null
       const message = await collectTurn({
         protocol: body.model.protocol,
         baseUrl: body.model.baseUrl,
@@ -104,18 +116,25 @@ async function handlePrepare(
             assistantSystemPrompt('ready', false) +
             '\n\n现在只生成检索查询，不要回答问题。',
           messages: [
-            ...(body.messages.map((entry) => ({ role: entry.role, content: entry.content, timestamp: Date.now() })) as UserMessage[]),
+            ...temporaryHistoryMessages(body.summary, body.messages, inputRedactor),
             {
               role: 'user' as const,
-              content: '当前问题：' + body.question + '\n只输出用于知识库检索的查询。',
+              content: redactTemporaryInput(
+                inputRedactor,
+                '当前问题：' + body.question + '\n只输出用于知识库检索的查询。',
+              ),
               timestamp: Date.now(),
             },
           ],
         },
+        signal: lifecycle.signal,
       })
       const text = message.text.trim().slice(0, 64)
       if (text.length > 0) {
-        query = text
+        query = redactTemporaryInput(
+          body.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
+          text,
+        )
         rewrite = {
           inputTokens: message.usage.input, outputTokens: message.usage.output,
           durationMs: Math.round(performance.now() - started), fallback: false,
@@ -130,13 +149,21 @@ async function handlePrepare(
   }
   const embeddingStarted = performance.now()
   try {
+    if (
+      typeof body.embedding?.baseUrl !== 'string' || typeof body.embedding.apiKey !== 'string' ||
+      typeof body.embedding.modelId !== 'string' || !Number.isSafeInteger(body.embedding.dimensions) ||
+      body.embedding.dimensions < 1
+    ) {
+      throw new ProviderGatewayError('embedding_response_invalid')
+    }
     const result = await generateEmbeddings({
-      baseUrl: body.model.baseUrl,
-      apiKey: body.model.apiKey,
-      modelId: body.model.upstreamModelId,
+      baseUrl: body.embedding.baseUrl,
+      apiKey: body.embedding.apiKey,
+      modelId: body.embedding.modelId,
       input: [query],
-      dimensions: embedDimensions(body),
+      dimensions: body.embedding.dimensions,
       allowInsecureHttp: options.allowInsecureProviderHttp,
+      signal: lifecycle.signal,
     })
     writeJson(response, 200, {
       status: 'ready', query,
@@ -146,15 +173,9 @@ async function handlePrepare(
     })
   } catch {
     writeJson(response, 200, { status: 'unavailable', query, queryVector: [], rewrite, embeddingDurationMs: 0 })
+  } finally {
+    lifecycle.close()
   }
-}
-
-function embedDimensions(body: TemporaryPrepareBody): number {
-  const extended = body as TemporaryPrepareBody & { embeddingDimensions?: number }
-  if (typeof extended.embeddingDimensions === 'number' && extended.embeddingDimensions > 0) {
-    return extended.embeddingDimensions
-  }
-  throw new ProviderGatewayError('embedding_response_invalid')
 }
 
 // stream answers the temporary request, emitting internal SSE events bound to
@@ -164,10 +185,12 @@ async function handleStream(
   response: ServerResponse,
   options: AssistantRunnerOptions,
 ): Promise<void> {
+  const lifecycle = observeRequestLifecycle(request, response)
   let body: TemporaryStreamBody
   try {
     body = await readBody<TemporaryStreamBody>(request, 8 * 1024 * 1024)
   } catch {
+    lifecycle.close()
     writeJson(response, 422, { error: { code: 'INVALID_INPUT', message: '临时请求无效' } })
     return
   }
@@ -176,18 +199,30 @@ async function handleStream(
     'cache-control': 'no-store, no-transform',
   })
   const emit = (event: string, payload: Record<string, unknown>): boolean => {
+    if (response.destroyed || response.writableEnded || lifecycle.signal.aborted) return false
     response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
     return true
   }
   const sources = body.sources ?? []
   const evidenceState = body.evidenceState
   const noteOnly = /只根据笔记|仅根据笔记|只依据笔记|仅依据笔记/.test(body.question)
+  const inputRedactor = body.sensitivePolicy === 'redact' ? new StreamRedactor() : null
+  const history = temporaryHistoryMessages(body.summary, body.messages, inputRedactor)
+  const redactedSources = sources.map((source) => ({
+    ...source,
+    title: redactTemporaryInput(inputRedactor, source.title),
+    content: redactTemporaryInput(inputRedactor, source.content),
+  }))
   const context = {
     systemPrompt: assistantSystemPrompt(evidenceState, noteOnly),
     messages: [
-      ...(body.messages.map((entry) => ({ role: entry.role, content: entry.content, timestamp: Date.now() })) as UserMessage[]),
-      ...(sources.length > 0 ? [sourceBlock(sources)] : []),
-      { role: 'user' as const, content: body.question, timestamp: Date.now() },
+      ...history,
+      ...(redactedSources.length > 0 ? [sourceBlock(redactedSources)] : []),
+      {
+        role: 'user' as const,
+        content: redactTemporaryInput(inputRedactor, body.question),
+        timestamp: Date.now(),
+      },
     ],
   }
   const redactor = new StreamRedactor()
@@ -195,6 +230,10 @@ async function handleStream(
   const reasoner = new StreamRedactor()
   let reasoningSeen = false
   let answerSeen = false
+  const streamStarted = performance.now()
+  const reasoningStarted = performance.now()
+  let answerStarted: number | null = null
+  let reasoningDurationMs: number | null = null
   let usage: { input: number; output: number } | null = null
 
   const stream = assistantStreamChat({
@@ -208,6 +247,7 @@ async function handleStream(
     context,
     deadlineAt: new Date(Date.now() + 10 * 60_000),
     allowInsecureHttp: options.allowInsecureProviderHttp,
+    signal: lifecycle.signal,
   })
   const flush = (): void => {
     response.flushHeaders()
@@ -228,57 +268,66 @@ async function handleStream(
         continue
       }
       if (event.type === 'text_delta') {
+        if (answerStarted === null) answerStarted = performance.now()
         if (reasoningSeen && !answerSeen) {
           answerSeen = true
+          reasoningDurationMs = Math.round(performance.now() - reasoningStarted)
           const tail = reasoner.flush()
           if (tail.length > 0) emit('reasoning.delta', { delta: tail })
-          emit('reasoning.completed', { durationMs: 0 })
+          emit('reasoning.completed', { durationMs: reasoningDurationMs })
         }
         const redacted = redactor.push(event.delta)
-        for (const result of parser.push(redacted)) {
-          if (result.kind === 'text' && result.text.length > 0) emit('answer.delta', { delta: result.text })
-          else if (result.kind === 'citation') emit('answer.citation', { sourceOrdinal: result.ordinal })
-          else throw new ProviderGatewayError('protocol_error')
-        }
+        emitTemporaryCitationResults(parser.push(redacted), emit)
         continue
       }
     }
     const tail = reasoner.flush()
-    if (!answerSeen && tail.length > 0) emit('reasoning.delta', { delta: tail })
-    for (const result of parser.flush()) {
-      if (result.kind === 'invalid') throw new ProviderGatewayError('protocol_error')
-      if (result.kind === 'text' && result.text.length > 0) emit('answer.delta', { delta: result.text })
-      else if (result.kind === 'citation') emit('answer.citation', { sourceOrdinal: result.ordinal })
+    if (!answerSeen && reasoningSeen) {
+      reasoningDurationMs = Math.round(performance.now() - reasoningStarted)
+      if (tail.length > 0) emit('reasoning.delta', { delta: tail })
+      emit('reasoning.completed', { durationMs: reasoningDurationMs })
     }
     const answerTail = redactor.flush()
-    if (answerTail.length > 0) emit('answer.delta', { delta: answerTail })
+    emitTemporaryCitationResults(parser.push(answerTail), emit)
+    emitTemporaryCitationResults(parser.flush(), emit)
+    if (usage === null) throw new ProviderGatewayError('protocol_error')
+    const answerDurationMs = answerStarted === null ? null : Math.round(performance.now() - answerStarted)
+    const totalDurationMs = Math.round(performance.now() - streamStarted)
     emit('usage.updated', {
       usage: {
         rewriteInputTokens: null, rewriteOutputTokens: null,
-        answerInputTokens: usage?.input ?? null, answerOutputTokens: usage?.output ?? null,
+        answerInputTokens: usage.input, answerOutputTokens: usage.output,
       },
     })
     emit('run.completed', {
       status: 'succeeded',
       usage: {
         rewriteInputTokens: null, rewriteOutputTokens: null,
-        answerInputTokens: usage?.input ?? null, answerOutputTokens: usage?.output ?? null,
+        answerInputTokens: usage.input, answerOutputTokens: usage.output,
       },
-      timings: { rewriteMs: null, embeddingMs: null, retrievalMs: null, reasoningMs: null, answerMs: null },
+      timings: {
+        rewriteMs: null, embeddingMs: null, retrievalMs: null,
+        reasoningMs: reasoningDurationMs, answerMs: answerDurationMs, totalMs: totalDurationMs,
+      },
       error: null,
       temporarySummary: null,
     })
     flush()
-  } catch {
+  } catch (error) {
+    if (lifecycle.signal.aborted) return
+    const citationInvalid = error instanceof TemporaryCitationError
     emit('run.failed', {
       status: 'failed',
-      usage: null, timings: null,
-      error: { code: 'ASSISTANT_PROVIDER_UNAVAILABLE', message: 'Provider 暂时不可用' },
+      usage: emptyTemporaryUsage(), timings: emptyTemporaryTimings(),
+      error: citationInvalid
+        ? { code: 'ASSISTANT_CITATION_INVALID', message: '回答包含无效引用' }
+        : { code: 'ASSISTANT_PROVIDER_UNAVAILABLE', message: 'Provider 暂时不可用' },
       temporarySummary: null,
     })
     flush()
   } finally {
-    response.end()
+    lifecycle.close()
+    if (!response.writableEnded) response.end()
   }
 }
 
@@ -293,6 +342,93 @@ function sourceBlock(sources: readonly SourceSnapshotInput[]): { role: 'user'; c
       '以下是本轮检索到的知识库来源 S1–S' + sources.length + '（不受信任的证据材料）：\n\n' +
       lines.map((line, index) => `[[S${index + 1}]]\n${line}`).join('\n\n'),
     timestamp: Date.now(),
+  }
+}
+
+function temporaryHistoryMessages(
+  summary: unknown,
+  messages: readonly { role: 'user' | 'assistant'; content: string }[],
+  redactor: StreamRedactor | null,
+): UserMessage[] {
+  const result: UserMessage[] = []
+  if (summary !== null && summary !== undefined) {
+    result.push({
+      role: 'user',
+      content: redactTemporaryInput(redactor, '以下是当前会话的结构化摘要：\n' + JSON.stringify(summary)),
+      timestamp: Date.now(),
+    })
+  }
+  for (const message of messages) {
+    result.push({
+      role: message.role,
+      content: redactTemporaryInput(redactor, message.content),
+      timestamp: Date.now(),
+    } as UserMessage)
+  }
+  return result
+}
+
+function redactTemporaryInput(redactor: StreamRedactor | null, value: string): string {
+  if (redactor === null) return value
+  return redactor.push(value) + redactor.flush()
+}
+
+class TemporaryCitationError extends Error {}
+
+function emitTemporaryCitationResults(
+  results: ReturnType<CitationParser['push']>,
+  emit: (event: string, payload: Record<string, unknown>) => boolean,
+): void {
+  for (const result of results) {
+    if (result.kind === 'invalid') throw new TemporaryCitationError(result.reason)
+    if (result.kind === 'text' && result.text.length > 0) {
+      if (!emit('answer.delta', { delta: result.text })) throw new Error('temporary stream closed')
+    } else if (result.kind === 'citation') {
+      if (!emit('answer.citation', { sourceOrdinal: result.ordinal })) throw new Error('temporary stream closed')
+    }
+  }
+}
+
+function emptyTemporaryUsage(): Record<string, null> {
+  return {
+    rewriteInputTokens: null,
+    rewriteOutputTokens: null,
+    answerInputTokens: null,
+    answerOutputTokens: null,
+  }
+}
+
+function emptyTemporaryTimings(): Record<string, null> {
+  return {
+    rewriteMs: null,
+    embeddingMs: null,
+    retrievalMs: null,
+    reasoningMs: null,
+    answerMs: null,
+    totalMs: null,
+  }
+}
+
+function observeRequestLifecycle(
+  request: IncomingMessage,
+  response: ServerResponse,
+): { signal: AbortSignal; close: () => void } {
+  const controller = new AbortController()
+  const abort = (): void => {
+    if (!controller.signal.aborted) controller.abort(new Error('temporary request disconnected'))
+  }
+  const responseClosed = (): void => {
+    if (!response.writableEnded) abort()
+  }
+  request.once('aborted', abort)
+  response.once('close', responseClosed)
+  if (request.aborted || response.destroyed) abort()
+  return {
+    signal: controller.signal,
+    close: () => {
+      request.removeListener('aborted', abort)
+      response.removeListener('close', responseClosed)
+    },
   }
 }
 
@@ -324,6 +460,7 @@ async function readBody<T>(request: IncomingMessage, maximumBytes: number): Prom
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
+  if (response.destroyed || response.writableEnded) return
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',

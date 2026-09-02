@@ -16,6 +16,9 @@ const runtime = computed(() => {
       phase: props.run.phase,
       model: props.run.model,
       reasoning: props.run.reasoning,
+      promptVersion: props.run.promptVersion,
+      retrievalVersion: props.run.retrievalVersion,
+      rewriteFallback: props.run.rewriteFallback,
       knowledgeState: props.run.knowledgeState,
       evidenceState: props.run.evidenceState,
       usage: props.run.usage,
@@ -72,6 +75,9 @@ function evidenceLabel(value: string | null) {
         <div><dt>Provider</dt><dd>{{ runtime.model.providerDisplayName }}</dd></div>
         <div><dt>上游模型 ID</dt><dd><code>{{ runtime.model.upstreamModelId }}</code></dd></div>
         <div><dt>实际思考档位</dt><dd>{{ runtime.reasoning.displayName }}</dd></div>
+        <div><dt>Prompt 版本</dt><dd><code>{{ runtime.promptVersion ?? '—' }}</code></dd></div>
+        <div><dt>检索版本</dt><dd><code>{{ runtime.retrievalVersion ?? '—' }}</code></dd></div>
+        <div><dt>改写回退</dt><dd>{{ runtime.rewriteFallback ? '是' : '否' }}</dd></div>
         <div><dt>知识状态</dt><dd>{{ knowledgeLabel(runtime.knowledgeState) }}</dd></div>
         <div><dt>证据状态</dt><dd>{{ evidenceLabel(runtime.evidenceState) }}</dd></div>
         <div><dt>提供给模型的来源</dt><dd>{{ runtime.providedSourceCount }}</dd></div>

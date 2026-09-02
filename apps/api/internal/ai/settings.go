@@ -19,7 +19,7 @@ import (
 // It bumps the knowledge-assistant embedding generation whenever the global
 // sensitive AI policy changes (docs/16 §7.3). A package-level hook keeps the
 // ai→assistant wiring without an import cycle and without touching service.go.
-var SensitivePolicyChangeHook func(ctx context.Context, previous, current string) error
+var SensitivePolicyChangeHook func(ctx context.Context, tx pgx.Tx, previous, current string) (afterCommit func(), err error)
 
 type aiSettings struct {
 	SensitiveDisplayMode   string     `json:"sensitiveDisplayMode"`
@@ -32,7 +32,7 @@ type aiSettings struct {
 
 func (service *Service) getSettings(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
-	settings, err := service.loadSettings(request)
+	settings, err := service.loadSettings(request.Context(), service.database)
 	if err != nil {
 		writeProviderInternal(response, request)
 		return
@@ -40,9 +40,9 @@ func (service *Service) getSettings(response http.ResponseWriter, request *http.
 	httpapi.WriteJSON(response, http.StatusOK, settings)
 }
 
-func (service *Service) loadSettings(request *http.Request) (aiSettings, error) {
+func (service *Service) loadSettings(ctx context.Context, querier rowQuerier) (aiSettings, error) {
 	var settings aiSettings
-	err := service.database.QueryRow(request.Context(), `
+	err := querier.QueryRow(ctx, `
 		SELECT sensitive_display_mode, sensitive_ai_policy, auto_activate_organized, default_organize_model_id,
 		       default_review_model_id, default_vision_model_id
 		FROM app_settings WHERE singleton
@@ -65,7 +65,20 @@ func (service *Service) updateSettings(response http.ResponseWriter, request *ht
 		writeProviderValidation(response, request)
 		return
 	}
-	current, err := service.loadSettings(request)
+	ctx := request.Context()
+	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
+	defer tx.Rollback(ctx)
+	var current aiSettings
+	err = tx.QueryRow(ctx, `
+		SELECT sensitive_display_mode, sensitive_ai_policy, auto_activate_organized, default_organize_model_id,
+		       default_review_model_id, default_vision_model_id
+		FROM app_settings WHERE singleton FOR UPDATE
+	`).Scan(&current.SensitiveDisplayMode, &current.SensitiveAIPolicy, &current.AutoActivateOrganized,
+		&current.DefaultOrganizeModelID, &current.DefaultReviewModelID, &current.DefaultVisionModelID)
 	if err != nil {
 		writeProviderInternal(response, request)
 		return
@@ -78,17 +91,17 @@ func (service *Service) updateSettings(response http.ResponseWriter, request *ht
 			return
 		}
 	}
-	organize, err := service.resolveDefaultModel(request, input.DefaultOrganizeModelID, current.DefaultOrganizeModelID, false)
+	organize, err := service.resolveDefaultModel(ctx, tx, input.DefaultOrganizeModelID, current.DefaultOrganizeModelID, false)
 	if err != nil {
 		writeProviderValidation(response, request)
 		return
 	}
-	review, err := service.resolveDefaultModel(request, input.DefaultReviewModelID, current.DefaultReviewModelID, false)
+	review, err := service.resolveDefaultModel(ctx, tx, input.DefaultReviewModelID, current.DefaultReviewModelID, false)
 	if err != nil {
 		writeProviderValidation(response, request)
 		return
 	}
-	vision, err := service.resolveDefaultModel(request, input.DefaultVisionModelID, current.DefaultVisionModelID, true)
+	vision, err := service.resolveDefaultModel(ctx, tx, input.DefaultVisionModelID, current.DefaultVisionModelID, true)
 	if err != nil {
 		writeProviderValidation(response, request)
 		return
@@ -97,7 +110,7 @@ func (service *Service) updateSettings(response http.ResponseWriter, request *ht
 	if input.AutoActivateOrganized != nil {
 		autoActivate = *input.AutoActivateOrganized
 	}
-	_, err = service.database.Exec(request.Context(), `
+	_, err = tx.Exec(ctx, `
 		UPDATE app_settings SET sensitive_ai_policy = $1, default_organize_model_id = $2,
 		       default_review_model_id = $3, default_vision_model_id = $4,
 		       auto_activate_organized = $5, updated_at = $6
@@ -107,18 +120,26 @@ func (service *Service) updateSettings(response http.ResponseWriter, request *ht
 		writeProviderInternal(response, request)
 		return
 	}
+	var afterPolicyCommit func()
 	if input.SensitiveAIPolicy != nil && current.SensitiveAIPolicy != policy {
 		// V3: a sensitive policy change bumps the embedding generation. The hook
-		// is wired by the integrator to (*assistant.Service).NotifySensitivePolicyChanged;
-		// without wiring the update itself still succeeds.
+		// is wired by the integrator to (*assistant.Service).NotifySensitivePolicyChanged.
 		if SensitivePolicyChangeHook != nil {
-			if err := SensitivePolicyChangeHook(request.Context(), current.SensitiveAIPolicy, policy); err != nil {
+			afterPolicyCommit, err = SensitivePolicyChangeHook(ctx, tx, current.SensitiveAIPolicy, policy)
+			if err != nil {
 				writeProviderInternal(response, request)
 				return
 			}
 		}
 	}
-	settings, err := service.loadSettings(request)
+	if err := tx.Commit(ctx); err != nil {
+		writeProviderInternal(response, request)
+		return
+	}
+	if afterPolicyCommit != nil {
+		afterPolicyCommit()
+	}
+	settings, err := service.loadSettings(ctx, service.database)
 	if err != nil {
 		writeProviderInternal(response, request)
 		return
@@ -126,7 +147,7 @@ func (service *Service) updateSettings(response http.ResponseWriter, request *ht
 	httpapi.WriteJSON(response, http.StatusOK, settings)
 }
 
-func (service *Service) resolveDefaultModel(request *http.Request, supplied *string, current *uuid.UUID, vision bool) (*uuid.UUID, error) {
+func (service *Service) resolveDefaultModel(ctx context.Context, querier rowQuerier, supplied *string, current *uuid.UUID, vision bool) (*uuid.UUID, error) {
 	if supplied == nil {
 		return current, nil
 	}
@@ -138,7 +159,7 @@ func (service *Service) resolveDefaultModel(request *http.Request, supplied *str
 		return nil, errInvalidProviderInput
 	}
 	var supportsVision bool
-	err = service.database.QueryRow(request.Context(), `
+	err = querier.QueryRow(ctx, `
 		SELECT model.supports_vision
 		FROM provider_models model JOIN provider_configs provider ON provider.id = model.provider_config_id
 		WHERE model.id = $1 AND model.deleted_at IS NULL AND provider.deleted_at IS NULL

@@ -130,6 +130,18 @@ describe('ModelGateway provider connection test', () => {
     })
   }
 
+  it('rejects an oversized chunked stream without buffering the whole response', async () => {
+    const baseUrl = await startMock((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      const padding = `: ${'x'.repeat(256 * 1024)}\n\n`
+      for (let index = 0; index < 17; index++) response.write(padding)
+      response.end()
+    })
+    await expect(
+      testProviderConnection(snapshot(baseUrl), new Date(Date.now() + 5_000), true),
+    ).rejects.toBeInstanceOf(ProviderGatewayError)
+  })
+
   it.each([
     'https://user:password@example.com/v1',
     'https://example.com/v1?token=secret',

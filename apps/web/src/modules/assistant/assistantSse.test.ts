@@ -86,6 +86,26 @@ describe('persistent assistant SSE reducer', () => {
     expect(state.terminal).toBe(true)
   })
 
+  it('applies the persisted query-rewrite fallback trace', () => {
+    let state = reducePersistentEvent(createPersistentStreamState(), {
+      type: 'snapshot',
+      data: { lastSequence: 0, run: runFixtures.running, assistantMessage: streamMessage() },
+    }).state
+    state = reducePersistentEvent(state, {
+      type: 'sources.ready',
+      data: {
+        sequence: 1,
+        knowledgeState: 'ready',
+        evidenceState: 'not_found',
+        providedSourceCount: 0,
+        rewriteFallback: true,
+      },
+    }).state
+
+    expect(state.run?.rewriteFallback).toBe(true)
+    expect(state.assistantMessage?.currentRun?.rewriteFallback).toBe(true)
+  })
+
   it('keeps partial content visibly failed and terminal events never append body text', () => {
     let state = createPersistentStreamState()
     for (const envelope of persistentStreamFixtures.failedPartial) {
@@ -128,7 +148,10 @@ describe('temporary assistant SSE reducer', () => {
     expect(state.status).toBe('succeeded')
     expect(state.content).toBe('不会保存到 Dev Toolbox。')
     expect(state.terminal).toBe(true)
-    expect(state.appliedSequence).toBe(3)
+    expect(state.appliedSequence).toBe(4)
+    expect(state.promptVersion).toBe('assistant-answer-v1')
+    expect(state.retrievalVersion).toBe('hybrid-rrf-v1')
+    expect(state.rewriteFallback).toBe(true)
   })
 })
 

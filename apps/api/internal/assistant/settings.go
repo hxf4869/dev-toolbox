@@ -139,6 +139,17 @@ func (service *Service) putEmbeddingSettings(response http.ResponseWriter, reque
 		return
 	}
 	defer tx.Rollback(ctx)
+	var policy string
+	if err := tx.QueryRow(ctx, `
+		SELECT sensitive_ai_policy FROM app_settings WHERE singleton FOR SHARE
+	`).Scan(&policy); err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	if _, err := tx.Exec(ctx, `SELECT true FROM assistant_embedding_config WHERE singleton FOR UPDATE`); err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
 	current, err := service.loadEmbeddingConfig(ctx, tx)
 	if err != nil {
 		writeAssistantInternalFailure(response, request)
@@ -156,11 +167,6 @@ func (service *Service) putEmbeddingSettings(response http.ResponseWriter, reque
 	}
 	if input.Enabled && ciphertext == nil && !current.HasAPIKey {
 		writeEmbeddingConfigInvalid(response, request)
-		return
-	}
-	policy, err := service.loadSensitivePolicy(ctx, tx)
-	if err != nil {
-		writeAssistantInternalFailure(response, request)
 		return
 	}
 	connectionChanged := !current.Configured ||
@@ -185,8 +191,10 @@ func (service *Service) putEmbeddingSettings(response http.ResponseWriter, reque
 	if needsReindex {
 		generation++
 	}
-	status := "disabled"
-	if input.Enabled {
+	status := current.Status
+	if !input.Enabled {
+		status = "disabled"
+	} else if needsReindex {
 		status = "indexing"
 	}
 	now := service.now().UTC()
@@ -195,15 +203,26 @@ func (service *Service) putEmbeddingSettings(response http.ResponseWriter, reque
 			base_url = $1, api_key_ciphertext = COALESCE($2, api_key_ciphertext),
 			api_key_tail = COALESCE($3, api_key_tail), model_id = $4, display_name = $5,
 			dimensions = $6, enabled = $7, generation = $8, status = $9,
-			last_error_code = NULL, updated_at = $10
+			last_error_code = CASE WHEN $9 = 'failed' THEN last_error_code ELSE NULL END,
+			updated_at = $10
 		WHERE singleton
 	`, baseURL, ciphertext, tail, modelID, displayName,
 		*input.Dimensions, input.Enabled, generation, status, now); err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
-	if needsReindex {
+	if needsReindex && input.Enabled {
 		if err := service.resetIndexForGeneration(ctx, tx, generation, policy, now); err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
+	} else if needsReindex {
+		if _, err := tx.Exec(ctx, `
+			UPDATE assistant_fragment_embeddings SET state = 'excluded', embedding = NULL, dimensions = NULL,
+			       lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+			       error_code = NULL, error_detail = NULL, updated_at = $1
+			WHERE state <> 'excluded'
+		`, now); err != nil {
 			writeAssistantInternalFailure(response, request)
 			return
 		}
@@ -251,6 +270,14 @@ func (service *Service) deleteEmbeddingSettings(response http.ResponseWriter, re
 		return
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT true FROM app_settings WHERE singleton FOR SHARE`); err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	if _, err := tx.Exec(ctx, `SELECT true FROM assistant_embedding_config WHERE singleton FOR UPDATE`); err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
 	current, err := service.loadEmbeddingConfig(ctx, tx)
 	if err != nil {
 		writeAssistantInternalFailure(response, request)
@@ -268,9 +295,9 @@ func (service *Service) deleteEmbeddingSettings(response http.ResponseWriter, re
 	// Invalidate in-flight leases by generation change and drop derived vectors.
 	if _, err := tx.Exec(ctx, `
 		UPDATE assistant_fragment_embeddings SET embedding = NULL, dimensions = NULL,
-		       state = 'excluded', lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL,
+		       state = 'excluded', lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
 		       error_code = NULL, error_detail = NULL, updated_at = $1
-		WHERE state IN ('pending', 'running', 'ready')
+		WHERE state <> 'excluded'
 	`, now); err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
@@ -344,9 +371,9 @@ type embeddingUsage struct {
 }
 
 type embeddingTestResult struct {
-	Status          string         `json:"status"`
-	ActualDimension int            `json:"actualDimensions"`
-	LatencyMS       int64          `json:"latencyMs"`
+	Status          string          `json:"status"`
+	ActualDimension int             `json:"actualDimensions"`
+	LatencyMS       int64           `json:"latencyMs"`
 	Usage           *embeddingUsage `json:"usage"`
 }
 

@@ -9,52 +9,54 @@ import (
 )
 
 type runRow struct {
-	ID                  uuid.UUID
-	ConversationID      uuid.UUID
-	InputMessageID      uuid.UUID
-	OutputMessageID     uuid.UUID
-	ClientRequestID     uuid.UUID
-	RetryOfRunID        *uuid.UUID
-	Status              string
-	Phase               *string
-	StopRequestedAt     *time.Time
-	ClaimAttempt        int
-	LeaseOwner          *string
-	LeaseVersion        *int
-	LeaseExpiresAt      *time.Time
-	HeartbeatAt         *time.Time
-	ProviderID          uuid.UUID
-	ProviderDisplayName string
-	ModelID             uuid.UUID
-	ModelDisplayName    string
-	UpstreamModelID     string
-	Protocol            string
-	BaseURL             string
-	ContextWindow       int
-	MaxOutputTokens     int
-	ReasoningEffort     *string
+	ID                   uuid.UUID
+	ConversationID       uuid.UUID
+	InputMessageID       uuid.UUID
+	OutputMessageID      uuid.UUID
+	ClientRequestID      uuid.UUID
+	RetryOfRunID         *uuid.UUID
+	Status               string
+	Phase                *string
+	StopRequestedAt      *time.Time
+	ClaimAttempt         int
+	LeaseOwner           *string
+	LeaseVersion         *int
+	LeaseExpiresAt       *time.Time
+	HeartbeatAt          *time.Time
+	ProviderID           uuid.UUID
+	ProviderDisplayName  string
+	ModelID              uuid.UUID
+	ModelDisplayName     string
+	UpstreamModelID      string
+	Protocol             string
+	BaseURL              string
+	ContextWindow        int
+	MaxOutputTokens      int
+	ReasoningEffort      *string
 	ReasoningDisplayName *string
-	SensitivePolicy     string
-	EffectivePolicy     string
-	PromptVersion       string
-	RetrievalVersion    string
-	KnowledgeState      string
-	EvidenceState       *string
-	RewriteInputTokens  *int64
-	RewriteOutputTokens *int64
-	AnswerInputTokens   *int64
-	AnswerOutputTokens  *int64
-	RewriteMS           *int64
-	EmbeddingMS         *int64
-	RetrievalMS         *int64
-	ReasoningMS         *int64
-	AnswerMS            *int64
-	CreatedAt           time.Time
-	QueuedAt            time.Time
-	StartedAt           *time.Time
-	FinishedAt          *time.Time
-	ErrorCode           *string
-	ErrorDetail         *string
+	SensitivePolicy      string
+	EffectivePolicy      string
+	PromptVersion        string
+	RetrievalVersion     string
+	RewriteFallback      bool
+	KnowledgeState       string
+	KnowledgeGeneration  *int64
+	EvidenceState        *string
+	RewriteInputTokens   *int64
+	RewriteOutputTokens  *int64
+	AnswerInputTokens    *int64
+	AnswerOutputTokens   *int64
+	RewriteMS            *int64
+	EmbeddingMS          *int64
+	RetrievalMS          *int64
+	ReasoningMS          *int64
+	AnswerMS             *int64
+	CreatedAt            time.Time
+	QueuedAt             time.Time
+	StartedAt            *time.Time
+	FinishedAt           *time.Time
+	ErrorCode            *string
+	ErrorDetail          *string
 }
 
 const runColumns = `
@@ -63,7 +65,7 @@ const runColumns = `
 	heartbeat_at, provider_id, provider_display_name, model_id, model_display_name,
 	upstream_model_id, protocol, base_url, context_window, max_output_tokens,
 	reasoning_effort, reasoning_display_name, sensitive_policy, effective_sensitive_policy,
-	prompt_version, retrieval_version, knowledge_state, evidence_state,
+	prompt_version, retrieval_version, rewrite_fallback, knowledge_state, knowledge_generation, evidence_state,
 	rewrite_input_tokens, rewrite_output_tokens, answer_input_tokens, answer_output_tokens,
 	rewrite_ms, embedding_ms, retrieval_ms, reasoning_ms, answer_ms,
 	created_at, queued_at, started_at, finished_at, error_code, error_detail
@@ -76,7 +78,7 @@ func runScanTargets(run *runRow) []any {
 		&run.HeartbeatAt, &run.ProviderID, &run.ProviderDisplayName, &run.ModelID, &run.ModelDisplayName,
 		&run.UpstreamModelID, &run.Protocol, &run.BaseURL, &run.ContextWindow, &run.MaxOutputTokens,
 		&run.ReasoningEffort, &run.ReasoningDisplayName, &run.SensitivePolicy, &run.EffectivePolicy,
-		&run.PromptVersion, &run.RetrievalVersion, &run.KnowledgeState, &run.EvidenceState,
+		&run.PromptVersion, &run.RetrievalVersion, &run.RewriteFallback, &run.KnowledgeState, &run.KnowledgeGeneration, &run.EvidenceState,
 		&run.RewriteInputTokens, &run.RewriteOutputTokens, &run.AnswerInputTokens, &run.AnswerOutputTokens,
 		&run.RewriteMS, &run.EmbeddingMS, &run.RetrievalMS, &run.ReasoningMS, &run.AnswerMS,
 		&run.CreatedAt, &run.QueuedAt, &run.StartedAt, &run.FinishedAt, &run.ErrorCode, &run.ErrorDetail}
@@ -97,7 +99,7 @@ func (run runRow) isTerminal() bool {
 }
 
 func (run runRow) canStop() bool {
-	return run.Status == "queued" || run.Status == "running"
+	return (run.Status == "queued" || run.Status == "running") && run.StopRequestedAt == nil
 }
 
 func (run runRow) reasoningSnapshot() RunReasoningDTO {
@@ -137,6 +139,10 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 	if err != nil {
 		return AssistantRunDTO{}, err
 	}
+	canRetry, err := service.runRetryable(ctx, querier, run)
+	if err != nil {
+		return AssistantRunDTO{}, err
+	}
 	dto := AssistantRunDTO{
 		ID: run.ID, ConversationID: run.ConversationID, InputMessageID: run.InputMessageID,
 		OutputMessageID: run.OutputMessageID, ClientRequestID: run.ClientRequestID,
@@ -146,8 +152,10 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 			ID: run.ModelID, DisplayName: run.ModelDisplayName, UpstreamModelID: run.UpstreamModelID,
 			ProviderID: run.ProviderID, ProviderDisplayName: run.ProviderDisplayName,
 		},
-		Reasoning:      run.reasoningSnapshot(),
-		KnowledgeState: run.KnowledgeState, EvidenceState: run.EvidenceState,
+		Reasoning:     run.reasoningSnapshot(),
+		PromptVersion: run.PromptVersion, RetrievalVersion: run.RetrievalVersion,
+		RewriteFallback: run.RewriteFallback,
+		KnowledgeState:  run.KnowledgeState, EvidenceState: run.EvidenceState,
 		Usage: RunUsageDTO{
 			RewriteInputTokens: run.RewriteInputTokens, RewriteOutputTokens: run.RewriteOutputTokens,
 			AnswerInputTokens: run.AnswerInputTokens, AnswerOutputTokens: run.AnswerOutputTokens,
@@ -157,14 +165,46 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 			ReasoningMS: run.ReasoningMS, AnswerMS: run.AnswerMS,
 		},
 		ProvidedSourceCount: provided, CitationCount: cited, LastSequence: lastSequence,
-		CanStop: run.canStop(), Error: run.errorDTO(),
+		CanStop: run.canStop(), CanRetry: canRetry, Error: run.errorDTO(),
 		CreatedAt: run.CreatedAt, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 	}
-	if run.Status == "succeeded" {
-		// Only a failed/stopped final assistant message stays retryable.
-		dto.CanRetry = false
+	if run.isTerminal() {
+		dto.Timings.TotalMS = totalRunTiming(run)
 	}
 	return dto, nil
+}
+
+func (service *Service) runRetryable(ctx context.Context, querier rowQuerier, run runRow) (bool, error) {
+	if run.Status != "failed" && run.Status != "stopped" {
+		return false, nil
+	}
+	var retryable bool
+	err := querier.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM assistant_messages message
+			WHERE message.id = $1 AND message.current_run_id = $2
+			  AND message.sequence = (
+				SELECT max(sequence) FROM assistant_messages WHERE conversation_id = $3
+			  )
+		)
+	`, run.OutputMessageID, run.ID, run.ConversationID).Scan(&retryable)
+	return retryable, err
+}
+
+func totalRunTiming(run runRow) *int64 {
+	values := []*int64{run.RewriteMS, run.EmbeddingMS, run.RetrievalMS, run.ReasoningMS, run.AnswerMS}
+	var total int64
+	found := false
+	for _, value := range values {
+		if value != nil {
+			total += *value
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	return &total
 }
 
 type messageRow struct {

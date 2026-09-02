@@ -274,9 +274,23 @@ function boundedFetch(expectedUrl: string, allowedAdapterUrl: string, onStatus: 
     if (response.status >= 300 && response.status < 400) return response
     const declaredLength = Number(response.headers.get('content-length') ?? '0')
     if (declaredLength > maximumResponseBytes) throw new ProviderGatewayError('unavailable')
-    const bytes = new Uint8Array(await response.arrayBuffer())
-    if (bytes.byteLength > maximumResponseBytes) throw new ProviderGatewayError('unavailable')
-    return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers })
+    if (response.body === null) return response
+    let received = 0
+    const boundedBody = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        received += chunk.byteLength
+        if (received > maximumResponseBytes) {
+          controller.error(new ProviderGatewayError('unavailable'))
+          return
+        }
+        controller.enqueue(chunk)
+      },
+    }))
+    return new Response(boundedBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    })
   }
 }
 
@@ -485,6 +499,12 @@ export function assistantStreamChat(request: AssistantStreamRequest): AssistantM
   const allowedAdapterUrl = sdkRequestUrl(request.protocol, baseUrl)
   const model = assistantModel(request, baseUrl)
   const verify = verifyOutboundReasoning(request.protocol, request.reasoning)
+  const remainingMs = request.deadlineAt.getTime() - Date.now()
+  if (remainingMs <= 0) throw new ProviderGatewayError('unavailable')
+  const deadlineSignal = AbortSignal.timeout(remainingMs)
+  const signal = request.signal === undefined
+    ? deadlineSignal
+    : AbortSignal.any([deadlineSignal, request.signal])
   const base = {
     apiKey: request.apiKey,
     maxRetries: 0,
@@ -493,9 +513,10 @@ export function assistantStreamChat(request: AssistantStreamRequest): AssistantM
       verify(payload)
       return undefined
     },
-    ...(request.signal === undefined ? {} : { signal: request.signal }),
+    signal,
+    timeoutMs: remainingMs,
   }
-  const maxTokens = Math.min(request.maxOutputTokens, request.maxOutputTokens)
+  const maxTokens = request.maxOutputTokens
   if (request.protocol === 'anthropic-messages') {
     const budget = anthropicBudgetFor(request.reasoning)
     if (request.reasoning !== 'off') {

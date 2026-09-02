@@ -294,7 +294,7 @@ apps/api/migrations/008_v3_knowledge_assistant.sql
 - Go pgx pool使用 `github.com/pgvector/pgvector-go`/`pgx` 注册 vector 类型；实施时固定 `v0.4.1`，由 Backend owner 更新 `go.mod/go.sum`。
 - 仍是原 PostgreSQL 18 数据卷和唯一数据库，不创建第二数据库。
 
-008 down 只删除 V3 FK/index/table/options，确认无其他依赖后 `DROP EXTENSION IF EXISTS vector`，并把 schema version 恢复 7；不得删除/重写一期笔记、Provider、Artifact 或 AI Task 历史。镜像回退验证必须先执行 down，再用原 PostgreSQL 18 镜像启动同一数据副本。
+008 down 只删除 V3 FK/index/table/options，并把 schema version 恢复 7；`CREATE EXTENSION IF NOT EXISTS` 无法证明扩展由本迁移创建，因此 down 保留共享的 `vector` 扩展。不得删除/重写一期笔记、Provider、Artifact 或 AI Task 历史。镜像回退验证必须先执行 down，再用原 PostgreSQL 18 镜像启动同一数据副本。
 
 上线前必须先在现有数据副本上验证 PostgreSQL 18 数据目录能由目标 pgvector 镜像正常启动、迁移和回滚；这项验证不能被普通单元测试代替。它不授权访问生产服务器或备份仓库。
 
@@ -418,8 +418,8 @@ unconfigured | indexing | ready | failed | disabled
 - 状态：`queued/running/succeeded/failed/stopped`，以及当前 `phase`：`rewrite/embedding/retrieval/answer/finalizing`。
 - 模型快照：Provider ID/名称、model ID/名称、上游 model ID、协议、Base URL、context window、max output tokens；不复制 API Key 密文。
 - 思考快照：reasoning 值和显示名称，`NULL` 表示 off。
-- 安全/Prompt：`sensitive_policy`、只允许向更严格方向更新的 `effective_sensitive_policy`、`prompt_version`、`retrieval_version`。
-- 知识：`knowledge_state=ready/unavailable`；`evidence_state` 在检索判定前为 `NULL`，之后只能是 `matched/not_found/unavailable`，不增加 `pending` 枚举。
+- 安全/Prompt：`sensitive_policy`、只允许向更严格方向更新的 `effective_sensitive_policy`、`prompt_version`、`retrieval_version`、查询改写降级标记 `rewrite_fallback`。
+- 知识：`knowledge_state=ready/unavailable`；创建时 ready 还要把当时 generation 冻结到内部审计列 `knowledge_generation`，后续降级仍保留该代次且不得跨代检索；`evidence_state` 在检索判定前为 `NULL`，之后只能是 `matched/not_found/unavailable`，不增加 `pending` 枚举。
 - 租约：`claim_attempt`、`lease_owner`、`lease_version`、`lease_expires_at`、`heartbeat_at`、`stop_requested_at`。
 - 用量：`rewrite_input_tokens`、`rewrite_output_tokens`、`answer_input_tokens`、`answer_output_tokens`；Provider 未返回时为 NULL。
 - 耗时：rewrite/embedding/retrieval/reasoning/answer 毫秒及 `created_at/queued_at/started_at/finished_at`。
@@ -1076,6 +1076,9 @@ type AssistantRunDTO = {
     providerDisplayName: string
   }
   reasoning: {reasoning: Reasoning; displayName: string}
+  promptVersion: string
+  retrievalVersion: string
+  rewriteFallback: boolean
   knowledgeState: 'ready' | 'unavailable'
   evidenceState: 'matched' | 'not_found' | 'unavailable' | null
   usage: {
@@ -1112,7 +1115,7 @@ type RunStartResponseDTO = {
 }
 ```
 
-- phase 在尚未 claim 或已经终态时为 null；evidenceState 只在尚未判定检索时为 null。
+- phase 在尚未 claim 或已经终态时为 null；evidenceState 只在尚未判定检索时为 null；`rewriteFallback` 只表示查询改写失败后使用了用户原问题，不表示回答失败。
 - `providedSourceCount` 是真正送模的 S1–S8 数量；`citationCount` 是有效引用数，两者不得混用。
 - `canStop`/`canRetry` 由服务端按 §11 计算，Web 不自行重建状态机。
 - 创建和重试都返回 202 `RunStartResponseDTO`。完全相同的 clientRequestId 重放仍返回 202、原资源且 `idempotentReplay=true`；首次为 false。
@@ -1260,6 +1263,7 @@ type SourcesReadyEvent = {
   knowledgeState: 'ready' | 'unavailable'
   evidenceState: 'matched' | 'not_found' | 'unavailable'
   providedSourceCount: number
+  rewriteFallback: boolean
 }
 type ReasoningDeltaEvent = {sequence: number; delta: string}
 type ReasoningCompletedEvent = {sequence: number; durationMs: number}
@@ -1278,7 +1282,7 @@ type TerminalEvent = {sequence: number; run: AssistantRunDTO}
 |---|---|
 | `snapshot` | `SnapshotEvent`，无 id、不占 sequence |
 | `run.status` | `RunStatusEvent` |
-| `sources.ready` | `SourcesReadyEvent`，只给状态和数量，不泄露未引用候选 |
+| `sources.ready` | `SourcesReadyEvent`，只给状态、数量和改写降级标记，不泄露未引用候选 |
 | `reasoning.delta` | `ReasoningDeltaEvent`，delta 非空 |
 | `reasoning.completed` | `ReasoningCompletedEvent` |
 | `answer.delta` | `AnswerDeltaEvent`，delta 非空且不含原始 `[[S` 或 `[[C` |
@@ -1316,6 +1320,10 @@ type TemporaryRunStatusEvent = {
   status: 'running'
   phase: RunPhase | null
 }
+type TemporarySourcesReadyEvent = SourcesReadyEvent & {
+  promptVersion: string
+  retrievalVersion: string
+}
 type TemporaryTerminalEvent = {
   sequence: number
   status: 'succeeded' | 'failed' | 'stopped'
@@ -1326,7 +1334,7 @@ type TemporaryTerminalEvent = {
 }
 ```
 
-- 复用 `run.status`、reasoning/answer、`answer.citation`、usage 和三种 terminal 名称，但 status payload 不携带持久 Run/Message ID。
+- 复用 `run.status`、reasoning/answer、`answer.citation`、usage 和三种 terminal 名称，但 status payload 不携带持久 Run/Message ID；临时 `sources.ready` 额外携带 Prompt/检索版本，供内存运行信息展示。
 - `answer.citation` 的 source 形状为 `Omit<AssistantSourceDTO,'runId'>`，是临时抽屉的唯一来源数据；仍只在实际引用时发送，不能发送未引用候选。
 - 三种 terminal 使用 `TemporaryTerminalEvent`；只有 succeeded 的 temporarySummary 可以非 null。非 null 时浏览器替换内存摘要，null 表示沿用请求中的旧摘要，不表示清空。
 - SSE 头之前的请求/模型/敏感校验失败返回普通 JSON ErrorEnvelope；头之后的 Provider/引用/协议失败发送 `run.failed`。
@@ -1425,7 +1433,7 @@ UI 追求 ChatGPT 网页版同等级的对话流畅度，但不复制其品牌�
 - reasoning 仅在 Provider 返回时出现。
 - 生成时展开；第一个 answer delta 到达时折叠；完成后默认折叠。
 - 引用形如 `[1]`、`[2]`，点击打开来源抽屉；抽屉显示标题、摘录、来源类型和“打开笔记”。
-- 每条回答底部可展开运行信息；Provider 未返回 token 时显示“未提供”，不估算。
+- 每条回答底部可展开运行信息，展示 Prompt/检索版本和查询改写是否降级；Provider 未返回 token 时显示“未提供”，不估算。
 
 ### 17.7 首次和异常状态
 

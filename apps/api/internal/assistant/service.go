@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -51,6 +52,9 @@ type Service struct {
 	httpClient                *http.Client
 	now                       func() time.Time
 	broadcast                 *broadcaster
+	temporaryMu               sync.Mutex
+	temporarySequence         uint64
+	temporaryRuns             map[uint64]temporaryRunRegistration
 }
 
 // NewService constructs the assistant module. The pgxpool must have pgvector
@@ -71,6 +75,7 @@ func NewService(
 		httpClient:                &http.Client{},
 		now:                       time.Now,
 		broadcast:                 newBroadcaster(),
+		temporaryRuns:             make(map[uint64]temporaryRunRegistration),
 	}
 }
 

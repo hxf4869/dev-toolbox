@@ -80,18 +80,28 @@ func (service *Service) patchFolder(response http.ResponseWriter, request *http.
 	if !ok {
 		return
 	}
-	tag, err := service.database.Exec(request.Context(), `
-		UPDATE assistant_folders SET name = $2, updated_at = $3 WHERE id = $1
-	`, id, name, service.now().UTC())
+	var folder AssistantFolderDTO
+	err = service.database.QueryRow(request.Context(), `
+		WITH updated AS (
+			UPDATE assistant_folders SET name = $2, updated_at = $3 WHERE id = $1
+			RETURNING id, name, created_at, updated_at
+		)
+		SELECT updated.id, updated.name, count(conversation.id), updated.created_at, updated.updated_at
+		FROM updated
+		LEFT JOIN assistant_conversations conversation ON conversation.folder_id = updated.id
+		GROUP BY updated.id, updated.name, updated.created_at, updated.updated_at
+	`, id, name, service.now().UTC()).Scan(
+		&folder.ID, &folder.Name, &folder.ConversationCount, &folder.CreatedAt, &folder.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeAssistantNotFound(response, request)
+		return
+	}
 	if err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
-	if tag.RowsAffected() != 1 {
-		writeAssistantNotFound(response, request)
-		return
-	}
-	httpapi.WriteJSON(response, http.StatusOK, AssistantFolderDTO{ID: id, Name: name})
+	httpapi.WriteJSON(response, http.StatusOK, folder)
 }
 
 type deleteFolderInput struct {

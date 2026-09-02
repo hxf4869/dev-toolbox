@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { CitationParser } from './citation-parser.js'
+import { StreamRedactor } from './stream-redactor.js'
 
 // Redact-all helper: run a stream through the parser in one chunk.
 function parseOnce(text: string, maxOrdinal = 8): { text: string; citations: number[]; invalid: string | null } {
@@ -79,5 +80,13 @@ describe('CitationParser', () => {
     expect(events.map((event) => event.kind)).toEqual([
       'text', 'citation', 'text', 'citation', 'text',
     ])
+  })
+
+  it('rejects a forged token held entirely in the redactor tail', () => {
+    const redactor = new StreamRedactor()
+    const parser = new CitationParser(1)
+    expect(parser.push(redactor.push('前缀 [[C1]]'))).toEqual([])
+    const results = [...parser.push(redactor.flush()), ...parser.flush()]
+    expect(results.some((result) => result.kind === 'invalid')).toBe(true)
   })
 })

@@ -24,6 +24,18 @@ type sseWriter struct {
 	flusher http.Flusher
 }
 
+func (stream *sseWriter) write(event string, payload any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stream.writer, "event: %s\ndata: %s\n\n", event, encoded); err != nil {
+		return err
+	}
+	stream.flusher.Flush()
+	return nil
+}
+
 func (stream *sseWriter) writeID(event, id string, payload any) error {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -82,7 +94,7 @@ func (service *Service) runEventsStream(response http.ResponseWriter, request *h
 		return
 	}
 	lastSequence := snapshotData.LastSequence
-	if err := stream.writeID("snapshot", "", snapshotData.Payload); err != nil {
+	if err := stream.write("snapshot", snapshotData.Payload); err != nil {
 		return
 	}
 	if snapshotData.Terminal {
@@ -153,6 +165,17 @@ func parseAfterParameter(request *http.Request, querier rowQuerier, runID uuid.U
 	if value == nil {
 		value = queryValue
 	}
+	if value != nil {
+		var maximum int64
+		if err := querier.QueryRow(request.Context(), `
+			SELECT COALESCE(max(sequence), 0) FROM assistant_run_events WHERE run_id = $1
+		`, runID).Scan(&maximum); err != nil {
+			return nil, err
+		}
+		if *value > maximum {
+			return nil, errors.New("after exceeds current sequence")
+		}
+	}
 	return value, nil
 }
 
@@ -220,6 +243,14 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 	if err != nil {
 		return nil, false, err
 	}
+	sources, err := service.loadRunSources(ctx, tx, runID)
+	if err != nil {
+		return nil, false, err
+	}
+	sourcesByOrdinal := make(map[int]sourceRow, len(sources))
+	for _, source := range sources {
+		sourcesByOrdinal[source.Ordinal] = source
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT sequence, event_type, payload FROM assistant_run_events
 		WHERE run_id = $1 AND sequence > $2 ORDER BY sequence
@@ -241,6 +272,32 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 			return nil, false, err
 		}
 		event.Type = rawType
+		event.Payload["sequence"] = event.Sequence
+		switch rawType {
+		case "run.status":
+			phase := event.Payload["phase"]
+			event.Payload = map[string]any{
+				"sequence": event.Sequence, "status": "running", "phase": phase,
+				"stopRequested": run.StopRequestedAt != nil,
+			}
+		case "answer.citation":
+			ordinalValue, ok := event.Payload["sourceOrdinal"].(float64)
+			if !ok {
+				rows.Close()
+				return nil, false, errors.New("invalid stored citation event")
+			}
+			source, ok := sourcesByOrdinal[int(ordinalValue)]
+			if !ok || source.CitedNumber == nil {
+				rows.Close()
+				return nil, false, errors.New("citation source missing")
+			}
+			citationNumber := *source.CitedNumber
+			event.Payload = map[string]any{
+				"sequence": event.Sequence, "citationNumber": citationNumber,
+				"token":  "[[C" + itoa(citationNumber) + "]]",
+				"source": service.sourceDTO(run, source, citationNumber),
+			}
+		}
 		events = append(events, event)
 	}
 	rows.Close()
@@ -248,12 +305,13 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 		return nil, false, err
 	}
 	terminal := false
+	var terminalRunDTO *AssistantRunDTO
 	if run.isTerminal() {
-		// Find whether the terminal event was already emitted as an event row.
-		terminal, err = service.terminalEventEmitted(ctx, tx, run)
+		dto, err := service.runDTO(ctx, tx, run)
 		if err != nil {
 			return nil, false, err
 		}
+		terminalRunDTO = &dto
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, err
@@ -263,10 +321,6 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 		if last := len(events); last > 0 && isTerminalType(events[last-1].Type) {
 			terminal = true
 		} else {
-			runDTO, err := service.runDTO(ctx, service.database, run)
-			if err != nil {
-				return nil, false, err
-			}
 			next := after
 			if len(events) > 0 {
 				next = events[len(events)-1].Sequence
@@ -280,7 +334,7 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 			}
 			events = append(events, readEvent{
 				Sequence: next + 1, Type: eventType,
-				Payload: map[string]any{"sequence": next + 1, "run": runDTO},
+				Payload: map[string]any{"sequence": next + 1, "run": *terminalRunDTO},
 			})
 			terminal = true
 		}
@@ -290,13 +344,4 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 
 func isTerminalType(value string) bool {
 	return value == "run.completed" || value == "run.stopped" || value == "run.failed"
-}
-
-func (service *Service) terminalEventEmitted(ctx context.Context, tx pgx.Tx, run runRow) (bool, error) {
-	var count int
-	err := tx.QueryRow(ctx, `
-		SELECT count(*) FROM assistant_run_events
-		WHERE run_id = $1 AND event_type IN ('run.completed', 'run.stopped', 'run.failed')
-	`, run.ID).Scan(&count)
-	return count > 0, err
 }

@@ -2,10 +2,10 @@ package assistant
 
 import (
 	"context"
-	"strings"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,9 +34,9 @@ type claimRunSummary struct {
 }
 
 type claimRunContext struct {
-	Summary  *claimRunSummary `json:"summary"`
+	Summary  *claimRunSummary  `json:"summary"`
 	Messages []claimRunMessage `json:"messages"`
-	Question string           `json:"question"`
+	Question string            `json:"question"`
 	// SummarySource carries the oldest successful messages to compress when the
 	// rolling summary must be regenerated (docs/16 §10.3); nil otherwise.
 	SummarySource *claimSummarySource `json:"summarySource"`
@@ -49,12 +49,12 @@ type claimSummarySource struct {
 
 type claimRunResult struct {
 	Run struct {
-		ID             uuid.UUID `json:"id"`
-		ConversationID uuid.UUID `json:"conversationId"`
+		ID              uuid.UUID `json:"id"`
+		ConversationID  uuid.UUID `json:"conversationId"`
 		OutputMessageID uuid.UUID `json:"outputMessageId"`
-		LeaseVersion   int       `json:"leaseVersion"`
-		StopRequested  bool      `json:"stopRequested"`
-		ExpiresAt      time.Time `json:"expiresAt"`
+		LeaseVersion    int       `json:"leaseVersion"`
+		StopRequested   bool      `json:"stopRequested"`
+		ExpiresAt       time.Time `json:"expiresAt"`
 	} `json:"run"`
 	Model struct {
 		ID                  uuid.UUID `json:"id"`
@@ -72,15 +72,15 @@ type claimRunResult struct {
 	SensitivePolicy  string          `json:"sensitivePolicy"`
 	PromptVersion    string          `json:"promptVersion"`
 	RetrievalVersion string          `json:"retrievalVersion"`
-	Knowledge struct {
+	Knowledge        struct {
 		State      string `json:"state"`
 		Generation *int64 `json:"generation"`
 		// Embedding connection snapshot for the query embedding call; lives
 		// only in this lease's memory (docs/16 §7.2).
-		BaseURL    string  `json:"baseUrl"`
-		APIKey     string  `json:"apiKey"`
-		ModelID    string  `json:"modelId"`
-		Dimensions *int    `json:"dimensions"`
+		BaseURL    string `json:"baseUrl"`
+		APIKey     string `json:"apiKey"`
+		ModelID    string `json:"modelId"`
+		Dimensions *int   `json:"dimensions"`
 	} `json:"knowledge"`
 	Context claimRunContext `json:"context"`
 }
@@ -133,12 +133,13 @@ func (service *Service) claimRun(response http.ResponseWriter, request *http.Req
 		return
 	}
 	claimAttempt := 0
+	leaseExpiresAt := now.Add(runLeaseDuration)
 	if err := tx.QueryRow(ctx, `
 		UPDATE assistant_runs SET status = 'running', claim_attempt = claim_attempt + 1,
 		       lease_owner = $2, lease_version = claim_attempt + 1, lease_expires_at = $3,
-		       heartbeat_at = $3, started_at = COALESCE(started_at, $3)
+		       heartbeat_at = $4, started_at = COALESCE(started_at, $4)
 		WHERE id = $1 RETURNING claim_attempt
-	`, run.ID, input.WorkerID, now.Add(runLeaseDuration)).Scan(&claimAttempt); err != nil {
+	`, run.ID, input.WorkerID, leaseExpiresAt, now).Scan(&claimAttempt); err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
@@ -175,34 +176,69 @@ func (service *Service) claimRun(response http.ResponseWriter, request *http.Req
 		response.WriteHeader(http.StatusNoContent)
 		return
 	}
-	config, err := service.loadEmbeddingConfig(ctx, tx)
-	if err != nil {
-		writeAssistantInternalFailure(response, request)
+	if run.EffectivePolicy == "block" && claimContextMatchesSensitivePattern(*claimContext) {
+		code := "ASSISTANT_SENSITIVE_INPUT_BLOCKED"
+		detail := "待发送上下文命中敏感信息规则"
+		if run.EffectivePolicy != run.SensitivePolicy {
+			code = "ASSISTANT_SENSITIVE_POLICY_CHANGED"
+			detail = "全局敏感策略收紧后，待发送上下文不再允许外发"
+		}
+		if err := service.failRunInTx(ctx, tx, run, code, detail, now, false); err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
+		if tx.Commit(ctx) != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
+		service.broadcast.notify(run.ID)
+		response.WriteHeader(http.StatusNoContent)
 		return
 	}
 	knowledge := struct {
 		State      string `json:"state"`
 		Generation *int64 `json:"generation"`
-		BaseURL    string  `json:"baseUrl"`
-		APIKey     string  `json:"apiKey"`
-		ModelID    string  `json:"modelId"`
-		Dimensions *int    `json:"dimensions"`
+		BaseURL    string `json:"baseUrl"`
+		APIKey     string `json:"apiKey"`
+		ModelID    string `json:"modelId"`
+		Dimensions *int   `json:"dimensions"`
 	}{State: run.KnowledgeState}
-	if run.KnowledgeState == "ready" && config.Enabled && config.Configured {
-		generation := config.Generation
-		knowledge.Generation = &generation
-		knowledge.ModelID = strings.TrimSpace(deref(config.ModelID))
-		knowledge.BaseURL = deref(config.BaseURL)
-		knowledge.Dimensions = config.Dimensions
-		if ciphertext := service.loadEmbeddingCiphertext(ctx, tx); ciphertext != nil {
-			if apiKey, err := secretbox.Open(service.masterKey, ciphertext); err == nil {
-				knowledge.APIKey = apiKey
+	if run.KnowledgeState == "ready" && run.KnowledgeGeneration != nil {
+		computation, err := service.computeIndexStatus(ctx, tx)
+		if err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
+		config := computation.config
+		if computation.status == "ready" && config.Generation == *run.KnowledgeGeneration {
+			generation := *run.KnowledgeGeneration
+			knowledge.Generation = &generation
+			knowledge.ModelID = strings.TrimSpace(deref(config.ModelID))
+			knowledge.BaseURL = deref(config.BaseURL)
+			knowledge.Dimensions = config.Dimensions
+			if ciphertext := service.loadEmbeddingCiphertext(ctx, tx); ciphertext != nil {
+				if embeddingKey, openErr := secretbox.Open(service.masterKey, ciphertext); openErr == nil {
+					knowledge.APIKey = embeddingKey
+				}
 			}
 		}
-	} else if run.KnowledgeState == "ready" {
-		// Index became unavailable between creation and claim; retrieval will
-		// only degrade, never upgrade.
+	}
+	if run.KnowledgeState == "ready" && (knowledge.Generation == nil || knowledge.APIKey == "") {
+		// A ready decision is frozen to its creation-time generation. Any later
+		// generation/config/completeness change can only degrade this run.
+		knowledge.State = "unavailable"
 		knowledge.Generation = nil
+		knowledge.BaseURL = ""
+		knowledge.APIKey = ""
+		knowledge.ModelID = ""
+		knowledge.Dimensions = nil
+		if _, err := tx.Exec(ctx, `
+			UPDATE assistant_runs SET knowledge_state = 'unavailable', evidence_state = 'unavailable'
+			WHERE id = $1
+		`, run.ID); err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		writeAssistantInternalFailure(response, request)
@@ -214,7 +250,7 @@ func (service *Service) claimRun(response http.ResponseWriter, request *http.Req
 	result.Run.OutputMessageID = run.OutputMessageID
 	result.Run.LeaseVersion = claimAttempt
 	result.Run.StopRequested = run.StopRequestedAt != nil
-	result.Run.ExpiresAt = now.Add(runLeaseDuration)
+	result.Run.ExpiresAt = leaseExpiresAt
 	result.Model.ID = run.ModelID
 	result.Model.DisplayName = run.ModelDisplayName
 	result.Model.UpstreamModelID = run.UpstreamModelID
@@ -364,7 +400,7 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 	if output.Status != "streaming" {
 		return nil, errors.New("output message not streaming")
 	}
-	budget := contextBudgetTokens(run.ContextWindow, run.MaxOutputTokens)
+	budget := inputContextBudgetTokens(run.ContextWindow, run.MaxOutputTokens)
 
 	var summaryContent []byte
 	hasSummary := false
@@ -378,10 +414,18 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 	// The current question always stays; it reserves its budget first.
 	question := input.Content
 	budget -= estimateTokens(question)
-	if budget <= 0 {
+	if budget < 0 {
 		return nil, nil
 	}
 	context := claimRunContext{Messages: []claimRunMessage{}, Question: question}
+	// Sources outrank history. Reserve as much of the frozen maximum source
+	// headroom as this model can hold, but never reject a question merely
+	// because the model cannot fit eight maximum-sized sources.
+	sourceHeadroom := MaximumRunSources * 8192 / 3
+	if sourceHeadroom > budget {
+		sourceHeadroom = budget
+	}
+	budget -= sourceHeadroom
 	if hasSummary {
 		var summary claimRunSummary
 		if err := json.Unmarshal(summaryContent, &summary); err != nil {
@@ -491,13 +535,37 @@ func (service *Service) summarySourceFor(history []historyEntry, summarizedThrou
 // contextBudgetTokens reserves the system prompt, sources headroom, answer
 // output and a safety margin from the model context window.
 func contextBudgetTokens(contextWindow, maxOutputTokens int) int {
-	// Sources can each reach 8 KiB; reserve the worst case for eight of them.
-	sourceHeadroom := MaximumRunSources * 8192 / 3
-	budget := contextWindow - maxOutputTokens - systemPromptTokenEstimate - contextSafetyTokens - sourceHeadroom
+	budget := inputContextBudgetTokens(contextWindow, maxOutputTokens) - MaximumRunSources*8192/3
 	if budget < 0 {
 		budget = 0
 	}
 	return budget
+}
+
+func inputContextBudgetTokens(contextWindow, maxOutputTokens int) int {
+	budget := contextWindow - maxOutputTokens - systemPromptTokenEstimate - contextSafetyTokens
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
+func claimContextMatchesSensitivePattern(value claimRunContext) bool {
+	if contentMatchesSensitivePattern(value.Question) {
+		return true
+	}
+	if value.Summary != nil {
+		encoded, err := json.Marshal(value.Summary)
+		if err != nil || contentMatchesSensitivePattern(string(encoded)) {
+			return true
+		}
+	}
+	for _, message := range value.Messages {
+		if contentMatchesSensitivePattern(message.Content) {
+			return true
+		}
+	}
+	return false
 }
 
 // estimateTokens is a deliberately conservative CJK-first estimate: at most

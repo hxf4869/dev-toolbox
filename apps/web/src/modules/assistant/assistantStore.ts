@@ -38,6 +38,9 @@ export interface TemporaryRuntimeInfo {
   phase: AssistantRunDTO['phase']
   model: AssistantRunDTO['model']
   reasoning: AssistantRunDTO['reasoning']
+  promptVersion: string | null
+  retrievalVersion: string | null
+  rewriteFallback: boolean
   knowledgeState: 'ready' | 'unavailable'
   evidenceState: EvidenceState | null
   usage: AssistantRunDTO['usage']
@@ -459,6 +462,9 @@ export const useAssistantStore = defineStore('assistant', () => {
           reasoning: selectedReasoning.value,
           displayName: reasoningOption?.displayName ?? '不思考',
         },
+        promptVersion: null,
+        retrievalVersion: null,
+        rewriteFallback: false,
         knowledgeState: bootstrap.value?.knowledge.available ? 'ready' : 'unavailable',
         evidenceState: null,
         usage: emptyUsage(),
@@ -657,6 +663,9 @@ export const useAssistantStore = defineStore('assistant', () => {
       ...message.temporaryRuntime,
       status: state.status === 'idle' ? 'running' : state.status,
       phase: state.phase,
+      promptVersion: state.promptVersion,
+      retrievalVersion: state.retrievalVersion,
+      rewriteFallback: state.rewriteFallback,
       knowledgeState: knowledge.knowledgeState,
       evidenceState: knowledge.evidenceState,
       usage: state.usage,

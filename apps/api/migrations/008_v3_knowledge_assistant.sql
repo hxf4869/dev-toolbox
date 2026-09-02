@@ -170,7 +170,9 @@ CREATE TABLE assistant_runs (
     effective_sensitive_policy text NOT NULL CHECK (effective_sensitive_policy IN ('block', 'redact', 'allow')),
     prompt_version text NOT NULL CHECK (char_length(prompt_version) BETWEEN 1 AND 80),
     retrieval_version text NOT NULL CHECK (char_length(retrieval_version) BETWEEN 1 AND 80),
+    rewrite_fallback boolean NOT NULL DEFAULT false,
     knowledge_state text NOT NULL CHECK (knowledge_state IN ('ready', 'unavailable')),
+    knowledge_generation bigint CHECK (knowledge_generation IS NULL OR knowledge_generation >= 1),
     evidence_state text CHECK (evidence_state IS NULL OR evidence_state IN (
         'matched', 'not_found', 'unavailable'
     )),
@@ -270,4 +272,5 @@ DROP INDEX IF EXISTS assistant_model_preferences_recent_idx;
 DROP TABLE IF EXISTS assistant_model_preferences;
 DROP INDEX IF EXISTS provider_model_reasoning_options_display_name;
 DROP TABLE IF EXISTS provider_model_reasoning_options;
-DROP EXTENSION IF EXISTS vector;
+-- Keep the vector extension: CREATE EXTENSION IF NOT EXISTS cannot establish
+-- that this migration owns a pre-existing cluster-level extension.

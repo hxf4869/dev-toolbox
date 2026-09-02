@@ -93,7 +93,11 @@ func (service *Service) loadConversationDTO(ctx context.Context, querier rowQuer
 	if latestRunID != nil {
 		run, err := service.loadRun(ctx, querier, *latestRunID)
 		if err == nil {
-			summary := runSummaryDTO(run)
+			canRetry, err := service.runRetryable(ctx, querier, run)
+			if err != nil {
+				return AssistantConversationDTO{}, err
+			}
+			summary := runSummaryDTO(run, canRetry)
 			latestRun = &summary
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return AssistantConversationDTO{}, err
@@ -134,10 +138,10 @@ func stripCitationTokens(content string) string {
 	return output.String()
 }
 
-func runSummaryDTO(run runRow) RunSummaryDTO {
+func runSummaryDTO(run runRow, canRetry bool) RunSummaryDTO {
 	return RunSummaryDTO{
 		ID: run.ID, Status: run.Status, Phase: run.Phase, StopRequested: run.StopRequestedAt != nil,
-		CanStop: run.canStop(), Error: run.errorDTO(), CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt,
+		CanStop: run.canStop(), CanRetry: canRetry, Error: run.errorDTO(), CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt,
 	}
 }
 
@@ -292,12 +296,12 @@ func parseFolderFilter(raw string) (*uuid.UUID, error) {
 func itoa(value int) string { return strconv.Itoa(value) }
 
 type patchConversationInput struct {
-	Title     *string    `json:"title"`
+	Title     *string     `json:"title"`
 	FolderID  **uuid.UUID `json:"folderId"`
-	Pinned    *bool      `json:"pinned"`
-	Archived  *bool      `json:"archived"`
-	ModelID   *uuid.UUID `json:"modelId"`
-	Reasoning *string    `json:"reasoning"`
+	Pinned    *bool       `json:"pinned"`
+	Archived  *bool       `json:"archived"`
+	ModelID   *uuid.UUID  `json:"modelId"`
+	Reasoning *string     `json:"reasoning"`
 }
 
 func (service *Service) patchConversation(response http.ResponseWriter, request *http.Request) {

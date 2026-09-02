@@ -91,7 +91,11 @@ export class AssistantRunner {
     heartbeat: RunHeartbeat,
   ): Promise<void> {
     const deadline = Date.now() + maximumAnswerRuntimeMs
-    let query = claim.context.question
+    let query = redactProviderInput(
+      claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
+      claim.context.question,
+    )
+    let rewriteFallback = false
     let queryVector: number[] = []
     let evidenceState = 'unavailable'
     let sources: readonly RetrievalSourcePayload[] = []
@@ -99,12 +103,15 @@ export class AssistantRunner {
     if (claim.knowledge.state === 'ready' && claim.knowledge.generation !== null) {
       // Query rewrite only from the second round; first round uses the raw question.
       if (claim.context.messages.length > 0) {
+        await this.emitPhase(claim, heartbeat, 'rewrite')
         const rewritten = await this.rewriteQuery(claim, heartbeat.signal)
         query = rewritten.query
+        rewriteFallback = rewritten.fallback
         usage.rewriteInputTokens = rewritten.inputTokens
         usage.rewriteOutputTokens = rewritten.outputTokens
         timings.rewriteMs = rewritten.durationMs
       }
+      await this.emitPhase(claim, heartbeat, 'embedding')
       const embeddingStarted = performance.now()
       const embedding = await generateEmbeddings({
         baseUrl: claim.knowledge.baseUrl,
@@ -121,6 +128,7 @@ export class AssistantRunner {
       timings.embeddingMs = Math.round(performance.now() - embeddingStarted)
       if (embedding !== null && embedding.embeddings.length === 1) {
         queryVector = [...embedding.embeddings[0]!]
+        await this.emitPhase(claim, heartbeat, 'retrieval')
         const retrievalStarted = performance.now()
         const result = await this.client.retrieval(
           claim.run.id, claim.run.leaseVersion, claim.knowledge.generation, query, queryVector, heartbeat.signal,
@@ -130,22 +138,23 @@ export class AssistantRunner {
         sources = result.sources
         await this.emit(claim, heartbeat, [{
           eventId: randomUUID(), type: 'sources.ready',
-          payload: { knowledgeState: 'ready', evidenceState, providedSourceCount: sources.length },
+          payload: { knowledgeState: 'ready', evidenceState, providedSourceCount: sources.length, rewriteFallback },
         }])
       } else {
         evidenceState = 'unavailable'
         await this.emit(claim, heartbeat, [{
           eventId: randomUUID(), type: 'sources.ready',
-          payload: { knowledgeState: 'unavailable', evidenceState, providedSourceCount: 0 },
+          payload: { knowledgeState: 'unavailable', evidenceState, providedSourceCount: 0, rewriteFallback },
         }])
       }
     } else {
       await this.emit(claim, heartbeat, [{
         eventId: randomUUID(), type: 'sources.ready',
-        payload: { knowledgeState: 'unavailable', evidenceState, providedSourceCount: 0 },
+        payload: { knowledgeState: 'unavailable', evidenceState, providedSourceCount: 0, rewriteFallback },
       }])
     }
 
+    await this.emitPhase(claim, heartbeat, 'answer')
     await this.streamAnswer(claim, usage, timings, heartbeat, evidenceState, sources, deadline)
     await this.maintainTitleAndSummary(claim, heartbeat)
   }
@@ -153,16 +162,24 @@ export class AssistantRunner {
   private async rewriteQuery(
     claim: ClaimedAssistantRun,
     signal: AbortSignal,
-  ): Promise<{ query: string; inputTokens: number | null; outputTokens: number | null; durationMs: number }> {
+  ): Promise<{ query: string; inputTokens: number | null; outputTokens: number | null; durationMs: number; fallback: boolean }> {
     const started = performance.now()
+    const fallbackQuery = redactProviderInput(
+      claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
+      claim.context.question,
+    )
+    const inputRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
     const context = {
       systemPrompt: assistantSystemPrompt('ready', false) + '\n\n' +
         '现在只生成检索查询，不要回答问题。',
       messages: [
-        ...historyMessages(claim),
+        ...providerHistoryMessages(claim, inputRedactor),
         {
           role: 'user' as const,
-          content: '当前问题：' + claim.context.question + '\n只输出用于知识库检索的查询。',
+          content: redactProviderInput(
+            inputRedactor,
+            '当前问题：' + claim.context.question + '\n只输出用于知识库检索的查询。',
+          ),
           timestamp: Date.now(),
         },
       ],
@@ -186,10 +203,16 @@ export class AssistantRunner {
         const text = message.text.trim().slice(0, 64)
         if (text.length > 0) {
           return {
-            query: text,
+            // Query embedding is a separate Provider request and therefore
+            // gets its own redactor lifecycle (docs/16 §6.2).
+            query: redactProviderInput(
+              claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
+              text,
+            ),
             inputTokens: message.usage.input,
             outputTokens: message.usage.output,
             durationMs: Math.round(performance.now() - started),
+            fallback: false,
           }
         }
         break
@@ -199,7 +222,10 @@ export class AssistantRunner {
       }
     }
     // Rewrite failure falls back to the raw question with rewriteFallback.
-    return { query: claim.context.question, inputTokens: null, outputTokens: null, durationMs: Math.round(performance.now() - started) }
+    return {
+      query: fallbackQuery, inputTokens: null, outputTokens: null,
+      durationMs: Math.round(performance.now() - started), fallback: true,
+    }
   }
 
   private async streamAnswer(
@@ -241,16 +267,13 @@ export class AssistantRunner {
   ): Promise<void> {
     const noteOnly = isNoteOnlyRequest(claim.context.question)
     const systemPrompt = assistantSystemPrompt(evidenceState, noteOnly)
+    const outbound = providerAnswerMessages(claim, sources)
     const context = {
       systemPrompt,
-      messages: [
-        ...historyMessages(claim),
-        ...(sources.length > 0 ? [sourceBlockMessage(sources)] : []),
-        { role: 'user' as const, content: claim.context.question, timestamp: Date.now() },
-      ],
+      messages: outbound,
     }
-    const answerStarted = performance.now()
     const reasoningStarted = performance.now()
+    let answerStarted: number | null = null
     let reasoningSeen = false
     let answerSeen = false
 
@@ -297,6 +320,7 @@ export class AssistantRunner {
         continue
       }
       if (event.type === 'text_delta') {
+        if (answerStarted === null) answerStarted = performance.now()
         if (reasoningSeen && !answerSeen) {
           answerSeen = true
           timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
@@ -309,47 +333,20 @@ export class AssistantRunner {
         // Output redaction precedes citation parsing; any reserved prefix is a
         // hard protocol failure (docs/16 §8.11).
         const redacted = redactor.push(event.delta)
-        const results = parser.push(redacted)
-        for (const result of results) {
-          if (result.kind === 'text') {
-            if (result.text.length > 0) {
-              onDelta(true)
-              await flusher.push('answer.delta', { delta: result.text })
-            }
-          } else if (result.kind === 'citation') {
-            onDelta(true)
-            await flusher.push('answer.citation', { sourceOrdinal: result.ordinal })
-          } else {
-            throw new AssistantExecutionError('ASSISTANT_CITATION_INVALID', result.reason)
-          }
-        }
+        await submitCitationResults(parser.push(redacted), flusher, onDelta)
         continue
       }
     }
-    timings.answerMs = Math.round(performance.now() - answerStarted)
+    timings.answerMs = answerStarted === null ? null : Math.round(performance.now() - answerStarted)
     const reasoningTail = reasoner.flush()
-    if (!answerSeen && reasoningTail.length > 0) {
-      await flusher.push('reasoning.delta', { delta: reasoningTail })
+    if (!answerSeen && reasoningSeen) {
+      timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
+      if (reasoningTail.length > 0) await flusher.push('reasoning.delta', { delta: reasoningTail })
       await flusher.push('reasoning.completed', { durationMs: timings.reasoningMs ?? 0 })
     }
-    const parseResults = parser.flush()
-    for (const result of parseResults) {
-      if (result.kind === 'invalid') {
-        throw new AssistantExecutionError('ASSISTANT_CITATION_INVALID', result.reason)
-      }
-      if (result.kind === 'text' && result.text.length > 0) {
-        onDelta(true)
-        await flusher.push('answer.delta', { delta: result.text })
-      }
-      if (result.kind === 'citation') {
-        onDelta(true)
-        await flusher.push('answer.citation', { sourceOrdinal: result.ordinal })
-      }
-    }
     const answerTail = redactor.flush()
-    if (answerTail.length > 0) {
-      await flusher.push('answer.delta', { delta: answerTail })
-    }
+    await submitCitationResults(parser.push(answerTail), flusher, onDelta)
+    await submitCitationResults(parser.flush(), flusher, onDelta)
     await flusher.push('usage.updated', {
       usage: {
         rewriteInputTokens: usage.rewriteInputTokens, rewriteOutputTokens: usage.rewriteOutputTokens,
@@ -360,6 +357,7 @@ export class AssistantRunner {
     if (!usageCaptured) {
       throw new AssistantExecutionError('ASSISTANT_PROVIDER_PROTOCOL_ERROR', 'Provider 未返回完整回答')
     }
+    await this.emitPhase(claim, heartbeat, 'finalizing')
     await this.client.completeRun(claim.run.id, claim.run.leaseVersion, usage, timings, heartbeat.signal)
   }
 
@@ -367,11 +365,20 @@ export class AssistantRunner {
     await this.client.events(claim.run.id, claim.run.leaseVersion, events, heartbeat.signal)
   }
 
+  private async emitPhase(
+    claim: ClaimedAssistantRun,
+    heartbeat: RunHeartbeat,
+    phase: 'rewrite' | 'embedding' | 'retrieval' | 'answer' | 'finalizing',
+  ): Promise<void> {
+    await this.emit(claim, heartbeat, [{ eventId: randomUUID(), type: 'run.status', payload: { phase } }])
+  }
+
   // Best-effort title after the first successful answer and summary upkeep.
   private async maintainTitleAndSummary(claim: ClaimedAssistantRun, heartbeat: RunHeartbeat): Promise<void> {
     const firstAnswer = claim.context.messages.filter((message) => message.role === 'assistant').length === 0
     if (firstAnswer) {
       try {
+        const titleRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
         const message = await collectAssistantTurn({
           protocol: claim.model.protocol,
           baseUrl: claim.model.baseUrl,
@@ -383,7 +390,11 @@ export class AssistantRunner {
           context: {
             systemPrompt: titlePrompt,
             messages: [
-              { role: 'user', content: claim.context.question, timestamp: Date.now() },
+              {
+                role: 'user',
+                content: redactProviderInput(titleRedactor, claim.context.question),
+                timestamp: Date.now(),
+              },
             ],
           },
           allowInsecureHttp: this.allowInsecureProviderHttp,
@@ -401,6 +412,7 @@ export class AssistantRunner {
     const summarySource = (claim.context as { summarySource?: { throughMessageSequence: number; messages: { role: string; content: string }[] } | null }).summarySource
     if (summarySource && summarySource.messages.length > 0) {
       try {
+        const summaryRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
         const message = await collectAssistantTurn({
           protocol: claim.model.protocol,
           baseUrl: claim.model.baseUrl,
@@ -414,7 +426,10 @@ export class AssistantRunner {
             messages: [
               {
                 role: 'user',
-                content: summarySource.messages.map((entry) => `${entry.role === 'user' ? '用户' : '助手'}: ${entry.content}`).join('\n\n'),
+                content: summarySource.messages.map((entry) => redactProviderInput(
+                  summaryRedactor,
+                  `${entry.role === 'user' ? '用户' : '助手'}: ${entry.content}`,
+                )).join('\n\n'),
                 timestamp: Date.now(),
               },
             ],
@@ -436,10 +451,56 @@ export class AssistantRunner {
   }
 }
 
-function historyMessages(claim: ClaimedAssistantRun): UserMessage[] {
-  return claim.context.messages.map((message) => ({
-    role: message.role as 'user' | 'assistant', content: message.content, timestamp: Date.now(),
-  }) as UserMessage)
+function providerHistoryMessages(
+  claim: ClaimedAssistantRun,
+  redactor: StreamRedactor | null = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
+): UserMessage[] {
+  const messages: UserMessage[] = []
+  if (claim.context.summary !== null) {
+    messages.push({
+      role: 'user',
+      content: redactProviderInput(
+        redactor,
+        '以下是当前会话的结构化摘要：\n' + JSON.stringify(claim.context.summary),
+      ),
+      timestamp: Date.now(),
+    })
+  }
+  for (const message of claim.context.messages) {
+    messages.push({
+      role: message.role as 'user' | 'assistant',
+      content: redactProviderInput(redactor, message.content),
+      timestamp: Date.now(),
+    } as UserMessage)
+  }
+  return messages
+}
+
+function providerAnswerMessages(
+  claim: ClaimedAssistantRun,
+  sources: readonly RetrievalSourcePayload[],
+): UserMessage[] {
+  const redactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
+  const messages = providerHistoryMessages(claim, redactor)
+  if (sources.length > 0) {
+    const redactedSources = sources.map((source) => ({
+      ...source,
+      title: redactProviderInput(redactor, source.title),
+      content: redactProviderInput(redactor, source.content),
+    }))
+    messages.push(sourceBlockMessage(redactedSources))
+  }
+  messages.push({
+    role: 'user',
+    content: redactProviderInput(redactor, claim.context.question),
+    timestamp: Date.now(),
+  })
+  return messages
+}
+
+function redactProviderInput(redactor: StreamRedactor | null, value: string): string {
+  if (redactor === null) return value
+  return redactor.push(value) + redactor.flush()
 }
 
 function sourceBlockMessage(sources: readonly RetrievalSourcePayload[]): UserMessage {
@@ -452,6 +513,25 @@ function sourceBlockMessage(sources: readonly RetrievalSourcePayload[]): UserMes
       lines.map((line, index) => `[[S${index + 1}]]\n${line}`).join('\n\n'),
     timestamp: Date.now(),
   } satisfies UserMessage
+}
+
+async function submitCitationResults(
+  results: ReturnType<CitationParser['push']>,
+  flusher: EventFlusher,
+  onDelta: (sent: boolean) => void,
+): Promise<void> {
+  for (const result of results) {
+    if (result.kind === 'invalid') {
+      throw new AssistantExecutionError('ASSISTANT_CITATION_INVALID', result.reason)
+    }
+    if (result.kind === 'text' && result.text.length > 0) {
+      onDelta(true)
+      await flusher.push('answer.delta', { delta: result.text })
+    } else if (result.kind === 'citation') {
+      onDelta(true)
+      await flusher.push('answer.citation', { sourceOrdinal: result.ordinal })
+    }
+  }
 }
 
 export function isNoteOnlyRequest(question: string): boolean {
@@ -532,15 +612,17 @@ async function collectAssistantTurn(request: Parameters<typeof assistantStreamCh
 }
 
 // EventFlusher batches small deltas by time and size before submitting.
-class EventFlusher {
+export class EventFlusher {
   #queue: AssistantEvent[] = []
   #bytes = 0
   #timer: ReturnType<typeof setTimeout> | null = null
   #pending: Promise<void> = Promise.resolve()
+  #failure: unknown = null
 
   constructor(private readonly submit: (events: readonly AssistantEvent[]) => Promise<void>) {}
 
   async push(type: string, payload: Record<string, unknown>): Promise<void> {
+    if (this.#failure !== null) throw this.#failure
     const event: AssistantEvent = { eventId: randomUUID(), type, payload }
     this.#queue.push(event)
     this.#bytes += JSON.stringify(payload).length
@@ -551,7 +633,9 @@ class EventFlusher {
     if (this.#timer === null) {
       this.#timer = setTimeout(() => {
         this.#timer = null
-        void this.drain()
+        void this.drain().catch((error: unknown) => {
+          if (this.#failure === null) this.#failure = error
+        })
       }, batchIntervalMs)
     }
   }
@@ -561,12 +645,19 @@ class EventFlusher {
       clearTimeout(this.#timer)
       this.#timer = null
     }
-    if (this.#queue.length === 0) return
-    const batch = this.#queue
-    this.#queue = []
-    this.#bytes = 0
-    this.#pending = this.#pending.then(() => this.submit(batch))
-    await this.#pending
+    if (this.#queue.length > 0) {
+      const batch = this.#queue
+      this.#queue = []
+      this.#bytes = 0
+      this.#pending = this.#pending.then(() => this.submit(batch))
+    }
+    try {
+      await this.#pending
+    } catch (error) {
+      if (this.#failure === null) this.#failure = error
+      throw error
+    }
+    if (this.#failure !== null) throw this.#failure
   }
 }
 
@@ -575,6 +666,7 @@ class RunHeartbeat {
   readonly #controller = new AbortController()
   #timer: ReturnType<typeof setTimeout> | undefined
   #stopped = false
+  readonly #shutdownAbort: (() => void) | null
   leaseLost = false
   stopRequested = false
 
@@ -583,10 +675,15 @@ class RunHeartbeat {
     private readonly claim: ClaimedAssistantRun,
     private readonly shutdownSignal?: AbortSignal,
   ) {
-    shutdownSignal?.addEventListener('abort', () => {
+    this.#shutdownAbort = shutdownSignal === undefined ? null : () => {
       this.leaseLost = true
       this.#controller.abort(this.shutdownSignal?.reason)
-    }, { once: true })
+    }
+    if (shutdownSignal?.aborted) {
+      this.#shutdownAbort?.()
+    } else if (this.#shutdownAbort !== null) {
+      shutdownSignal?.addEventListener('abort', this.#shutdownAbort, { once: true })
+    }
   }
 
   get signal(): AbortSignal {
@@ -600,6 +697,9 @@ class RunHeartbeat {
   stop(): void {
     this.#stopped = true
     if (this.#timer !== undefined) clearTimeout(this.#timer)
+    if (this.#shutdownAbort !== null) {
+      this.shutdownSignal?.removeEventListener('abort', this.#shutdownAbort)
+    }
   }
 
   private async tick(): Promise<void> {
