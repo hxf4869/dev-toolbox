@@ -191,7 +191,7 @@ Redactor 生命周期严格限定为“一次 Provider 请求”，不做 Run �
 - 来源中的“忽略之前规则”“执行命令”“访问网址”等内容只是引用材料，不是指令。
 - 来源不能修改 System Prompt、安全策略、模型、思考档位或检索范围。
 - 模型没有任何工具，不能执行来源中的动作。
-- 服务端只接受本轮 `S1`–`S8`；`[[S` 与公开 canonical token 前缀 `[[C` 都是 Provider 输出保留前缀。任何未知、格式不完整或由模型正文伪造的 canonical 引用都会使本 Run 以 `ASSISTANT_CITATION_INVALID` 失败，保留已产生的安全部分回答，但不形成链接。
+- 服务端只接受本轮 `S1`–`S8`；`[[S` 与公开 canonical token 前缀 `[[C` 都是 Provider 输出保留前缀。Worker 同时识别真实模型已出现的单括号 `[S1]`–`[S8]` 写法，仍执行相同的本轮来源校验。任何未知、格式不完整或由模型正文伪造的 canonical 引用都会使本 Run 以 `ASSISTANT_CITATION_INVALID` 失败，保留已产生的安全部分回答，但不形成链接。
 
 ### 6.4 命令和配置回答
 
@@ -459,7 +459,9 @@ stateDiagram-v2
 
 快照必须是本轮真正送给模型且已经执行敏感策略的文本。现有 `knowledge.Service.purgeItem` 仍是永久删除唯一入口；它在同一事务、删除 item 之前，将该 item 的历史 Source 三个 FK 置空、标题改为“来源已删除”、摘录清空、locator 只保留 `{"status":"unavailable"}`，再执行原有删除。历史回答不改写，抽屉显示“来源已删除”。进入回收站、Artifact 停用或普通 fragment 重建不擦历史快照。Backend 仅为这一步获得 `apps/api/internal/knowledge/lifecycle.go` ownership，并必须测试事务提交/回滚两种结果。
 
-模型只接触 `S1`–`S8`；`[[S` 与 `[[C` 都是回答流保留前缀。Worker 使用最多保留 6 个 ASCII byte 的有限状态解析器，能处理 marker 在任意 delta 边界拆分；只接受本 Run 实际存在的 `[[S1]]`–`[[S8]]`，一旦不可能组成该语法就立即失败，不能无界缓存。普通内容成为 `answer.delta`，已知 `[[Sx]]` 成为 `answer.citation {sourceOrdinal}`；Go 再校验 source 所属 Run，按第一次出现生成/复用 `cited_number`，并且只有这条受信路径可以在聚合消息写入 canonical `[[C#]]`。Provider 正文出现任何 `[[C`（即使恰好等于本轮真实编号）一律视为伪造并以 `ASSISTANT_CITATION_INVALID` 失败；任何公开 answer.delta 都禁止包含原始 `[[S` 或 `[[C`。未知、越界、畸形或 EOF 未闭合标记不发送、不持久化；已经发送的安全普通文本可作为失败部分回答保留。reasoning 流不解析引用。
+模型只接触 `S1`–`S8`；`[[S` 与 `[[C` 都是回答流保留前缀。Worker 使用最多保留 6 个 ASCII byte 的有限状态解析器，能处理 marker 在任意 delta 边界拆分；只接受本 Run 实际存在的 `[[S1]]`–`[[S8]]` 及下述单括号写法，一旦不可能组成该语法就立即失败，不能无界缓存。普通内容成为 `answer.delta`，已知 `[[Sx]]` 或 `[Sx]` 成为 `answer.citation {sourceOrdinal}`；Go 再校验 source 所属 Run，按第一次出现生成/复用 `cited_number`，并且只有这条受信路径可以在聚合消息写入 canonical `[[C#]]`。Provider 正文出现任何 `[[C`（即使恰好等于本轮真实编号）一律视为伪造并以 `ASSISTANT_CITATION_INVALID` 失败；任何公开 answer.delta 都禁止包含原始 `[[S` 或 `[[C`。未知、越界、畸形或 EOF 未闭合标记不发送、不持久化；已经发送的安全普通文本可作为失败部分回答保留。reasoning 流不解析引用。
+
+2026-09-02 真实模型格式兼容修订：上段 Worker 输入语法同时接受本轮有效的 `[S1]`–`[S8]`，与双括号形式生成完全相同的 `answer.citation {sourceOrdinal}`，不改变 Go/Web 的 canonical 协议或来源归属语义。单括号的 `[S` 后接数字才进入保留标记语法；越界、畸形和未闭合的数字标记同样失败，`[SQL]` 等普通 Markdown 标签仍原样保留。两种写法均不得映射到本轮之外的来源；不在前端或历史回答中进行文本替换。System Prompt 和来源块仍要求双括号格式，Prompt 版本不变。
 
 ### 8.12 `assistant_run_events`
 

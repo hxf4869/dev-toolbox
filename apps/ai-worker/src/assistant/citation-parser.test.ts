@@ -30,8 +30,17 @@ describe('CitationParser', () => {
     expect(result.text).toBe('根据  的说法，以及 。')
   })
 
-  it('survives markers split at every byte boundary', () => {
-    const full = '前缀 [[S2]] 后缀 [[S8]] 结束'
+  it('maps observed single-bracket citations to the same source ordinals', () => {
+    const result = parseOnce('版本 [S4]，配置 [[S1]][S4]。')
+    expect(result.invalid).toBeNull()
+    expect(result.citations).toEqual([4, 1, 4])
+    expect(result.text).toBe('版本 ，配置 。')
+  })
+
+  it.each([
+    '前缀 [[S2]] 后缀 [[S8]] 结束',
+    '前缀 [S2] 后缀 [[S8]][S2] 结束',
+  ])('survives markers split at every byte boundary: %s', (full) => {
     const reference = parseOnce(full)
     for (let split = 0; split <= full.length; split++) {
       const parser = new CitationParser(8)
@@ -55,6 +64,10 @@ describe('CitationParser', () => {
   it('rejects ordinals outside the run', () => {
     expect(parseOnce('[[S9]]', 8).invalid).not.toBeNull()
     expect(parseOnce('[[S3]]', 2).invalid).not.toBeNull()
+    expect(parseOnce('[S9]', 8).invalid).not.toBeNull()
+    expect(parseOnce('[S0]', 8).invalid).not.toBeNull()
+    expect(parseOnce('[S3]', 2).invalid).not.toBeNull()
+    expect(parseOnce('[S1]', 0).invalid).not.toBeNull()
   })
 
   it('fails on forged canonical tokens even when the number matches', () => {
@@ -62,16 +75,27 @@ describe('CitationParser', () => {
     expect(parseOnce('伪造 [[C]]', 8).invalid).not.toBeNull()
   })
 
+  it('does not accept a forged canonical token after a valid single-bracket citation', () => {
+    const result = parseOnce('依据 [S1]，伪造 [[C1]]', 1)
+    expect(result.citations).toEqual([1])
+    expect(result.invalid).not.toBeNull()
+    expect(result.text).not.toContain('[[C1]]')
+  })
+
   it('fails on malformed reserved prefixes', () => {
     expect(parseOnce('[[Sx]]', 8).invalid).not.toBeNull()
     expect(parseOnce('[[S', 8).invalid).not.toBeNull()
     expect(parseOnce('[[S12]]', 8).invalid).not.toBeNull()
+    expect(parseOnce('[S12]', 8).invalid).not.toBeNull()
+    expect(parseOnce('[S1x]', 8).invalid).not.toBeNull()
+    expect(parseOnce('[S1', 8).invalid).not.toBeNull()
   })
 
   it('passes through ordinary bracket text', () => {
-    const result = parseOnce('参见 [[wiki]] 与 [1] 与 [[]]')
+    const text = '参见 [[wiki]] 与 [1] 与 [[]] 与 [SQL] 与 [Source] 与 [S] 与 [S'
+    const result = parseOnce(text)
     expect(result.invalid).toBeNull()
-    expect(result.text).toBe('参见 [[wiki]] 与 [1] 与 [[]]')
+    expect(result.text).toBe(text)
   })
 
   it('keeps citation and text ordering', () => {
@@ -88,5 +112,14 @@ describe('CitationParser', () => {
     expect(parser.push(redactor.push('前缀 [[C1]]'))).toEqual([])
     const results = [...parser.push(redactor.flush()), ...parser.flush()]
     expect(results.some((result) => result.kind === 'invalid')).toBe(true)
+  })
+
+  it('parses a single-bracket citation held entirely in the redactor tail', () => {
+    const redactor = new StreamRedactor()
+    const parser = new CitationParser(1)
+    expect(parser.push(redactor.push('依据 [S1]'))).toEqual([])
+    const results = [...parser.push(redactor.flush()), ...parser.flush()]
+    expect(results.filter((result) => result.kind === 'citation')).toEqual([{ kind: 'citation', ordinal: 1 }])
+    expect(results.some((result) => result.kind === 'invalid')).toBe(false)
   })
 })

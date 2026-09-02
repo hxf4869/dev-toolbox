@@ -1,10 +1,10 @@
 // Incremental citation marker parser (docs/16 §8.11).
 //
-// The provider output stream is the only place [[S1]]–[[S8]] markers are
-// interpreted. The parser is a bounded finite-state machine that never buffers
-// more than 6 ASCII bytes, survives markers split at any byte boundary, fails
-// the run on any [[S-prefixed text that cannot complete to a valid marker, and
-// treats every [[C... occurrence in provider text as forgery.
+// The provider output stream is the only place [[S1]]–[[S8]] markers and their
+// observed single-bracket spellings [S1]–[S8] are interpreted. Both produce the
+// same run-scoped citation event. The bounded parser keeps at most 6 ASCII
+// bytes, survives arbitrary delta boundaries, rejects malformed source markers,
+// and treats every [[C... occurrence in provider text as forgery.
 
 export type CitationParserResult =
   | { kind: 'text'; text: string }
@@ -50,7 +50,7 @@ export class CitationParser {
   }
 
   #isReserved(pending: string): boolean {
-    return pending.startsWith('[[S') || pending.startsWith('[[C')
+    return pending.startsWith('[[S') || pending.startsWith('[[C') || /^\[S[0-9]/.test(pending)
   }
 
   #consume(character: string, results: CitationParserResult[]): 'ok' | 'invalid' {
@@ -60,7 +60,7 @@ export class CitationParser {
     if (candidate.length <= maximumMarkerBytes && this.#viable(candidate)) {
       this.#pending = candidate
       // A complete marker releases immediately.
-      const marker = /^\[\[S([1-8])\]\]$/.exec(candidate)
+      const marker = /^\[\[S([1-8])\]\]$/.exec(candidate) ?? /^\[S([1-8])\]$/.exec(candidate)
       if (marker && marker[1] !== undefined) {
         const ordinal = Number(marker[1])
         this.#pending = ''
@@ -82,8 +82,8 @@ export class CitationParser {
       results.push({ kind: 'invalid', reason: 'provider text forged a canonical citation prefix' })
       return 'invalid'
     }
-    if (this.#pending.startsWith('[[S') || candidate.startsWith('[[S')) {
-      // "[[S" is reserved: anything that cannot complete as [[S1]]–[[S8]] fails.
+    if (this.#isReserved(this.#pending) || this.#isReserved(candidate)) {
+      // A source-marker prefix must complete in its original bracket spelling.
       results.push({ kind: 'invalid', reason: 'malformed citation marker' })
       return 'invalid'
     }
@@ -100,10 +100,15 @@ export class CitationParser {
     return 'ok'
   }
 
-  // Viable prefixes of the reserved syntaxes "[[S1]]".."[[S8]]" and the
-  // forgery prefix "[[C"; anything else left the marker window already.
+  // Both source spellings share the same bounds and ownership validation.
+  // Non-numeric bracket labels such as [SQL] remain ordinary Markdown text.
   #viable(candidate: string): boolean {
     if (candidate.length > maximumMarkerBytes) return false
+    if (candidate.startsWith('[S')) {
+      if (candidate.length === 2) return true
+      if (!/[1-8]/.test(candidate[2] ?? '')) return false
+      return candidate.length === 3 || (candidate.length === 4 && candidate[3] === ']')
+    }
     if (!candidate.startsWith('[[')) return candidate === '['
     if (candidate.length === 2) return true
     const flag = candidate[2] ?? ''
