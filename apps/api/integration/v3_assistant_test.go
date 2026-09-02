@@ -394,6 +394,124 @@ func TestV3BootstrapAndReasoningOptions(t *testing.T) {
 	}
 }
 
+func TestV3IndexCountsBeforeEmbeddingEnabled(t *testing.T) {
+	h := newV3Harness(t)
+	seedV3Knowledge(t, h.database, "正常笔记", "合成测试内容", "normal")
+	seedV3Knowledge(t, h.database, "敏感笔记", "合成敏感内容", "sensitive")
+	inactive := seedV3Knowledge(t, h.database, "非活跃片段", "不会被发送", "normal")
+	deleted := seedV3Knowledge(t, h.database, "回收站笔记", "不会被发送", "normal")
+	ctx := context.Background()
+	if _, err := h.database.Exec(ctx, `UPDATE search_fragments SET active = false WHERE item_id = $1`, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.Exec(ctx, `UPDATE knowledge_items SET deleted_at = now() WHERE id = $1`, deleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.database.Exec(ctx, `UPDATE app_settings SET sensitive_ai_policy = 'redact' WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	check := func(wantStatus string, wantActive int) {
+		t.Helper()
+		response := h.get(t, "/api/v1/assistant/index-status")
+		assertStatus(t, response, http.StatusOK)
+		var status struct {
+			Status    string         `json:"status"`
+			Available bool           `json:"available"`
+			Counts    map[string]int `json:"counts"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if status.Status != wantStatus || status.Available || status.Counts["active"] != wantActive {
+			t.Fatalf("incorrect pre-enable index status: %+v", status)
+		}
+		for _, key := range []string{"ready", "pending", "running", "failed"} {
+			if status.Counts[key] != 0 {
+				t.Fatalf("disabled index reported work: %+v", status.Counts)
+			}
+		}
+	}
+	check("unconfigured", 2)
+	configure := h.put(t, "/api/v1/assistant/embedding-settings", map[string]any{
+		"displayName": "合成向量", "baseUrl": "https://embed.example/v1",
+		"apiKey": "embedding-test-secret", "modelId": "mock-embed", "dimensions": 4,
+		"enabled": false, "confirmReindex": true,
+	})
+	assertStatus(t, configure, http.StatusOK)
+	configure.Body.Close()
+	check("disabled", 2)
+	if _, err := h.database.Exec(ctx, `UPDATE app_settings SET sensitive_ai_policy = 'block' WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	check("disabled", 1)
+	var queued int
+	if err := h.database.QueryRow(ctx, `SELECT count(*) FROM assistant_fragment_embeddings`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("pre-enable count reads queued %d fragments", queued)
+	}
+}
+
+func TestV3IndexClaimsSmallBatchesAndPreservesCompletedVectors(t *testing.T) {
+	h := newV3Harness(t)
+	for index := 0; index < 9; index++ {
+		seedV3Knowledge(t, h.database, "合成索引笔记", "合成索引内容", "normal")
+	}
+	configure := h.put(t, "/api/v1/assistant/embedding-settings", map[string]any{
+		"displayName": "合成向量", "baseUrl": "https://embed.example/v1",
+		"apiKey": "embedding-test-secret", "modelId": "mock-embed", "dimensions": 4,
+		"enabled": true, "confirmReindex": true,
+	})
+	assertStatus(t, configure, http.StatusOK)
+	configure.Body.Close()
+	h.assistant.RunOnce(context.Background())
+	claim := h.internalPost(t, "/internal/assistant/index/claim", map[string]any{"workerId": "index-test-worker"})
+	assertStatus(t, claim, http.StatusOK)
+	var batch struct {
+		Generation int64  `json:"generation"`
+		Policy     string `json:"policy"`
+		Fragments  []struct {
+			FragmentID      string `json:"fragmentId"`
+			Attempt         int    `json:"attempt"`
+			SourceCreatedAt string `json:"sourceCreatedAt"`
+			Sensitivity     string `json:"sensitivity"`
+		} `json:"fragments"`
+	}
+	if err := json.NewDecoder(claim.Body).Decode(&batch); err != nil {
+		t.Fatal(err)
+	}
+	claim.Body.Close()
+	if len(batch.Fragments) != 4 {
+		t.Fatalf("expected a CPU-sized batch of 4, got %d", len(batch.Fragments))
+	}
+	results := make([]map[string]any, 0, len(batch.Fragments))
+	for _, fragment := range batch.Fragments {
+		results = append(results, map[string]any{
+			"fragmentId": fragment.FragmentID, "leaseVersion": fragment.Attempt,
+			"sourceCreatedAt": fragment.SourceCreatedAt, "sensitivity": fragment.Sensitivity,
+			"dimensions": 4, "embedding": []float64{0.5, 0.5, 0.5, 0.5},
+		})
+	}
+	complete := h.internalPost(t, "/internal/assistant/index/complete", map[string]any{
+		"workerId": "index-test-worker", "generation": batch.Generation, "policy": batch.Policy, "results": results,
+	})
+	assertStatus(t, complete, http.StatusNoContent)
+	complete.Body.Close()
+	h.assistant.RunOnce(context.Background())
+	var ready, pending int
+	if err := h.database.QueryRow(context.Background(), `
+		SELECT count(*) FILTER (WHERE state = 'ready'), count(*) FILTER (WHERE state = 'pending')
+		FROM assistant_fragment_embeddings
+	`).Scan(&ready, &pending); err != nil {
+		t.Fatal(err)
+	}
+	if ready != 4 || pending != 5 {
+		t.Fatalf("completed vectors were not preserved: ready=%d pending=%d", ready, pending)
+	}
+}
+
 func TestV3EmbeddingSettingsLifecycle(t *testing.T) {
 	h := newV3Harness(t)
 	response := h.put(t, "/api/v1/assistant/embedding-settings", map[string]any{

@@ -163,6 +163,41 @@ describe('ProviderSettingsView V3', () => {
     wrapper.unmount()
   })
 
+  it('shows the refreshed eligible count before enabling a disabled embedding', async () => {
+    let indexReads = 0
+    let saveRequests = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/ai/providers' && !init?.method) return providersResponse()
+      if (path === '/api/v1/assistant/embedding-settings' && init?.method === 'PUT') {
+        saveRequests += 1
+        return jsonResponse({ error: { code: 'EMBEDDING_REINDEX_CONFIRMATION_REQUIRED' } }, 409)
+      }
+      if (path === '/api/v1/assistant/embedding-settings') {
+        return jsonResponse({ ...embeddingSettingsFixtures.ready, enabled: false, status: 'disabled', activeFragmentCount: 24 })
+      }
+      if (path === '/api/v1/assistant/index-status') {
+        indexReads += 1
+        return jsonResponse({
+          ...knowledgeFixtures.disabled,
+          counts: { active: indexReads === 1 ? 24 : 31, ready: 0, pending: 0, running: 0, failed: 0, excluded: 0 },
+        })
+      }
+      if (path === '/api/v1/assistant/index-failures?limit=50') return jsonResponse({ items: [], nextCursor: null })
+      throw new Error(`unexpected request: ${path}`)
+    }))
+    const wrapper = await mountView()
+    await wrapper.get('.embedding-form input[type="checkbox"]').setValue(true)
+    clickButton('保存 Embedding', document.querySelector<HTMLElement>('.embedding-card')!)
+    await flushPromises()
+
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('31 个活跃片段')
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).not.toContain('0 个活跃片段')
+    expect(indexReads).toBe(2)
+    expect(saveRequests).toBe(1)
+    wrapper.unmount()
+  })
+
   it('retries only a failed fragment and keeps deletion behind a separate confirmation', async () => {
     let retried = false
     let deleted = false

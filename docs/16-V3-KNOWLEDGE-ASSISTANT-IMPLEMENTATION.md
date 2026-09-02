@@ -491,6 +491,7 @@ Run 创建和索引状态 API 都必须做一次只读完整性判断，避免 5
 ### 9.2 Index Worker
 
 - 每次 claim 最多 16 个同 generation、同策略的 pending 片段。
+- CPU 部署的当前执行批次为 4 个片段，后台单次 Embedding 超时为 180 秒，期间继续按原租约心跳续约；查询向量和连接探针仍保留 60 秒超时。协议仍接受最多 16 个片段，避免更新期间拒绝旧的在途批次。
 - Go 在 claim 前完成 block/redact/allow，Worker 不接收未授权原文。
 - Worker 对 408、429、500、502、503、504 只允许一次同配置重试。
 - 完成结果必须逐项带 fragment ID、维度和向量；部分缺失使整个 batch 失败，不写半批结果。
@@ -902,6 +903,8 @@ type AssistantBootstrapDTO = {
 - `available` 当且仅当 status=ready；不返回 ETA。
 
 `GET /assistant/index-status` 返回同一个 `KnowledgeIndexStatusDTO`。Embedding 设置响应为：
+
+`counts.active` 始终表示当前敏感策略下的合格活跃片段数，未配置或禁用时也必须计算，供启用前的重建确认使用；这些状态下不排队、不宣称可检索。
 
 ```ts
 type EmbeddingSettingsDTO = {

@@ -240,7 +240,9 @@ export class AssistantClient {
         ? {}
         : { signal }),
     }
-    return readBoundedJson(await this.request(path, merged), maximumBytes)
+    const response = await this.request(path, merged)
+    if (response.status === 204) return undefined
+    return readBoundedJson(response, maximumBytes)
   }
 
   private async request(path: string, init: RequestInit): Promise<Response> {

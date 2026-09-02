@@ -16,6 +16,10 @@ import (
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/secretbox"
 )
 
+// Keep CPU-backed embedding requests small without lowering the protocol's
+// 16-fragment limit for in-flight batches from an older worker/API pair.
+const indexClaimBatchSize = 4
+
 // eligibleFragmentsSource is the ONE canonical construction of eligible
 // knowledge fragments (docs/16 §9.1). Every consumer (reconciler, index
 // status, run-creation completeness check, retrieval) must wrap this CTE.
@@ -90,6 +94,10 @@ func (service *Service) computeIndexStatus(ctx context.Context, querier rowQueri
 		computation.status = "disabled"
 	}
 	if !config.Configured || !config.Enabled {
+		if err := querier.QueryRow(ctx, eligibleFragmentsSource(policy, config.Generation)+
+			` SELECT count(*) FROM eligible`, policy, config.Generation).Scan(&computation.counts.Active); err != nil {
+			return indexComputation{}, err
+		}
 		var excluded int64
 		if err := querier.QueryRow(ctx,
 			`SELECT count(*) FROM assistant_fragment_embeddings WHERE state = 'excluded'`).Scan(&excluded); err != nil {
@@ -404,7 +412,7 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 	SELECT pending.fragment_id, pending.attempt, eligible.item_id, eligible.source_kind,
 	       eligible.sensitivity, eligible.content, eligible.created_at
 	FROM pending JOIN eligible ON eligible.id = pending.fragment_id
-	`, policy, config.Generation, IndexBatchSize)
+	`, policy, config.Generation, indexClaimBatchSize)
 	if err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
@@ -413,7 +421,7 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 		fragment indexClaimFragment
 		attempt  int
 	}
-	claimed := make([]claimedRow, 0, IndexBatchSize)
+	claimed := make([]claimedRow, 0, indexClaimBatchSize)
 	for rows.Next() {
 		var row claimedRow
 		if err := rows.Scan(&row.fragment.FragmentID, &row.attempt, &row.fragment.ItemID,

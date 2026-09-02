@@ -33,6 +33,7 @@ import { log } from '../logger.js'
 
 const idleDelayMs = 1_000
 const indexHeartbeatMs = 10_000
+const indexEmbeddingTimeoutMs = 180_000
 
 const embeddingProbeText = 'Dev Toolbox 知识库 Embedding 连接探针。'
 
@@ -182,6 +183,7 @@ export class EmbeddingIndexRunner {
             dimensions: batch.dimensions,
             input: batch.fragments.map((fragment) => fragment.content),
             allowInsecureHttp: this.allowInsecureProviderHttp,
+            timeoutMs: indexEmbeddingTimeoutMs,
             ...(shutdownSignal === undefined ? {} : { signal: shutdownSignal }),
           })
           // All-or-nothing: every claimed fragment must produce a result.

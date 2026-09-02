@@ -562,6 +562,7 @@ export interface EmbeddingRequest {
   readonly dimensions: number
   readonly allowInsecureHttp: boolean
   readonly signal?: AbortSignal
+  readonly timeoutMs?: number
 }
 
 export interface EmbeddingResult {
@@ -576,7 +577,7 @@ export async function generateEmbeddings(request: EmbeddingRequest): Promise<Emb
   }
   const url = new URL('embeddings', `${baseUrl}/`).toString()
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 60_000)
+  const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? 60_000)
   try {
     const response = await fetch(url, {
       method: 'POST',
