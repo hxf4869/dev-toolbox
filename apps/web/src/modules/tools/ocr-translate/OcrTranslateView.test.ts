@@ -132,7 +132,15 @@ function makeFetchMock(overrides: {
     }
     if (path.endsWith('/api/v1/aliyun/ocr')) {
       if (overrides.chunkCode === 'UPSTREAM_RESULT_UNCERTAIN') {
-        return json({ error: { code: 'UPSTREAM_RESULT_UNCERTAIN', message: '结果不确定' } }, 504)
+        return json({ error: { code: 'UPSTREAM_RESULT_UNCERTAIN', message: '结果不确定', details: {
+          failureCategory: 'timeout', callStatus: 'uncertain', countedUnits: 1, remaining: 187,
+        } } }, 504)
+      }
+      if (overrides.chunkCode === 'UPSTREAM_REJECTED') {
+        return json({ error: { code: 'UPSTREAM_REJECTED', message: '上游拒绝了本次调用', details: {
+          failureCategory: 'permission_denied', callStatus: 'released', countedUnits: null,
+          remaining: 188, upstreamRequestId: 'qa-ocr-denied',
+        } } }, 502)
       }
       return json({
         text: '阿里云识别文本',
@@ -190,10 +198,10 @@ async function mountOcr(): Promise<VueWrapper> {
   return mount(OcrTranslateView, { attachTo: document.body, global: { plugins: [pinia, router] } })
 }
 
-async function selectLocalImage(wrapper: VueWrapper) {
+async function selectLocalImage(wrapper: VueWrapper, fileName = 'shot.png') {
   stubDecode(800, 600)
   const input = wrapper.find<HTMLInputElement>('input[type="file"]')
-  const file = new File(['image-bytes'], 'shot.png', { type: 'image/png' })
+  const file = new File(['image-bytes'], fileName, { type: 'image/png' })
   Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
   await input.trigger('change')
   await flushPromises()
@@ -253,6 +261,63 @@ describe('OCR 翻译页面', () => {
 
     expect(calls.filter((call) => !call.path.endsWith('/api/v1/auth/session'))).toHaveLength(0)
     expect(localStorage.length).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('更换图片始终能打开选择器，连续换图和重选同一文件会重置旧识别结果且不上传', async () => {
+    const { fetchMock, calls } = makeFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountOcr()
+    const input = wrapper.get<HTMLInputElement>('input[type="file"]')
+    const click = vi.spyOn(input.element, 'click').mockImplementation(() => undefined)
+    await selectLocalImage(wrapper)
+    await wrapper.get('[data-testid="ocr-local-run"]').trigger('click')
+    await flushPromises()
+
+    expect(input.element.isConnected).toBe(true)
+    await wrapper.get('.link-button').trigger('click')
+    expect(click).toHaveBeenCalledTimes(1)
+    expect(wrapper.get<HTMLTextAreaElement>('[data-testid="ocr-proof-text"]').element.value)
+      .toContain('Graphite Workbench')
+
+    await selectLocalImage(wrapper, 'replacement.png')
+    expect(wrapper.get('.image-info__name').text()).toBe('replacement.png')
+    expect(wrapper.find('[data-testid="ocr-proof-text"]').exists()).toBe(false)
+    expect(input.element.value).toBe('')
+    await wrapper.get('[data-testid="ocr-local-run"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('.link-button').trigger('click')
+    expect(click).toHaveBeenCalledTimes(2)
+    await selectLocalImage(wrapper, 'replacement.png')
+    expect(wrapper.find('[data-testid="ocr-proof-text"]').exists()).toBe(false)
+    expect(calls).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('取消换图或选择无效文件时，保留原图片和校对文字', async () => {
+    const { fetchMock, calls } = makeFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountOcr()
+    await selectLocalImage(wrapper)
+    await wrapper.get('[data-testid="ocr-local-run"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="ocr-proof-text"]').setValue('已校对的文字')
+    const input = wrapper.get<HTMLInputElement>('input[type="file"]')
+    await input.trigger('cancel')
+    expect(wrapper.get('.image-info__name').text()).toBe('shot.png')
+    expect(wrapper.get<HTMLTextAreaElement>('[data-testid="ocr-proof-text"]').element.value).toBe('已校对的文字')
+
+    Object.defineProperty(input.element, 'files', {
+      value: [new File(['not an image'], 'invalid.txt', { type: 'text/plain' })],
+      configurable: true,
+    })
+    await input.trigger('change')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="ocr-image-error"]').attributes('role')).toBe('alert')
+    expect(wrapper.get('.image-info__name').text()).toBe('shot.png')
+    expect(wrapper.get<HTMLTextAreaElement>('[data-testid="ocr-proof-text"]').element.value).toBe('已校对的文字')
+    expect(calls).toHaveLength(0)
     wrapper.unmount()
   })
 
@@ -320,6 +385,7 @@ describe('OCR 翻译页面', () => {
     expect(wrapper.text()).toContain('结果不确定')
     expect(wrapper.text()).toContain('不会自动重试')
     expect(wrapper.text()).toContain('可能重复计费')
+    expect(wrapper.get('[aria-label="本地保护账本剩余"]').text()).toContain('187')
     const firstOcr = calls.filter((call) => call.path.endsWith('/api/v1/aliyun/ocr'))
     expect(firstOcr).toHaveLength(1)
 
@@ -330,6 +396,30 @@ describe('OCR 翻译页面', () => {
       await flushPromises()
       expect(wrapper.find('[data-testid="ocr-cloud-dialog"]').exists()).toBe(true)
     }
+    expect(calls.filter((call) => call.path.endsWith('/api/v1/aliyun/ocr'))).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('云 OCR 权限拒绝显示设置入口和结算状态，换图清除错误且不自动重试', async () => {
+    const { fetchMock, calls } = makeFetchMock({ chunkCode: 'UPSTREAM_REJECTED' })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountOcr()
+    await selectLocalImage(wrapper)
+    await wrapper.get('[data-testid="ocr-cloud-open"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="ocr-cloud-confirm"]').trigger('click')
+    await flushPromises()
+
+    const errorPanel = wrapper.get('[data-testid="ocr-cloud-error"]')
+    expect(errorPanel.text()).toContain('RAM 权限不足')
+    expect(errorPanel.text()).toContain('本次未扣减本地保护额度')
+    expect(errorPanel.text()).toContain('qa-ocr-denied')
+    expect(errorPanel.get('a').attributes('href')).toBe('/settings/aliyun')
+    expect(wrapper.find('[data-testid="ocr-cloud-retry"]').exists()).toBe(false)
+    expect(wrapper.get('[aria-label="本地保护账本剩余"]').text()).toContain('188')
+
+    await selectLocalImage(wrapper, 'replacement.png')
+    expect(wrapper.find('[data-testid="ocr-cloud-error"]').exists()).toBe(false)
     expect(calls.filter((call) => call.path.endsWith('/api/v1/aliyun/ocr'))).toHaveLength(1)
     wrapper.unmount()
   })

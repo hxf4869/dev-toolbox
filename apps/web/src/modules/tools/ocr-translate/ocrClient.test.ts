@@ -77,6 +77,24 @@ describe('describeOcrCloudError（稳定码 → OCR UI 动作）', () => {
     expect(describeOcrCloudError('CALL_SETTLED_WITHOUT_RESULT', 409).kind).toBe('manual-retry')
   })
 
+  it('服务端结算为 uncertain 的 503 同样提示结果不确定', () => {
+    const action = describeOcrCloudError('UPSTREAM_UNAVAILABLE', 503, { callStatus: 'uncertain' })
+    expect(action.kind).toBe('uncertain')
+    expect(action.detail).toContain('已保守计量')
+  })
+
+  it.each(['credential_invalid', 'permission_denied', 'service_not_open', 'account_arrears'])(
+    '%s 在修正前引导设置，不提示立即重试', (failureCategory) => {
+      const action = describeOcrCloudError('UPSTREAM_REJECTED', 502, {
+        failureCategory, callStatus: 'released', upstreamRequestId: 'qa-ocr-denied',
+      })
+      expect(action.kind).toBe('settings')
+      expect(action.detail).toContain('本次未扣减本地保护额度')
+      expect(action.detail).toContain('qa-ocr-denied')
+      expect(action.detail).toContain('不会自动重试')
+    },
+  )
+
   it('队列与许可失效需要重新排队', () => {
     expect(describeOcrCloudError('QUEUE_FULL', 429).kind).toBe('requeue')
     expect(describeOcrCloudError('QUEUE_TICKET_NOT_FOUND', 404).kind).toBe('requeue')

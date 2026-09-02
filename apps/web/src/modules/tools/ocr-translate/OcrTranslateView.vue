@@ -239,7 +239,7 @@ const mainHint = computed(() => {
 
 const cloudErrorAction = computed<OcrCloudErrorAction | null>(() => {
   if (!cloudError.value) return null
-  return describeOcrCloudError(cloudError.value.code, cloudError.value.status)
+  return describeOcrCloudError(cloudError.value.code, cloudError.value.status, cloudError.value.details)
 })
 
 const cloudPreflightErrorAction = computed<OcrCloudErrorAction | null>(() => {
@@ -515,11 +515,11 @@ async function confirmCloudSend(): Promise<void> {
     proofText.value = cloudRun.resultText.value
     proofSource.value = 'aliyun'
     ocrLines.value = []
-    if (cloudRun.remainingAfter.value !== null) {
-      ocrQuota.value = {
-        remaining: cloudRun.remainingAfter.value,
-        limit: ocrQuota.value?.limit ?? cloudRun.remainingAfter.value,
-      }
+  }
+  if (cloudRun.remainingAfter.value !== null) {
+    ocrQuota.value = {
+      remaining: cloudRun.remainingAfter.value,
+      limit: ocrQuota.value?.limit ?? cloudRun.remainingAfter.value,
     }
   }
   void nextTick(() => returnTarget?.focus())
@@ -797,6 +797,15 @@ const handleTranslateDialogKeydown = makeDialogKeydown(() => closeTranslateConfi
           >更换图片</button>
         </header>
 
+        <input
+          ref="fileInput"
+          type="file"
+          class="visually-hidden-input"
+          :accept="IMAGE_ACCEPT"
+          aria-label="选择图片文件"
+          @change="handleFileInputChange"
+        >
+
         <div v-if="!image" class="upload-zone" :class="{ 'upload-zone--active': dropActive }">
           <div
             class="upload-zone__target"
@@ -817,14 +826,6 @@ const handleTranslateDialogKeydown = makeDialogKeydown(() => closeTranslateConfi
               <UiIcon name="lock-keyhole" :size="14" /> 图片留在此设备；本地识别不上传图片
             </p>
           </div>
-          <input
-            ref="fileInput"
-            type="file"
-            class="visually-hidden-input"
-            :accept="IMAGE_ACCEPT"
-            aria-label="选择图片文件"
-            @change="handleFileInputChange"
-          >
         </div>
 
         <div v-else class="image-info">

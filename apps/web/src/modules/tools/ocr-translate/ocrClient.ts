@@ -7,6 +7,7 @@
  * 映射在本模块单独维护（文案面向“图片识别”，不是翻译片段）。
  */
 
+import { ALIYUN_FAILURE_CATEGORY_LABELS } from '../../settings/aliyunContracts'
 import { createIdempotencyKey, TranslateApiError } from '../translate/translateClient'
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -172,7 +173,11 @@ export interface OcrCloudErrorAction {
 }
 
 /** 稳定错误码 → 云 OCR 的 UI 动作（docs/11 §13；文案与翻译片段场景区分）。 */
-export function describeOcrCloudError(code: string, status: number): OcrCloudErrorAction {
+export function describeOcrCloudError(
+  code: string,
+  status: number,
+  details: Record<string, unknown> = {},
+): OcrCloudErrorAction {
   if (code === 'ALIYUN_NOT_CONFIGURED') {
     return {
       kind: 'settings',
@@ -187,7 +192,7 @@ export function describeOcrCloudError(code: string, status: number): OcrCloudErr
       detail: '已硬停止，没有继续付费的旁路；请等待下月重置、降低本月其他使用，或到设置页核对本地保护账本。',
     }
   }
-  if (code === 'UPSTREAM_RESULT_UNCERTAIN') {
+  if (code === 'UPSTREAM_RESULT_UNCERTAIN' || details.callStatus === 'uncertain') {
     return {
       kind: 'uncertain',
       title: '结果不确定',
@@ -209,10 +214,20 @@ export function describeOcrCloudError(code: string, status: number): OcrCloudErr
     }
   }
   if (code === 'UPSTREAM_REJECTED' || code === 'UPSTREAM_UNAVAILABLE') {
+    const category = typeof details.failureCategory === 'string' ? details.failureCategory : ''
+    const needsSettings = ['credential_invalid', 'permission_denied', 'service_not_open', 'account_arrears'].includes(category)
+    const settlement = details.callStatus === 'released'
+      ? '本次未扣减本地保护额度。'
+      : typeof details.countedUnits === 'number'
+        ? `本次已计入本地保护账本 ${details.countedUnits} 次。`
+        : '该次调用已按服务端结算状态计量。'
+    const requestHint = typeof details.upstreamRequestId === 'string'
+      ? ` 上游 RequestId：${details.upstreamRequestId}。`
+      : ''
     return {
-      kind: 'manual-retry',
-      title: status >= 500 ? '上游服务暂不可用' : '上游明确失败',
-      detail: '该次调用已按服务端结算状态计量；可手动重试，重试使用新的请求标识。',
+      kind: needsSettings ? 'settings' : 'manual-retry',
+      title: ALIYUN_FAILURE_CATEGORY_LABELS[category] ?? (code === 'UPSTREAM_UNAVAILABLE' ? '上游服务暂不可用' : '上游明确失败'),
+      detail: `${settlement}${needsSettings ? '请先处理配置或账号问题，再重新发起识别。' : '可手动重试，重试使用新的请求标识。'}不会自动重试。${requestHint}`,
     }
   }
   if (code === 'CALL_SETTLED_WITHOUT_RESULT') {

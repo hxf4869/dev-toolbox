@@ -73,6 +73,10 @@ grep -F 'proxy_buffering off;' "$rendered_config" >/dev/null
 grep -F 'proxy_pass_header X-Accel-Buffering;' "$rendered_config" >/dev/null
 grep -F 'proxy_pass http://dev-toolbox-gateway:80;' "$rendered_config" >/dev/null
 grep -F 'handle /api/* {' "$deploy_dir/Caddyfile" >/dev/null
+if grep -F 'handle_response @maintenance' "$deploy_dir/Caddyfile" >/dev/null; then
+  printf '%s\n' 'Caddy 不得把 API 的上游错误与额度结算状态改写成维护响应' >&2
+  exit 1
+fi
 if grep -F 'flush_interval -1' "$deploy_dir/Caddyfile" >/dev/null; then
   printf '%s\n' 'Caddy 不得为 Assistant SSE 设置全局 flush_interval -1' >&2
   exit 1

@@ -284,6 +284,15 @@ func mapSDKError(err error) *GatewayError {
 	if errors.As(err, &sdkError) {
 		return classifySDKError(sdkError)
 	}
+	// The installed OpenAPI client's context-aware path converts response
+	// errors to tea.SDKError, a distinct type from dara.SDKError.
+	var teaError *tea.SDKError
+	if errors.As(err, &teaError) {
+		return classifySDKError(&dara.SDKError{
+			Code: teaError.Code, Message: teaError.Message,
+			StatusCode: teaError.StatusCode, Data: teaError.Data,
+		})
+	}
 	var netError net.Error
 	if errors.Is(err, context.Canceled) {
 		return &GatewayError{Category: failureTimeout, Uncertain: true, Issue: err}

@@ -43,13 +43,9 @@
 	}
 
 	handle /api/* {
-		reverse_proxy api:8080 {
-			@maintenance status 502 503 504
-			handle_response @maintenance {
-				header Content-Type "application/json; charset=utf-8"
-				respond `{"error":{"code":"SERVICE_UNAVAILABLE","message":"系统维护中，请稍后重试"}}` 503
-			}
-		}
+		# Preserve API error codes and quota outcomes; handle_errors covers
+		# proxy failures when the API itself cannot be reached.
+		reverse_proxy api:8080
 	}
 
 	handle /health/* {

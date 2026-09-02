@@ -48,7 +48,7 @@ export function useCloudOcrRun(options: { pollIntervalMs?: number } = {}) {
   const ticketExpiresAt = ref('')
   const resultText = ref('')
   const remainingAfter = ref<number | null>(null)
-  const error = ref<{ code: string; status: number; message: string } | null>(null)
+  const error = ref<{ code: string; status: number; message: string; details?: Record<string, unknown> } | null>(null)
   /** 运行中被用户取消：无法确认上游是否受理，按结果不确定保守呈现。 */
   const cancelledInFlight = ref(false)
 
@@ -171,7 +171,8 @@ export function useCloudOcrRun(options: { pollIntervalMs?: number } = {}) {
       }
       if (isStale(run)) return
       if (caught instanceof TranslateApiError) {
-        error.value = { code: caught.code, status: caught.status, message: caught.message }
+        error.value = { code: caught.code, status: caught.status, message: caught.message, details: caught.details }
+        if (typeof caught.details.remaining === 'number') remainingAfter.value = caught.details.remaining
       } else {
         error.value = {
           code: 'NETWORK_ERROR',

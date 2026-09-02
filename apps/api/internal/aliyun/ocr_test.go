@@ -2,20 +2,24 @@ package aliyun
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	ocr "github.com/alibabacloud-go/ocr-api-20210707/v3/client"
 	"github.com/alibabacloud-go/tea/dara"
 	"github.com/google/uuid"
@@ -341,6 +345,76 @@ func TestOcrSdkAdapterFacts(t *testing.T) {
 	}
 	if runtime := noRetryRuntime(); runtime.Autoretry == nil || *runtime.Autoretry {
 		t.Fatal("SDK runtime must disable automatic retry")
+	}
+}
+
+func TestRecognizeGeneralSDKWireContract(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		status    int
+		body      string
+		category  string
+		uncertain bool
+	}{
+		{"success", 200, `{"Code":"200","Data":"{\"content\":\"fixture text\"}","RequestId":"qa-sdk-ocr"}`, "", false},
+		{"permission", 403, `{"Code":"Forbidden.RAM","Message":"private upstream diagnostic","RequestId":"qa-sdk-ocr"}`, failurePermissionDenied, false},
+		{"throttled", 429, `{"Code":"Throttling","Message":"private upstream diagnostic","RequestId":"qa-sdk-ocr"}`, failureThrottled, false},
+		{"unavailable", 503, `{"Code":"InternalFailure","Message":"private upstream diagnostic","RequestId":"qa-sdk-ocr"}`, failureUnavailable, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			imageData := syntheticPNG(t, 32, 32)
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				if request.Method != http.MethodPost || request.URL.Path != "/" || request.URL.RawQuery != "" {
+					t.Error("OCR must send one POST body without a URL query")
+				}
+				if request.Header.Get("Content-Type") != "application/octet-stream" || request.Header.Get("x-acs-action") != "RecognizeGeneral" {
+					t.Error("OCR SDK request must be binary RecognizeGeneral")
+				}
+				body, err := io.ReadAll(request.Body)
+				if err != nil || !bytes.Equal(body, imageData) {
+					t.Error("OCR SDK did not send the original image bytes")
+				}
+				response.Header().Set("Content-Type", "application/json")
+				response.WriteHeader(testCase.status)
+				_, _ = io.WriteString(response, testCase.body)
+			}))
+			defer server.Close()
+			client, err := ocr.NewClient(&openapi.Config{
+				AccessKeyId:     dara.String("fixture-id"),
+				AccessKeySecret: dara.String("fixture-secret"),
+				Endpoint:        dara.String(strings.TrimPrefix(server.URL, "http://")),
+				Protocol:        dara.String("HTTP"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, callErr := recognizeGeneralWithContext(context.Background(), client, imageData)
+			if requests.Load() != 1 {
+				t.Fatalf("SDK requests = %d, want exactly one without retries", requests.Load())
+			}
+			if testCase.category == "" {
+				if callErr != nil {
+					t.Fatalf("successful SDK request failed: %T: %v", callErr, callErr)
+				}
+				result, gatewayErr := decodeRecognizeResponse(response)
+				if gatewayErr != nil || result.Text != "fixture text" || result.UpstreamRequestID != "qa-sdk-ocr" {
+					t.Fatalf("SDK response was not decoded: %+v, %v", result, gatewayErr)
+				}
+				return
+			}
+			if callErr == nil {
+				t.Fatal("upstream rejection must return an SDK error")
+			}
+			gatewayErr := mapSDKError(callErr)
+			if gatewayErr.Category != testCase.category || gatewayErr.Uncertain != testCase.uncertain || gatewayErr.RequestID != "qa-sdk-ocr" {
+				t.Fatalf("SDK error %T mapped to %+v", callErr, gatewayErr)
+			}
+			if strings.Contains(gatewayErr.Error(), "private upstream diagnostic") {
+				t.Fatal("gateway error leaked upstream content")
+			}
+		})
 	}
 }
 
