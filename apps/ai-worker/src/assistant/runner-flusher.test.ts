@@ -1,12 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { EventFlusher } from './runner.js'
+import type { AssistantEvent } from './client.js'
 
 afterEach(() => {
   vi.useRealTimers()
 })
 
 describe('EventFlusher', () => {
+  it('keeps tiny deltas within the Go API limit of 50 events per batch', async () => {
+    vi.useFakeTimers()
+    const batches: (readonly AssistantEvent[])[] = []
+    const flusher = new EventFlusher(async (events) => { batches.push(events) })
+    for (let i = 0; i < 121; i++) await flusher.push('answer.delta', { delta: '字' })
+    await flusher.drain()
+    expect(batches.map((batch) => batch.length)).toEqual([50, 50, 21])
+    expect(batches.flat().map((event) => event.payload['delta']).join('')).toBe('字'.repeat(121))
+  })
+
   it('waits for a timer-started submission before final drain resolves', async () => {
     vi.useFakeTimers()
     let release: (() => void) | undefined

@@ -5,7 +5,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import type { UserMessage } from '@earendil-works/pi-ai'
+import type { Message, UserMessage } from '@earendil-works/pi-ai'
 import {
   ProviderGatewayError,
   assistantStreamChat,
@@ -16,6 +16,7 @@ import type { AssistantRunnerOptions } from './index.js'
 import { assistantSystemPrompt } from './prompts.js'
 import { StreamRedactor } from './stream-redactor.js'
 import { CitationParser } from './citation-parser.js'
+import { historyMessage } from './history-message.js'
 import type { SourceSnapshotInput } from './lane-types.js'
 
 const maximumRewriteTokens = 256
@@ -116,7 +117,7 @@ async function handlePrepare(
             assistantSystemPrompt('ready', false) +
             '\n\n现在只生成检索查询，不要回答问题。',
           messages: [
-            ...temporaryHistoryMessages(body.summary, body.messages, inputRedactor),
+            ...temporaryHistoryMessages(body.summary, body.messages, inputRedactor, body.model),
             {
               role: 'user' as const,
               content: redactTemporaryInput(
@@ -207,7 +208,7 @@ async function handleStream(
   const evidenceState = body.evidenceState
   const noteOnly = /只根据笔记|仅根据笔记|只依据笔记|仅依据笔记/.test(body.question)
   const inputRedactor = body.sensitivePolicy === 'redact' ? new StreamRedactor() : null
-  const history = temporaryHistoryMessages(body.summary, body.messages, inputRedactor)
+  const history = temporaryHistoryMessages(body.summary, body.messages, inputRedactor, body.model)
   const redactedSources = sources.map((source) => ({
     ...source,
     title: redactTemporaryInput(inputRedactor, source.title),
@@ -349,8 +350,9 @@ function temporaryHistoryMessages(
   summary: unknown,
   messages: readonly { role: 'user' | 'assistant'; content: string }[],
   redactor: StreamRedactor | null,
-): UserMessage[] {
-  const result: UserMessage[] = []
+  model: TemporaryModelSnapshot,
+): Message[] {
+  const result: Message[] = []
   if (summary !== null && summary !== undefined) {
     result.push({
       role: 'user',
@@ -359,11 +361,7 @@ function temporaryHistoryMessages(
     })
   }
   for (const message of messages) {
-    result.push({
-      role: message.role,
-      content: redactTemporaryInput(redactor, message.content),
-      timestamp: Date.now(),
-    } as UserMessage)
+    result.push(historyMessage(message.role, redactTemporaryInput(redactor, message.content), model))
   }
   return result
 }

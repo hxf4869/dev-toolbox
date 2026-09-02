@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-import type { AssistantMessageEvent, UserMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessageEvent, Message, UserMessage } from '@earendil-works/pi-ai'
 
 import {
   AssistantClient,
@@ -24,6 +24,7 @@ import {
 } from '../model-gateway.js'
 import { assistantPromptVersion, assistantSystemPrompt, summaryPrompt, titlePrompt } from './prompts.js'
 import { StreamRedactor } from './stream-redactor.js'
+import { historyMessage } from './history-message.js'
 
 const heartbeatIntervalMs = 10_000
 const batchIntervalMs = 150
@@ -454,8 +455,8 @@ export class AssistantRunner {
 function providerHistoryMessages(
   claim: ClaimedAssistantRun,
   redactor: StreamRedactor | null = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
-): UserMessage[] {
-  const messages: UserMessage[] = []
+): Message[] {
+  const messages: Message[] = []
   if (claim.context.summary !== null) {
     messages.push({
       role: 'user',
@@ -467,11 +468,7 @@ function providerHistoryMessages(
     })
   }
   for (const message of claim.context.messages) {
-    messages.push({
-      role: message.role as 'user' | 'assistant',
-      content: redactProviderInput(redactor, message.content),
-      timestamp: Date.now(),
-    } as UserMessage)
+    messages.push(historyMessage(message.role, redactProviderInput(redactor, message.content), claim.model))
   }
   return messages
 }
@@ -479,7 +476,7 @@ function providerHistoryMessages(
 function providerAnswerMessages(
   claim: ClaimedAssistantRun,
   sources: readonly RetrievalSourcePayload[],
-): UserMessage[] {
+): Message[] {
   const redactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
   const messages = providerHistoryMessages(claim, redactor)
   if (sources.length > 0) {
@@ -626,7 +623,8 @@ export class EventFlusher {
     const event: AssistantEvent = { eventId: randomUUID(), type, payload }
     this.#queue.push(event)
     this.#bytes += JSON.stringify(payload).length
-    if (this.#bytes >= batchMaximumBytes) {
+    // Go accepts at most 50 events per request, including tiny parsed deltas.
+    if (this.#bytes >= batchMaximumBytes || this.#queue.length >= 50) {
       await this.drain()
       return
     }

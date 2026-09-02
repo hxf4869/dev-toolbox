@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
 import type { CitationRefDTO } from './assistantContracts'
 
@@ -12,6 +12,8 @@ const props = defineProps<{
 const emit = defineEmits<{ citation: [number: number] }>()
 const copiedIndex = ref<number | null>(null)
 const copyErrorIndex = ref<number | null>(null)
+const wrappedIndices = ref(new Set<number>())
+const markdownElement = ref<HTMLElement | null>(null)
 
 const rendered = computed(() => {
   const codeBlocks: string[] = []
@@ -58,7 +60,8 @@ const rendered = computed(() => {
         : copyErrorIndex.value === blockIndex
           ? '复制失败，重试'
           : '复制代码块'
-    return `<section class="assistant-code-block"><header><span>${language || '代码'} · 模型生成，未验证</span><button type="button" data-code-index="${blockIndex}" title="复制这个代码块">${copyLabel}</button></header><pre tabindex="0"><code${className}>${renderer.utils.escapeHtml(token?.content ?? '')}</code></pre></section>`
+    const wrapped = wrappedIndices.value.has(blockIndex)
+    return `<section class="assistant-code-block"><header><span>${language || '代码'} · 模型生成，未验证</span><div class="assistant-code-actions"><button type="button" data-wrap-index="${blockIndex}" aria-pressed="${wrapped}" title="切换代码自动换行">自动换行</button><button type="button" data-code-index="${blockIndex}" title="复制这个代码块">${copyLabel}</button></div></header><pre tabindex="0"${wrapped ? ' class="is-wrapped"' : ''}><code${className}>${renderer.utils.escapeHtml(token?.content ?? '')}</code></pre></section>`
   }
 
   return { html: renderer.render(props.source), codeBlocks }
@@ -73,22 +76,44 @@ async function onContentClick(event: MouseEvent) {
     return
   }
 
+  const wrapButton = target?.closest<HTMLButtonElement>('button[data-wrap-index]')
+  if (wrapButton) {
+    const index = Number(wrapButton.dataset.wrapIndex)
+    const restoreFocus = wrapButton === document.activeElement
+    if (wrappedIndices.value.has(index)) wrappedIndices.value.delete(index)
+    else wrappedIndices.value.add(index)
+    await restoreCodeFocus('wrap', index, restoreFocus)
+    return
+  }
+
   const copyButton = target?.closest<HTMLButtonElement>('button[data-code-index]')
   if (!copyButton) return
   const index = Number(copyButton.dataset.codeIndex)
   const content = rendered.value.codeBlocks[index]
   if (content === undefined) return
-  copyErrorIndex.value = null
+  let copied = false
   try {
     await navigator.clipboard.writeText(content)
-    copiedIndex.value = index
-    window.setTimeout(() => {
-      if (copiedIndex.value === index) copiedIndex.value = null
-    }, 1600)
+    copied = true
   } catch {
-    copiedIndex.value = null
-    copyErrorIndex.value = index
+    // Keep the failed action available for an explicit retry.
   }
+  const restoreFocus = copyButton === document.activeElement
+  copiedIndex.value = copied ? index : null
+  copyErrorIndex.value = copied ? null : index
+  await restoreCodeFocus('code', index, restoreFocus)
+  if (copied) {
+    window.setTimeout(async () => {
+      const focused = markdownElement.value?.querySelector(`button[data-code-index="${index}"]`) === document.activeElement
+      if (copiedIndex.value === index) copiedIndex.value = null
+      await restoreCodeFocus('code', index, focused)
+    }, 1600)
+  }
+}
+
+async function restoreCodeFocus(action: 'code' | 'wrap', index: number, shouldRestore: boolean) {
+  await nextTick()
+  if (shouldRestore) markdownElement.value?.querySelector<HTMLButtonElement>(`button[data-${action}-index="${index}"]`)?.focus({ preventScroll: true })
 }
 
 function insideLink(tokens: Array<{ type: string }>, index: number) {
@@ -103,7 +128,7 @@ function insideLink(tokens: Array<{ type: string }>, index: number) {
 
 <template>
   <!-- markdown-it escapes raw HTML because html=false; delegated clicks only accept generated data attributes. -->
-  <div class="assistant-markdown" @click="onContentClick" v-html="rendered.html" />
+  <div ref="markdownElement" class="assistant-markdown" @click="onContentClick" v-html="rendered.html" />
   <span class="sr-only" role="status">
     {{ copiedIndex !== null ? '代码块已精确复制' : copyErrorIndex !== null ? '复制失败，请重试' : '' }}
   </span>
@@ -176,6 +201,8 @@ function insideLink(tokens: Array<{ type: string }>, index: number) {
 }
 
 .assistant-markdown :deep(.assistant-code-block button:hover) { background: var(--accent-soft); }
+.assistant-markdown :deep(.assistant-code-actions) { display: flex; flex-shrink: 0; gap: var(--space-1); }
+.assistant-markdown :deep(.assistant-code-block button[aria-pressed="true"]) { background: var(--accent-soft); }
 
 .assistant-markdown :deep(pre) {
   max-width: 100%;
@@ -200,6 +227,7 @@ function insideLink(tokens: Array<{ type: string }>, index: number) {
 }
 
 .assistant-markdown :deep(pre code) { padding: 0; background: transparent; }
+.assistant-markdown :deep(pre.is-wrapped) { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .assistant-markdown :deep(a) {
   color: var(--accent);

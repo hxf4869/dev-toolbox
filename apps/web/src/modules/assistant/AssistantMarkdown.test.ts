@@ -10,6 +10,7 @@ describe('AssistantMarkdown', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -40,6 +41,7 @@ describe('AssistantMarkdown', () => {
   })
 
   it('copies fenced code exactly and labels model-generated commands as unverified', async () => {
+    vi.useFakeTimers()
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -54,9 +56,33 @@ describe('AssistantMarkdown', () => {
     })
 
     expect(wrapper.text()).toContain('模型生成，未验证')
-    await wrapper.find('button[data-code-index="0"]').trigger('click')
+    const copyButton = wrapper.get<HTMLButtonElement>('button[data-code-index="0"]')
+    copyButton.element.focus()
+    await copyButton.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
     expect(writeText).toHaveBeenCalledWith('printf "hello"\n')
     expect(wrapper.text()).toContain('已复制')
+    expect(document.activeElement).toBe(wrapper.get('button[data-code-index="0"]').element)
+    await vi.advanceTimersByTimeAsync(1600)
+    expect(document.activeElement).toBe(wrapper.get('button[data-code-index="0"]').element)
+    wrapper.unmount()
+  })
+
+  it('toggles wrapping per block without losing keyboard focus or altering code', async () => {
+    const wrapper = mount(AssistantMarkdown, {
+      attachTo: document.body,
+      props: { source: '```sh\nfirst line\n```\n\n```sh\nsecond line\n```', citations: [] },
+    })
+    const toggle = wrapper.get<HTMLButtonElement>('button[data-wrap-index="0"]')
+    toggle.element.focus()
+    await toggle.trigger('click')
+    expect(wrapper.get('button[data-wrap-index="0"]').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.findAll('pre')[0]?.classes()).toContain('is-wrapped')
+    expect(wrapper.findAll('pre')[1]?.classes()).not.toContain('is-wrapped')
+    expect(wrapper.findAll('code')[0]?.text()).toBe('first line')
+    expect(document.activeElement).toBe(wrapper.get('button[data-wrap-index="0"]').element)
+    await wrapper.get('button[data-wrap-index="0"]').trigger('click')
+    expect(wrapper.get('button[data-wrap-index="0"]').attributes('aria-pressed')).toBe('false')
     wrapper.unmount()
   })
 })

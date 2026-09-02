@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { ProviderGatewayError, assistantStreamChat } from '../model-gateway.js'
 import type { AssistantReasoningLevel } from '../model-gateway.js'
+import { historyMessage } from './history-message.js'
 
 interface CapturedRequest {
   url: string
@@ -68,6 +69,34 @@ const baseRequest = {
 }
 
 describe('assistant reasoning outbound fixtures', () => {
+  it.each(['openai-completions', 'openai-responses', 'anthropic-messages'] as const)(
+    'serializes text-only assistant history through the real %s adapter', async (protocol) => {
+      const captured: CapturedRequest[] = []
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = captureFetch(captured)
+      try {
+        const model = { protocol, upstreamModelId: 'mock-model' }
+        const stream = assistantStreamChat({
+          ...baseRequest, protocol, reasoning: 'off',
+          context: { messages: [
+            historyMessage('user', '上一轮问题', model),
+            historyMessage('assistant', '上一轮回答', model),
+            historyMessage('user', '继续解释', model),
+          ] },
+        })
+        const streamErrors: string[] = []
+        for await (const event of stream) {
+          if (event.type === 'error') streamErrors.push(event.error.errorMessage ?? 'stream error')
+          if (event.type === 'done') break
+        }
+        expect(captured, streamErrors.join('; ')).toHaveLength(1)
+        const messages = captured[0]?.body['messages'] ?? captured[0]?.body['input']
+        expect(JSON.stringify(messages)).toContain('上一轮回答')
+        expect(JSON.stringify(messages)).toContain('"role":"assistant"')
+      } finally { globalThis.fetch = originalFetch }
+    },
+  )
+
   it('sends reasoning_effort verbatim for openai-completions', async () => {
     const captured: CapturedRequest[] = []
     const originalFetch = globalThis.fetch

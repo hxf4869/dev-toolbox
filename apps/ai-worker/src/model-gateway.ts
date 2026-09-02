@@ -444,7 +444,8 @@ function assistantModel(request: AssistantStreamRequest, baseUrl: string): Model
     ...(request.protocol === 'openai-completions'
       ? { compat: { supportsReasoningEffort: true } }
       : {}),
-    thinkingLevelMap: { xhigh: 'xhigh', max: 'max' },
+    // Responses otherwise injects effort="none" when off, contrary to §7.2.
+    thinkingLevelMap: { off: null, xhigh: 'xhigh', max: 'max' },
   } as unknown as Model<Api>
 }
 

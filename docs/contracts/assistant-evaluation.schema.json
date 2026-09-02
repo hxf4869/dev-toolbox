@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-toolbox.local/schemas/assistant-evaluation-1.json",
+  "title": "V3 private 40-question evaluation input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "kind", "questions"],
+  "properties": {
+    "version": { "const": 1 },
+    "kind": { "enum": ["synthetic", "real"] },
+    "questions": {
+      "type": "array",
+      "minItems": 40,
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["questionId", "category", "noteOnly", "content", "expected", "expectedFragmentIds", "allowedFragmentIds", "followUpTo"],
+        "properties": {
+          "questionId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$" },
+          "category": { "enum": ["direct_fact", "paraphrase", "cross_note", "follow_up", "not_found"] },
+          "noteOnly": { "type": "boolean" },
+          "content": { "type": "string", "minLength": 1, "maxLength": 32000 },
+          "expected": { "enum": ["answer", "not_found"] },
+          "expectedFragmentIds": { "$ref": "#/$defs/fragments" },
+          "allowedFragmentIds": { "$ref": "#/$defs/fragments" },
+          "followUpTo": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,40}$" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fragments": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "uuid" }
+    }
+  }
+}
