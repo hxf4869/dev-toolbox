@@ -24,7 +24,7 @@ const (
 	RRFK                = 60
 	MaximumRunSources   = 8
 	RetrievalVersion    = "hybrid-rrf-v1"
-	PromptVersion       = "assistant-answer-v1"
+	PromptVersion       = "assistant-answer-v2"
 	IndexBatchSize      = 16
 	MaximumIndexAttempt = 2
 

@@ -117,11 +117,16 @@ func previewText(content string) string {
 	return string(runes)
 }
 
-// stripCitationTokens removes canonical [[C#]] tokens from assistant content
-// for previews and history playback.
+// stripCitationTokens removes canonical tokens and legacy model-side [S#]
+// markers for previews and history playback. Source ordinals are per-run.
 func stripCitationTokens(content string) string {
 	var output strings.Builder
 	for index := 0; index < len(content); {
+		if index+4 <= len(content) && strings.HasPrefix(content[index:], "[S") &&
+			content[index+2] >= '1' && content[index+2] <= '8' && content[index+3] == ']' {
+			index += 4
+			continue
+		}
 		if strings.HasPrefix(content[index:], "[[C") {
 			end := index + 3
 			for end < len(content) && content[end] >= '0' && content[end] <= '9' {

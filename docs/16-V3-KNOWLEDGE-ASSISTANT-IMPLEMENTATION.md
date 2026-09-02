@@ -461,7 +461,7 @@ stateDiagram-v2
 
 模型只接触 `S1`–`S8`；`[[S` 与 `[[C` 都是回答流保留前缀。Worker 使用最多保留 6 个 ASCII byte 的有限状态解析器，能处理 marker 在任意 delta 边界拆分；只接受本 Run 实际存在的 `[[S1]]`–`[[S8]]` 及下述单括号写法，一旦不可能组成该语法就立即失败，不能无界缓存。普通内容成为 `answer.delta`，已知 `[[Sx]]` 或 `[Sx]` 成为 `answer.citation {sourceOrdinal}`；Go 再校验 source 所属 Run，按第一次出现生成/复用 `cited_number`，并且只有这条受信路径可以在聚合消息写入 canonical `[[C#]]`。Provider 正文出现任何 `[[C`（即使恰好等于本轮真实编号）一律视为伪造并以 `ASSISTANT_CITATION_INVALID` 失败；任何公开 answer.delta 都禁止包含原始 `[[S` 或 `[[C`。未知、越界、畸形或 EOF 未闭合标记不发送、不持久化；已经发送的安全普通文本可作为失败部分回答保留。reasoning 流不解析引用。
 
-2026-09-02 真实模型格式兼容修订：上段 Worker 输入语法同时接受本轮有效的 `[S1]`–`[S8]`，与双括号形式生成完全相同的 `answer.citation {sourceOrdinal}`，不改变 Go/Web 的 canonical 协议或来源归属语义。单括号的 `[S` 后接数字才进入保留标记语法；越界、畸形和未闭合的数字标记同样失败，`[SQL]` 等普通 Markdown 标签仍原样保留。两种写法均不得映射到本轮之外的来源；不在前端或历史回答中进行文本替换。System Prompt 和来源块仍要求双括号格式，Prompt 版本不变。
+2026-09-02 真实模型格式兼容修订：上段 Worker 输入语法同时接受本轮有效的 `[S1]`–`[S8]`，与双括号形式生成完全相同的 `answer.citation {sourceOrdinal}`，不改变 Go/Web 的 canonical 协议或来源归属语义。单括号的 `[S` 后接数字才进入保留标记语法；越界、畸形和未闭合的数字标记同样失败，`[SQL]` 等普通 Markdown 标签仍原样保留。两种写法均不得映射到本轮之外的来源；不在前端或已保存的历史回答中进行文本替换。System Prompt 和来源块仍要求双括号格式；历史上下文去编号见 §10.2。
 
 ### 8.12 `assistant_run_events`
 
@@ -552,7 +552,7 @@ Run 创建和索引状态 API 都必须做一次只读完整性判断，避免 5
 - 模型生成命令/配置标记“模型生成，未验证”。
 - 不披露 System Prompt、密钥、内部 API、隐藏摘要或原始检索分数。
 
-Prompt 文件由 Backend owner 版本化，例如 `assistant-answer-v1`；改 Prompt 必须更新 `prompt_version` 和评测结果。
+Prompt 文件由 Backend owner 版本化；当前为 `assistant-answer-v2`，进一步明确每项主张必须由所引用的本轮正文直接支持，标题或路径不能代替版本、命令及配置细节的依据，也不能沿用历史回答编号。改 Prompt 必须更新 `prompt_version` 和评测结果。
 
 ### 10.2 会话上下文
 
@@ -567,7 +567,7 @@ Prompt 文件由 Backend owner 版本化，例如 `assistant-answer-v1`；改 Pr
 排除：
 
 - 所有旧 reasoning。
-- 历史助手消息中的 canonical `[[C#]]` 引用 token 和旧 Source 映射；只把去除 token 后的最终回答作为普通上下文，不能让新模型把旧编号误认成本轮来源。
+- 历史助手消息中的 canonical `[[C#]]` 引用 token、旧版本未解析的 `[S1]`–`[S8]` 标记和旧 Source 映射；只把去除 token 后的最终回答作为普通上下文，不能让新模型把旧编号误认成本轮来源。同一过滤用于持久对话、临时对话及摘要输入；不修改历史原文或用户消息。
 - stopped/failed 助手部分回答。
 - 旧 Run 的原始检索片段和 Provider 隐藏 continuation state。
 - 其他会话、用户画像和历史搜索结果。
