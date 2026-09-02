@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
-import type { AssistantModelDTO, Reasoning } from './assistantContracts'
+import type { AssistantModelDTO, AssistantRunDTO, Reasoning } from './assistantContracts'
 import ModelReasoningBar from './ModelReasoningBar.vue'
 
 const props = defineProps<{
@@ -18,6 +18,7 @@ const props = defineProps<{
   error: string
   selectionRequired: boolean
   temporary: boolean
+  contextRun: Pick<AssistantRunDTO, 'model' | 'usage'> | null
 }>()
 
 const emit = defineEmits<{
@@ -30,6 +31,38 @@ const emit = defineEmits<{
 
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const composing = ref(false)
+const contextWindow = computed(() => props.contextRun
+  ? props.contextRun.model.contextWindow
+  : props.models.find((model) => model.id === props.modelId)?.contextWindow)
+const contextTokens = computed(() => props.contextRun?.usage.answerContextTokens)
+const contextLabel = computed(() => props.contextRun && (
+  props.activeRun || props.sending || props.contextRun.model.id !== props.modelId
+) ? '上次请求上下文' : '上下文')
+const contextUsage = computed(() => {
+  if (!props.contextRun) return props.activeRun || props.sending ? '待返回' : '待请求'
+  return contextTokens.value == null ? '未提供' : compactTokens(contextTokens.value)
+})
+const contextPercentage = computed(() => {
+  if (contextTokens.value == null || !contextWindow.value) return null
+  const percentage = contextTokens.value / contextWindow.value * 100
+  return percentage > 0 && percentage < 0.1 ? '< 0.1%' : `${percentage.toFixed(1)}%`
+})
+const contextDetails = computed(() => {
+  const model = props.contextRun?.model
+  const measurement = contextTokens.value == null
+    ? '完整输入用量未提供；旧记录可能缺少缓存计量。'
+    : `完整输入 ${contextTokens.value.toLocaleString('zh-CN')} token。`
+  const capacity = contextWindow.value
+    ? `模型窗口 ${contextWindow.value.toLocaleString('zh-CN')} token。`
+    : '模型窗口未提供。'
+  return `${model ? `统计所属模型：${model.displayName} · ${model.providerDisplayName}。` : ''}${props.contextRun ? measurement : '发送并完成请求后显示实测用量。'}${capacity}包含系统提示、摘要、随请求发送的历史和检索内容（含缓存）；不含当前草稿、回答输出或查询改写。不是下一条消息的预估值。`
+})
+
+function compactTokens(value: number) {
+  const unit = value >= 1_000_000 ? 1_000_000 : value >= 1_000 ? 1_000 : 1
+  return `${(value / unit).toLocaleString('zh-CN', { maximumFractionDigits: 1 })}${unit === 1_000_000 ? 'M' : unit === 1_000 ? 'K' : ''}`
+}
+
 const canSubmit = computed(
   () =>
     !props.activeRun &&
@@ -131,7 +164,12 @@ defineExpose({ focus })
           <UiIcon name="triangle-alert" :size="15" />{{ error }}
         </p>
         <p v-else id="assistant-composer-help">Enter 发送 · Shift+Enter 换行</p>
-        <span>{{ draft.length.toLocaleString('zh-CN') }} / 32,768</span>
+        <div class="assistant-composer__counts">
+          <span class="assistant-composer__context" :title="contextDetails" aria-live="polite">
+            {{ contextLabel }} {{ contextUsage }}<template v-if="contextWindow"> / {{ compactTokens(contextWindow) }}</template><template v-if="contextPercentage"> · {{ contextPercentage }}</template>
+          </span>
+          <span>字符 {{ draft.length.toLocaleString('zh-CN') }} / 32,768</span>
+        </div>
       </div>
     </div>
   </footer>
@@ -200,6 +238,7 @@ defineExpose({ focus })
 .assistant-composer__meta {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
@@ -208,7 +247,8 @@ defineExpose({ focus })
 }
 
 .assistant-composer__meta p { margin: 0; }
-.assistant-composer__meta > span { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.assistant-composer__counts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1) var(--space-3); margin-left: auto; font-variant-numeric: tabular-nums; }
+.assistant-composer__counts > span { white-space: nowrap; }
 .assistant-composer__error { display: flex; align-items: flex-start; gap: var(--space-1); color: var(--danger); }
 
 @media (max-width: 599px) {

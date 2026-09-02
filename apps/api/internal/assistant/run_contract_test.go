@@ -71,6 +71,28 @@ func TestInputContextBudgetDoesNotPreRejectSmallModels(t *testing.T) {
 	}
 }
 
+func TestContextUsageAcceptsLegacyMissingButRejectsInvalidMeasurement(t *testing.T) {
+	for _, value := range []string{"null", "18400", "-1", "1.5"} {
+		payload := json.RawMessage(`{"usage":{"rewriteInputTokens":null,"rewriteOutputTokens":null,"answerInputTokens":980,"answerOutputTokens":230,"answerContextTokens":` + value + `}}`)
+		want := value == "null" || value == "18400"
+		if validEventPayload("usage.updated", payload) != want {
+			t.Errorf("context usage %s: acceptance should be %t", value, want)
+		}
+	}
+	negative := int64(-1)
+	if !negativeUsage(runUsageInput{AnswerContextTokens: &negative}) {
+		t.Fatal("negative terminal context usage was accepted")
+	}
+	var legacy runUsageInput
+	if err := json.Unmarshal([]byte(`{"answerInputTokens":980}`), &legacy); err != nil || legacy.AnswerContextTokens != nil {
+		t.Fatal("missing cached-input measurement must remain unknown")
+	}
+	encoded, err := json.Marshal(RunUsageDTO{})
+	if err != nil || !strings.Contains(string(encoded), `"answerContextTokens":null`) {
+		t.Fatal("unmeasured public usage must include an explicit null")
+	}
+}
+
 func TestTemporaryPolicyTighteningCancelsOnlyWeakerRuns(t *testing.T) {
 	service := &Service{}
 	allowContext, unregisterAllow := service.registerTemporaryRun(context.Background(), "allow")

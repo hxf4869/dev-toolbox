@@ -235,7 +235,7 @@ async function handleStream(
   const reasoningStarted = performance.now()
   let answerStarted: number | null = null
   let reasoningDurationMs: number | null = null
-  let usage: { input: number; output: number } | null = null
+  let usage: { input: number; output: number; context: number | null } | null = null
 
   const stream = assistantStreamChat({
     protocol: body.model.protocol,
@@ -256,7 +256,8 @@ async function handleStream(
   try {
     for await (const event of stream) {
       if (event.type === 'done') {
-        usage = { input: event.message.usage.input, output: event.message.usage.output }
+        const contextTokens = event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite
+        usage = { input: event.message.usage.input, output: event.message.usage.output, context: contextTokens > 0 ? contextTokens : null }
         break
       }
       if (event.type === 'error') {
@@ -298,6 +299,7 @@ async function handleStream(
       usage: {
         rewriteInputTokens: null, rewriteOutputTokens: null,
         answerInputTokens: usage.input, answerOutputTokens: usage.output,
+        answerContextTokens: usage.context,
       },
     })
     emit('run.completed', {
@@ -305,6 +307,7 @@ async function handleStream(
       usage: {
         rewriteInputTokens: null, rewriteOutputTokens: null,
         answerInputTokens: usage.input, answerOutputTokens: usage.output,
+        answerContextTokens: usage.context,
       },
       timings: {
         rewriteMs: null, embeddingMs: null, retrievalMs: null,
@@ -393,6 +396,7 @@ function emptyTemporaryUsage(): Record<string, null> {
     rewriteOutputTokens: null,
     answerInputTokens: null,
     answerOutputTokens: null,
+    answerContextTokens: null,
   }
 }
 

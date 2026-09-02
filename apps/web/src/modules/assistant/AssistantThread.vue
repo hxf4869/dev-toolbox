@@ -42,6 +42,16 @@ const title = computed(() =>
   temporaryMode.value ? '临时对话' : activeConversation.value?.title ?? '新对话',
 )
 
+const contextRun = computed(() => {
+  for (let index = displayMessages.value.length - 1; index >= 0; index--) {
+    const message = displayMessages.value[index]!
+    if (message.role !== 'assistant') continue
+    const runtime = message.run ?? message.temporaryRuntime
+    if (runtime && runtime.status !== 'queued' && runtime.status !== 'running') return runtime
+  }
+  return null
+})
+
 const knowledge = computed(() => bootstrap.value?.knowledge ?? null)
 const knowledgeLabel = computed(() => {
   if (!knowledge.value) return '知识状态未知'
@@ -227,6 +237,7 @@ function emptyStateDescription() {
       :error="actionError"
       :selection-required="selectionRequired"
       :temporary="temporaryMode"
+      :context-run="contextRun"
       @update:draft="draft = $event"
       @model="store.chooseModel"
       @reasoning="store.chooseReasoning"

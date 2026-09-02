@@ -59,6 +59,7 @@ export class AssistantRunner {
       rewriteOutputTokens: null as number | null,
       answerInputTokens: null as number | null,
       answerOutputTokens: null as number | null,
+      answerContextTokens: null as number | null,
     }
     const timings = {
       rewriteMs: null as number | null,
@@ -306,6 +307,8 @@ export class AssistantRunner {
       if (event.type === 'done') {
         usage.answerInputTokens = event.message.usage.input
         usage.answerOutputTokens = event.message.usage.output
+        const contextTokens = event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite
+        usage.answerContextTokens = contextTokens > 0 ? contextTokens : null
         usageCaptured = true
         break
       }
@@ -352,6 +355,7 @@ export class AssistantRunner {
       usage: {
         rewriteInputTokens: usage.rewriteInputTokens, rewriteOutputTokens: usage.rewriteOutputTokens,
         answerInputTokens: usage.answerInputTokens, answerOutputTokens: usage.answerOutputTokens,
+        answerContextTokens: usage.answerContextTokens,
       },
     })
     await flusher.drain()

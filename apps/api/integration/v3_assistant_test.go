@@ -41,7 +41,7 @@ type v3Harness struct {
 	assistant *assistant.Service
 }
 
-func newV3Harness(t *testing.T) *v3Harness {
+func newV3Harness(t *testing.T, workerURLs ...string) *v3Harness {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -87,7 +87,11 @@ func newV3Harness(t *testing.T) *v3Harness {
 	}
 	masterKey := bytes.Repeat([]byte{7}, 32)
 	aiService := ai.NewService(database, masterKey, validator, "http://worker.invalid", v3InternalToken, t.TempDir(), false)
-	assistantService := assistant.NewService(database, masterKey, "http://worker.invalid", v3InternalToken, false)
+	workerURL := "http://worker.invalid"
+	if len(workerURLs) > 0 {
+		workerURL = workerURLs[0]
+	}
+	assistantService := assistant.NewService(database, masterKey, workerURL, v3InternalToken, false)
 	router := http.NewServeMux()
 	authService.RegisterRoutes(router)
 	knowledgeService.RegisterRoutes(router, authService)
@@ -380,6 +384,9 @@ func TestV3BootstrapAndReasoningOptions(t *testing.T) {
 	response.Body.Close()
 	if len(bootstrap.Models) != 1 {
 		t.Fatal("available model missing from bootstrap")
+	}
+	if bootstrap.Models[0]["contextWindow"] != float64(32768) {
+		t.Fatal("bootstrap must expose the configured context window")
 	}
 	options := bootstrap.Models[0]["reasoningOptions"].([]any)
 	if len(options) != 3 {
@@ -995,6 +1002,9 @@ func TestV3PersistentSSEPublicContract(t *testing.T) {
 	}
 	start.Body.Close()
 	runID := startBody.Run.ID
+	if _, err := h.database.Exec(context.Background(), `UPDATE provider_models SET context_window = 65536 WHERE id = $1`, modelID); err != nil {
+		t.Fatal(err)
+	}
 	claim := h.internalPost(t, "/internal/assistant/runs/claim", map[string]any{"workerId": "worker-v3-sse"})
 	assertStatus(t, claim, http.StatusOK)
 	var claimBody struct {
@@ -1028,6 +1038,9 @@ func TestV3PersistentSSEPublicContract(t *testing.T) {
 	}
 	reader := bufio.NewReader(stream.Body)
 	snapshot := readV3SSEEvent(t, reader, "snapshot")
+	if !strings.Contains(snapshot.Data, `"contextWindow":32768`) {
+		t.Fatal("run must retain its creation-time window after the model configuration changes")
+	}
 	if snapshot.ID != "" || strings.Contains(snapshot.Raw, "id:") {
 		t.Fatalf("snapshot must not carry an SSE id: %q", snapshot.Raw)
 	}
@@ -1060,6 +1073,7 @@ func TestV3PersistentSSEPublicContract(t *testing.T) {
 			{"eventId": uuid.New(), "type": "usage.updated", "payload": map[string]any{"usage": map[string]any{
 				"rewriteInputTokens": 2, "rewriteOutputTokens": 3,
 				"answerInputTokens": 11, "answerOutputTokens": 5,
+				"answerContextTokens": 100,
 			}}},
 		},
 	})
@@ -1096,8 +1110,8 @@ func TestV3PersistentSSEPublicContract(t *testing.T) {
 		citationPayload.Source.Title != "SSE 笔记" || citationPayload.Source.Availability != "available" {
 		t.Fatalf("citation event was not converted to public source: %+v", citationPayload)
 	}
-	if event := readV3SSEEvent(t, reader, "usage.updated"); event.ID != "5" {
-		t.Fatalf("usage.updated id = %q, want 5", event.ID)
+	if event := readV3SSEEvent(t, reader, "usage.updated"); event.ID != "5" || !strings.Contains(event.Data, `"answerContextTokens":100`) {
+		t.Fatalf("usage.updated lost its full input measurement: %s", event.Data)
 	}
 
 	complete := h.internalPost(t, "/internal/assistant/runs/"+runID+"/complete", map[string]any{
@@ -1105,6 +1119,7 @@ func TestV3PersistentSSEPublicContract(t *testing.T) {
 		"usage": map[string]any{
 			"rewriteInputTokens": 2, "rewriteOutputTokens": 3,
 			"answerInputTokens": 11, "answerOutputTokens": 5,
+			"answerContextTokens": 100,
 		},
 		"timings": map[string]any{
 			"rewriteMs": 1, "embeddingMs": 2, "retrievalMs": 7,
@@ -1114,6 +1129,9 @@ func TestV3PersistentSSEPublicContract(t *testing.T) {
 	assertStatus(t, complete, http.StatusOK)
 	complete.Body.Close()
 	terminal := readV3SSEEvent(t, reader, "run.completed")
+	if !strings.Contains(terminal.Data, `"answerContextTokens":100`) || !strings.Contains(terminal.Data, `"contextWindow":32768`) {
+		t.Fatal("terminal snapshot lost context measurement or model window")
+	}
 	var terminalPayload struct {
 		Sequence int `json:"sequence"`
 		Run      struct {

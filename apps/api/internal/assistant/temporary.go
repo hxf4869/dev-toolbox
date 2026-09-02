@@ -214,7 +214,14 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 			initialPhase = "rewrite"
 		}
 	}
-	if !emit("run.status", map[string]any{"status": "running", "phase": initialPhase}) {
+	if !emit("run.status", map[string]any{
+		"status": "running", "phase": initialPhase,
+		"model": RunModelDTO{
+			ID: execution.modelID, DisplayName: execution.modelDisplayName,
+			UpstreamModelID: execution.upstreamModelID, ProviderID: execution.providerID,
+			ProviderDisplayName: execution.providerDisplayName, ContextWindow: execution.contextWindow,
+		},
+	}) {
 		return
 	}
 
@@ -629,6 +636,7 @@ func emptyTemporaryUsage() map[string]any {
 	return map[string]any{
 		"rewriteInputTokens": nil, "rewriteOutputTokens": nil,
 		"answerInputTokens": nil, "answerOutputTokens": nil,
+		"answerContextTokens": nil,
 	}
 }
 

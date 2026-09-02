@@ -97,7 +97,7 @@ function evidenceLabel(value: string | null) {
       </section>
 
       <section aria-labelledby="runtime-usage">
-        <h4 id="runtime-usage">Token 用量（输入 / 输出）</h4>
+        <h4 id="runtime-usage">Token 用量（非缓存输入 / 输出）</h4>
         <dl>
           <div><dt>查询改写</dt><dd>{{ tokenPair(runtime.usage.rewriteInputTokens, runtime.usage.rewriteOutputTokens) }}</dd></div>
           <div><dt>回答</dt><dd>{{ tokenPair(runtime.usage.answerInputTokens, runtime.usage.answerOutputTokens) }}</dd></div>

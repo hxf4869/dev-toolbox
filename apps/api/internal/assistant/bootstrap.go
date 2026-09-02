@@ -21,7 +21,7 @@ func (service *Service) bootstrap(response http.ResponseWriter, request *http.Re
 		return
 	}
 	rows, err := service.database.Query(ctx, `
-		SELECT model.id, model.display_name, model.model_id, provider.id, provider.display_name
+		SELECT model.id, model.display_name, model.model_id, provider.id, provider.display_name, model.context_window
 		FROM provider_models model JOIN provider_configs provider ON provider.id = model.provider_config_id
 		WHERE model.deleted_at IS NULL AND provider.deleted_at IS NULL
 		  AND model.enabled AND provider.enabled
@@ -35,7 +35,7 @@ func (service *Service) bootstrap(response http.ResponseWriter, request *http.Re
 	models := make([]bootstrapModelRef, 0)
 	for rows.Next() {
 		var ref bootstrapModelRef
-		if err := rows.Scan(&ref.id, &ref.displayName, &ref.upstreamModelID, &ref.providerID, &ref.providerName); err != nil {
+		if err := rows.Scan(&ref.id, &ref.displayName, &ref.upstreamModelID, &ref.providerID, &ref.providerName, &ref.contextWindow); err != nil {
 			rows.Close()
 			writeAssistantInternalFailure(response, request)
 			return
@@ -63,6 +63,7 @@ func (service *Service) bootstrap(response http.ResponseWriter, request *http.Re
 		}
 		dtOs = append(dtOs, AssistantModelDTO{
 			ID: ref.id, DisplayName: ref.displayName, UpstreamModelID: ref.upstreamModelID,
+			ContextWindow:    ref.contextWindow,
 			Provider:         AssistantProviderRef{ID: ref.providerID, DisplayName: ref.providerName},
 			ReasoningOptions: options, LastReasoning: lastReasoning,
 		})
@@ -139,6 +140,7 @@ func isNoRows(err error) bool {
 }
 
 type bootstrapModelRef struct {
+	contextWindow   int
 	id              uuid.UUID
 	displayName     string
 	upstreamModelID string

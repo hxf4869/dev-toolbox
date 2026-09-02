@@ -14,6 +14,7 @@ type ReasoningOptionDTO struct {
 }
 
 type AssistantModelDTO struct {
+	ContextWindow    int                  `json:"contextWindow"`
 	ID               uuid.UUID            `json:"id"`
 	DisplayName      string               `json:"displayName"`
 	UpstreamModelID  string               `json:"upstreamModelId"`
@@ -64,6 +65,7 @@ type RunErrorDTO struct {
 }
 
 type RunUsageDTO struct {
+	AnswerContextTokens *int64 `json:"answerContextTokens"`
 	RewriteInputTokens  *int64 `json:"rewriteInputTokens"`
 	RewriteOutputTokens *int64 `json:"rewriteOutputTokens"`
 	AnswerInputTokens   *int64 `json:"answerInputTokens"`
@@ -157,6 +159,7 @@ type AssistantRunDTO struct {
 }
 
 type RunModelDTO struct {
+	ContextWindow       int       `json:"contextWindow"`
 	ID                  uuid.UUID `json:"id"`
 	DisplayName         string    `json:"displayName"`
 	UpstreamModelID     string    `json:"upstreamModelId"`

@@ -139,6 +139,21 @@ describe('persistent assistant SSE reducer', () => {
 })
 
 describe('temporary assistant SSE reducer', () => {
+  it('retains the server model snapshot across status events and keeps complete input usage', () => {
+    const model = { ...runFixtures.succeeded.model, contextWindow: 64000 }
+    let state = reduceTemporaryEvent(createTemporaryStreamState(), {
+      type: 'run.status', data: { sequence: 1, status: 'running', phase: 'answer', model },
+    }).state
+    state = reduceTemporaryEvent(state, {
+      type: 'run.status', data: { sequence: 2, status: 'running', phase: 'finalizing' },
+    }).state
+    state = reduceTemporaryEvent(state, {
+      type: 'usage.updated', data: { sequence: 3, usage: runFixtures.succeeded.usage },
+    }).state
+    expect(state.model).toEqual(model)
+    expect(state.usage.answerContextTokens).toBe(18400)
+  })
+
   it('uses in-memory sequence state and accepts no snapshot', () => {
     let state = createTemporaryStreamState()
     for (const envelope of temporaryFixture.events) {

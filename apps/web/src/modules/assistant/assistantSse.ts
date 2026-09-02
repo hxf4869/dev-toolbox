@@ -11,6 +11,7 @@ import type {
   SnapshotEvent,
   SourcesReadyEvent,
   TemporaryAnswerCitationEvent,
+  TemporaryRunStatusEvent,
   TemporarySourcesReadyEvent,
   TemporarySourceDTO,
   TemporarySummaryDTO,
@@ -48,6 +49,7 @@ export interface TemporaryStreamState {
   terminal: boolean
   status: 'idle' | 'running' | 'succeeded' | 'failed' | 'stopped'
   phase: AssistantRunDTO['phase']
+  model: AssistantRunDTO['model'] | null
   knowledgeState: 'ready' | 'unavailable' | null
   evidenceState: AssistantRunDTO['evidenceState']
   providedSourceCount: number
@@ -110,6 +112,7 @@ export function createTemporaryStreamState(): TemporaryStreamState {
     terminal: false,
     status: 'idle',
     phase: null,
+    model: null,
     knowledgeState: null,
     evidenceState: null,
     providedSourceCount: 0,
@@ -322,9 +325,10 @@ export function reduceTemporaryEvent(
 
   switch (envelope.type) {
     case 'run.status': {
-      const payload = envelope.data as { status: 'running'; phase: AssistantRunDTO['phase'] }
+      const payload = envelope.data as TemporaryRunStatusEvent
       next.status = payload.status
       next.phase = payload.phase
+      if (payload.model) next.model = payload.model
       break
     }
     case 'sources.ready': {
@@ -605,6 +609,7 @@ function safeEventName(value: string) {
 
 function emptyUsage(): AssistantRunDTO['usage'] {
   return {
+    answerContextTokens: null,
     rewriteInputTokens: null,
     rewriteOutputTokens: null,
     answerInputTokens: null,

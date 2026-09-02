@@ -291,8 +291,11 @@ func validEventPayload(eventType string, payload json.RawMessage) bool {
 		if !ok {
 			return false
 		}
-		for _, key := range []string{"rewriteInputTokens", "rewriteOutputTokens", "answerInputTokens", "answerOutputTokens"} {
+		for _, key := range []string{"rewriteInputTokens", "rewriteOutputTokens", "answerInputTokens", "answerOutputTokens", "answerContextTokens"} {
 			value, present := usage[key]
+			if !present && key == "answerContextTokens" {
+				continue // Older workers did not capture cache-inclusive context usage.
+			}
 			if !present {
 				return false
 			}

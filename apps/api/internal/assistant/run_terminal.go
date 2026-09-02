@@ -20,6 +20,7 @@ type completeRunInput struct {
 }
 
 type runUsageInput struct {
+	AnswerContextTokens *int64 `json:"answerContextTokens"`
 	RewriteInputTokens  *int64 `json:"rewriteInputTokens"`
 	RewriteOutputTokens *int64 `json:"rewriteOutputTokens"`
 	AnswerInputTokens   *int64 `json:"answerInputTokens"`
@@ -69,12 +70,13 @@ func (service *Service) completeRun(response http.ResponseWriter, request *http.
 		       rewrite_input_tokens = $3, rewrite_output_tokens = $4,
 		       answer_input_tokens = $5, answer_output_tokens = $6,
 		       rewrite_ms = $7, embedding_ms = $8, retrieval_ms = $9, reasoning_ms = $10, answer_ms = $11,
+		       answer_context_tokens = $12,
 		       error_code = NULL, error_detail = NULL
 		WHERE id = $1
 	`, run.ID, now, input.Usage.RewriteInputTokens, input.Usage.RewriteOutputTokens,
 		input.Usage.AnswerInputTokens, input.Usage.AnswerOutputTokens,
 		input.Timings.RewriteMS, input.Timings.EmbeddingMS, input.Timings.RetrievalMS,
-		input.Timings.ReasoningMS, input.Timings.AnswerMS); err != nil {
+		input.Timings.ReasoningMS, input.Timings.AnswerMS, input.Usage.AnswerContextTokens); err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
@@ -94,7 +96,7 @@ func (service *Service) completeRun(response http.ResponseWriter, request *http.
 
 func negativeUsage(usage runUsageInput) bool {
 	for _, value := range []*int64{usage.RewriteInputTokens, usage.RewriteOutputTokens,
-		usage.AnswerInputTokens, usage.AnswerOutputTokens} {
+		usage.AnswerInputTokens, usage.AnswerOutputTokens, usage.AnswerContextTokens} {
 		if value != nil && *value < 0 {
 			return true
 		}
@@ -192,13 +194,14 @@ func (service *Service) failRun(response http.ResponseWriter, request *http.Requ
 		       error_code = $4, error_detail = $5,
 		       rewrite_input_tokens = $6, rewrite_output_tokens = $7,
 		       answer_input_tokens = $8, answer_output_tokens = $9,
-		       rewrite_ms = $10, embedding_ms = $11, retrieval_ms = $12, reasoning_ms = $13, answer_ms = $14
+		       rewrite_ms = $10, embedding_ms = $11, retrieval_ms = $12, reasoning_ms = $13, answer_ms = $14,
+		       answer_context_tokens = $15
 		WHERE id = $1
 	`, run.ID, status, now, errorCode, errorDetail,
 		input.Usage.RewriteInputTokens, input.Usage.RewriteOutputTokens,
 		input.Usage.AnswerInputTokens, input.Usage.AnswerOutputTokens,
 		input.Timings.RewriteMS, input.Timings.EmbeddingMS, input.Timings.RetrievalMS,
-		input.Timings.ReasoningMS, input.Timings.AnswerMS); err != nil {
+		input.Timings.ReasoningMS, input.Timings.AnswerMS, input.Usage.AnswerContextTokens); err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}

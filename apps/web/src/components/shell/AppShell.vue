@@ -98,10 +98,13 @@ async function closeNavigation() {
   overflow: hidden;
 }
 
+.shell__main[data-layout='assistant'] { grid-template-rows: minmax(0, 1fr); }
+
 .shell__compact-bar { display: none; }
 
 @media (max-width: 1279px) {
   .shell__workspace { grid-template-columns: minmax(0, 1fr); }
+  .shell__main[data-layout='assistant'] { grid-template-rows: auto minmax(0, 1fr); }
 
   .shell__compact-bar {
     position: sticky;

@@ -9,6 +9,7 @@ import (
 )
 
 type runRow struct {
+	AnswerContextTokens  *int64
 	ID                   uuid.UUID
 	ConversationID       uuid.UUID
 	InputMessageID       uuid.UUID
@@ -66,7 +67,7 @@ const runColumns = `
 	upstream_model_id, protocol, base_url, context_window, max_output_tokens,
 	reasoning_effort, reasoning_display_name, sensitive_policy, effective_sensitive_policy,
 	prompt_version, retrieval_version, rewrite_fallback, knowledge_state, knowledge_generation, evidence_state,
-	rewrite_input_tokens, rewrite_output_tokens, answer_input_tokens, answer_output_tokens,
+	rewrite_input_tokens, rewrite_output_tokens, answer_input_tokens, answer_output_tokens, answer_context_tokens,
 	rewrite_ms, embedding_ms, retrieval_ms, reasoning_ms, answer_ms,
 	created_at, queued_at, started_at, finished_at, error_code, error_detail
 `
@@ -79,7 +80,7 @@ func runScanTargets(run *runRow) []any {
 		&run.UpstreamModelID, &run.Protocol, &run.BaseURL, &run.ContextWindow, &run.MaxOutputTokens,
 		&run.ReasoningEffort, &run.ReasoningDisplayName, &run.SensitivePolicy, &run.EffectivePolicy,
 		&run.PromptVersion, &run.RetrievalVersion, &run.RewriteFallback, &run.KnowledgeState, &run.KnowledgeGeneration, &run.EvidenceState,
-		&run.RewriteInputTokens, &run.RewriteOutputTokens, &run.AnswerInputTokens, &run.AnswerOutputTokens,
+		&run.RewriteInputTokens, &run.RewriteOutputTokens, &run.AnswerInputTokens, &run.AnswerOutputTokens, &run.AnswerContextTokens,
 		&run.RewriteMS, &run.EmbeddingMS, &run.RetrievalMS, &run.ReasoningMS, &run.AnswerMS,
 		&run.CreatedAt, &run.QueuedAt, &run.StartedAt, &run.FinishedAt, &run.ErrorCode, &run.ErrorDetail}
 }
@@ -151,6 +152,7 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 		Model: RunModelDTO{
 			ID: run.ModelID, DisplayName: run.ModelDisplayName, UpstreamModelID: run.UpstreamModelID,
 			ProviderID: run.ProviderID, ProviderDisplayName: run.ProviderDisplayName,
+			ContextWindow: run.ContextWindow,
 		},
 		Reasoning:     run.reasoningSnapshot(),
 		PromptVersion: run.PromptVersion, RetrievalVersion: run.RetrievalVersion,
@@ -159,6 +161,7 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 		Usage: RunUsageDTO{
 			RewriteInputTokens: run.RewriteInputTokens, RewriteOutputTokens: run.RewriteOutputTokens,
 			AnswerInputTokens: run.AnswerInputTokens, AnswerOutputTokens: run.AnswerOutputTokens,
+			AnswerContextTokens: run.AnswerContextTokens,
 		},
 		Timings: RunTimingsDTO{
 			RewriteMS: run.RewriteMS, EmbeddingMS: run.EmbeddingMS, RetrievalMS: run.RetrievalMS,

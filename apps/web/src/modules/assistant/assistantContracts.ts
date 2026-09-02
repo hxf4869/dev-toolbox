@@ -26,6 +26,7 @@ export interface AssistantModelDTO {
   id: UUID
   displayName: string
   upstreamModelId: string
+  contextWindow: number
   provider: {
     id: UUID
     displayName: string
@@ -187,6 +188,7 @@ export interface AssistantRunDTO {
     upstreamModelId: string
     providerId: UUID
     providerDisplayName: string
+    contextWindow: number
   }
   reasoning: {
     reasoning: Reasoning
@@ -202,6 +204,7 @@ export interface AssistantRunDTO {
     rewriteOutputTokens: number | null
     answerInputTokens: number | null
     answerOutputTokens: number | null
+    answerContextTokens: number | null
   }
   timings: {
     rewriteMs: number | null
@@ -382,6 +385,7 @@ export interface TemporaryRunStatusEvent {
   sequence: number
   status: 'running'
   phase: RunPhase | null
+  model?: AssistantRunDTO['model']
 }
 
 export interface TemporaryTerminalEvent {

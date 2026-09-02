@@ -455,6 +455,7 @@ export const useAssistantStore = defineStore('assistant', () => {
           id: model.id,
           displayName: model.displayName,
           upstreamModelId: model.upstreamModelId,
+          contextWindow: model.contextWindow,
           providerId: model.provider.id,
           providerDisplayName: model.provider.displayName,
         },
@@ -663,6 +664,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       ...message.temporaryRuntime,
       status: state.status === 'idle' ? 'running' : state.status,
       phase: state.phase,
+      model: state.model ?? message.temporaryRuntime.model,
       promptVersion: state.promptVersion,
       retrievalVersion: state.retrievalVersion,
       rewriteFallback: state.rewriteFallback,
@@ -943,6 +945,7 @@ function summaryFromRun(run: AssistantRunDTO) {
 
 function emptyUsage(): AssistantRunDTO['usage'] {
   return {
+    answerContextTokens: null,
     rewriteInputTokens: null,
     rewriteOutputTokens: null,
     answerInputTokens: null,

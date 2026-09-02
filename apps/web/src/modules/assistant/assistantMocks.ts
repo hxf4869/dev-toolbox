@@ -34,6 +34,7 @@ export const assistantModelFixture: AssistantModelDTO = {
   id: MOCK_IDS.model,
   displayName: '工程助手模型',
   upstreamModelId: 'assistant-model-v1',
+  contextWindow: 128000,
   provider: { id: MOCK_IDS.provider, displayName: '本地 Mock Provider' },
   reasoningOptions: [
     { reasoning: 'off', displayName: '不思考', sortOrder: -1 },
@@ -225,6 +226,7 @@ export const runFixtures = {
       rewriteOutputTokens: 18,
       answerInputTokens: 980,
       answerOutputTokens: 230,
+      answerContextTokens: 18400,
     },
     finishedAt: now,
   },
@@ -526,6 +528,7 @@ function run(status: AssistantRunDTO['status'], phase: AssistantRunDTO['phase'])
       id: MOCK_IDS.model,
       displayName: assistantModelFixture.displayName,
       upstreamModelId: assistantModelFixture.upstreamModelId,
+      contextWindow: assistantModelFixture.contextWindow,
       providerId: MOCK_IDS.provider,
       providerDisplayName: assistantModelFixture.provider.displayName,
     },
@@ -540,6 +543,7 @@ function run(status: AssistantRunDTO['status'], phase: AssistantRunDTO['phase'])
       rewriteOutputTokens: null,
       answerInputTokens: null,
       answerOutputTokens: null,
+      answerContextTokens: null,
     },
     timings: {
       rewriteMs: null,
