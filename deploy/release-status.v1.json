@@ -1,62 +1,62 @@
 {
-  "candidateVersion": "v2.2.0-rc.1",
-  "generatedAt": "2026-09-01T13:08:23Z",
+  "candidateVersion": "v3.0.0-rc.1",
+  "generatedAt": "2026-09-02T13:44:30Z",
   "checks": [
     {
       "id": "data_integrity",
       "label": "原始数据与附件",
-      "status": "passed",
-      "summary": "当前 Go 全包测试与 V2 隔离数据库集成通过；迁移 007 只新增阿里云配置、额度和调用元数据，不改写原始记录或附件。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "status": "review",
+      "summary": "上下文计量的定向数据库集成与隔离迁移通过；测试环境 Schema 8→9 成功，既有 4 条 Run、8 条消息未减少，历史计量保持 NULL。本轮未运行全库原始记录与附件完整性门禁。",
+      "checkedAt": "2026-09-02T13:44:30Z"
     },
     {
       "id": "auth_security",
       "label": "认证与安全会话",
-      "status": "passed",
-      "summary": "当前认证与 secretbox 单元测试通过；密码、TOTP、恢复码、可信设备、会话撤销、CSRF 及云凭据密文边界保持覆盖。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "status": "not_run",
+      "summary": "本轮未修改认证和密钥机制；部署后已有登录会话可恢复，但未重新执行当前候选的完整认证、安全会话和凭据门禁。",
+      "checkedAt": null
     },
     {
       "id": "search_privacy",
       "label": "搜索与隐私脱敏",
-      "status": "passed",
-      "summary": "当前知识与工具相关自动化通过；字面检索、敏感遮挡、no-store，以及工具正文不进入 URL、浏览器持久化存储和日志的边界保持覆盖。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "status": "review",
+      "summary": "知识助手临时会话不持久化及上下文协议定向回归通过，既有检索与隐私约束保持不变；当前候选未运行完整搜索与隐私门禁。",
+      "checkedAt": "2026-09-02T13:44:30Z"
     },
     {
       "id": "ai_policy",
       "label": "AI 策略与版本",
       "status": "review",
-      "summary": "JSON AI 窄接口与既有 AI worker 的 mock/本地集成通过；v2.2.0-rc.1 未调用真实 Provider，需 owner 配置后再验证。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "summary": "完整输入用量、模型窗口快照及旧用量兼容的 Web/Worker/API 定向测试通过；本轮未调用真实 Provider，V3 真实 40 题人工评测与完整 AI 策略门禁仍待完成。",
+      "checkedAt": "2026-09-02T13:44:30Z"
     },
     {
       "id": "backup_restore",
       "label": "备份与灾难恢复",
-      "status": "review",
-      "summary": "v2.2.0-rc.1 本次未访问 OSS，也未运行目标版本备份或恢复演练；旧版本恢复证据不作为当前候选的新证据。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "status": "not_run",
+      "summary": "v3.0.0-rc.1 未访问 OSS/S3/restic，未运行目标版本备份或恢复演练；保留旧应用镜像和配置不等同于数据库备份或恢复验证。",
+      "checkedAt": null
     },
     {
       "id": "browser_accessibility",
       "label": "浏览器与可访问性",
       "status": "review",
-      "summary": "V2 桌面与 390/1024/1440 视口、焦点和溢出已有浏览器证据；V2.1/V2.2 的移动 WebKit、浅色主题和完整辅助技术矩阵尚未补齐。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "summary": "功能候选已有 390/1024/1440/1920/3840 视口及深浅主题定向证据；部署后 835×866 输入区固定、上下文空态和帮助页版本烟测通过。完整跨浏览器与辅助技术矩阵未补齐。",
+      "checkedAt": "2026-09-02T13:44:30Z"
     },
     {
       "id": "performance",
       "label": "目标主机性能",
-      "status": "review",
-      "summary": "历史固定规模目标主机指标已通过，但 v2.2.0-rc.1 未重新运行目标版本性能门禁，不能把旧结果标成当前候选实测。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "status": "not_run",
+      "summary": "v3.0.0-rc.1 未运行目标版本固定规模性能门禁；本次服务健康与页面烟测不作为性能基准，旧版本结果不标为当前实测。",
+      "checkedAt": null
     },
     {
       "id": "deployment_security",
       "label": "生产部署与依赖",
-      "status": "passed",
-      "summary": "v2.2.0-rc.1 三个应用镜像从候选提交 c93b3e3 构建并切换；静态契约、API/worker、公网 HTTPS 与关键路由通过，应用零重启计数，PostgreSQL 未重启。",
-      "checkedAt": "2026-09-01T13:08:23Z"
+      "status": "review",
+      "summary": "三个 AMD64 应用镜像从 a979347 构建并切换至 v3.0.0-rc.1；API/Worker 健康、HTTPS 与页面烟测通过，应用零重启计数，PostgreSQL/Ollama 未重启。本轮未执行完整部署与依赖门禁。",
+      "checkedAt": "2026-09-02T13:44:30Z"
     }
   ]
 }

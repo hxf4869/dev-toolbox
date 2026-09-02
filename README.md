@@ -6,6 +6,8 @@
 
 第二期 V2.0–V2.2 已实现，并于 2026-09-01 以 `v2.2.0-rc.1` 发布候选部署：包含中立首页、八个本地工具、JSON AI 类型生成、阿里云额度保护与文本翻译，以及本地/云 OCR 翻译。当前自动化、隔离数据库集成、生产静态契约、应用健康与正式 HTTPS 已通过；真实阿里云、目标版本备份恢复/性能门禁、完整浏览器矩阵和 `release-check` 尚未执行，因此未标记为稳定版。入口见 [V2 工具箱总基线](./docs/09-V2-TOOLBOX-BASELINE.md)、[V2 交付验收记录](./docs/13-V2-TOOLBOX-DELIVERY-AND-ACCEPTANCE.md) 与 [RC 审计修复执行文档](./docs/15-V2-RC-AUDIT-REMEDIATION.md)。
 
+第三期知识助手于 2026-09-02 以 `v3.0.0-rc.1` 更新既有测试环境，包含持久/临时对话、知识检索与引用、内网 Embedding 接入，以及固定底部输入区和实测上下文占比。三个 AMD64 应用镜像构建、Schema 8→9 单列迁移、服务健康、HTTPS 与页面烟测通过；数据库及 Ollama 未重启。上下文计量的生产者/消费者与迁移回归已通过，但真实 40 题人工评测、目标版本备份恢复/性能门禁及完整 `release-check` 尚未完成，仍为候选版。范围见 [V3 实现合同](./docs/16-V3-KNOWLEDGE-ASSISTANT-IMPLEMENTATION.md)，本次发布与验证边界见 [V3 验收记录](./docs/17-V3-LOCAL-ACCEPTANCE.md)。
+
 ## 一期核心闭环
 
 ```text
