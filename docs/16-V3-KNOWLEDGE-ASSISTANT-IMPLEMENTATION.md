@@ -424,6 +424,7 @@ unconfigured | indexing | ready | failed | disabled
 - 知识：`knowledge_state=ready/unavailable`；创建时 ready 还要把当时 generation 冻结到内部审计列 `knowledge_generation`，后续降级仍保留该代次且不得跨代检索；`evidence_state` 在检索判定前为 `NULL`，之后只能是 `matched/not_found/unavailable`，不增加 `pending` 枚举。
 - 租约：`claim_attempt`、`lease_owner`、`lease_version`、`lease_expires_at`、`heartbeat_at`、`stop_requested_at`。
 - 用量：`rewrite_input_tokens`、`rewrite_output_tokens`、`answer_input_tokens`、`answer_output_tokens`；Provider 未返回时为 NULL。
+- 上下文计量：`answer_context_tokens bigint NULL` 保存本轮回答的完整输入 token，即 SDK 的 `input + cacheRead + cacheWrite`，不含回答输出或查询改写。原 input 字段保留 SDK 非缓存输入口径；不能用它代替上下文总量。旧记录和未返回完整用量的请求保持 NULL，不回填、不按字符估算。
 - 耗时：rewrite/embedding/retrieval/reasoning/answer 毫秒及 `created_at/queued_at/started_at/finished_at`。
 - 错误：`error_code` 和无正文的 `error_detail`。
 
@@ -444,6 +445,8 @@ stateDiagram-v2
 ```
 
 `stop_requested_at` 是控制信号，不增加 `stopping` 状态。
+
+上下文计量通过 `009_v3_assistant_context_usage.sql` 单列增量迁移进入 schema 9，不改变原文、会话内容或历史用量。部署需先明确批准迁移，再更新 API、Worker 和 Web；新 API 接受旧 Worker 缺少 `answerContextTokens` 的请求并按 NULL 处理。旧 API 的 schema 检查要求 8，不能仅替换旧镜像当作完整回退；迁移 down 只移除新增计量列，会丢失这一列的新统计，须单独授权。APP_VERSION 不随本次功能修正提升。
 
 ### 8.11 `assistant_run_sources`
 
@@ -862,6 +865,7 @@ type AssistantModelDTO = {
   id: UUID
   displayName: string
   upstreamModelId: string
+  contextWindow: number
   provider: {id: UUID; displayName: string}
   reasoningOptions: ReasoningOptionDTO[]
   lastReasoning: Reasoning
@@ -1081,6 +1085,7 @@ type AssistantRunDTO = {
     upstreamModelId: string
     providerId: UUID
     providerDisplayName: string
+    contextWindow: number
   }
   reasoning: {reasoning: Reasoning; displayName: string}
   promptVersion: string
@@ -1093,6 +1098,7 @@ type AssistantRunDTO = {
     rewriteOutputTokens: number | null
     answerInputTokens: number | null
     answerOutputTokens: number | null
+    answerContextTokens: number | null
   }
   timings: {
     rewriteMs: number | null
@@ -1197,6 +1203,8 @@ POST /internal/assistant/runs/{id}/summary
 ```
 
 claim 快照包括：模型/密钥、思考、策略、最近成功消息、摘要、Prompt 版本、当前 stop 状态和 Embedding 配置。Worker 不自行查询 Provider 配置数据库。
+
+complete/fail 及 `usage.updated` 的 usage 增量携带 `answerContextTokens`；新 Worker 只在获得非零完整输入计量时填值，SDK 未提供 usage 的全零默认值不能解释为已用 0 token。临时 SSE 使用相同字段但不持久化。公开 Run 的 `model.contextWindow` 必须来自该轮执行快照，不能在读取历史时替换成模型的当前配置；临时 SSE 在首个 `run.status` 中携带同结构的 `model` 快照，后续状态事件可省略该字段。
 
 retrieval 请求携带改写查询和 query vector；Go 返回已经脱敏并落入 `assistant_run_sources` 的 `S1`–`S8`。
 
@@ -1417,6 +1425,9 @@ UI 追求 ChatGPT 网页版同等级的对话流畅度，但不复制其品牌�
 - 活动 Run 期间可以继续编辑本地草稿，但发送按钮禁用并显示停止按钮。
 - 每个持久会话有一份当前标签页 `sessionStorage` 草稿，以 conversation ID 分键；刷新保留、关闭标签页清除，不使用 `localStorage` 或 IndexedDB。临时草稿只在内存，刷新即消失。
 - 切换模型/档位在 Run 中允许，清楚提示“下一条消息生效”。
+- 输入框下方、字符数左侧展示最近一次请求的输入上下文 token、该轮模型窗口和百分比；字符数独立标注“字符”。占比为 `answerContextTokens / model.contextWindow`，不累加历史调用、查询改写或本轮输出，也不将当前草稿混入实测值。
+- 生成中保留上一条已结束请求的统计并标明“上次请求”；切换模型后仍按统计所属 Run 的模型窗口显示，并说明所属模型。尚无请求显示待请求，旧记录/Provider 缺少完整计量显示未提供，不显示 0%。持久和临时会话采用相同规则。
+- 修正桌面隐藏 compact bar 后的网格高度分配：聊天视图占满剩余视口，只有消息区滚动；短消息、生成中和完成状态均不能让 composer 随内容高度上移。窄屏保留现有 compact bar 行及输入框自动增高上限，不新建页面骨架。
 
 ### 17.4 流式滚动
 
