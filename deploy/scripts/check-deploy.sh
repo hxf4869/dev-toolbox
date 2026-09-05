@@ -41,11 +41,14 @@ if [ "$repository_kind" = s3 ]; then
 fi
 require_mode "$secrets_dir/internal_service_token" 640
 [ "$(wc -c <"$secrets_dir/internal_service_token" | tr -d ' ')" -ge 32 ] || fail "Secret 长度不足：internal_service_token"
+require_mode "$secrets_dir/agent_console_internal_token" 640
+[ "$(wc -c <"$secrets_dir/agent_console_internal_token" | tr -d ' ')" -ge 32 ] || fail "Secret 长度不足：agent_console_internal_token"
 
 if [ "$(uname -s)" = Linux ]; then
   [ "$(stat -c '%u:%g' "$secrets_dir/postgres_password")" = "10001:10001" ] || fail "postgres_password 必须仅由 API 运行用户读取"
   [ "$(stat -c '%u:%g' "$secrets_dir/app_master_key")" = "10001:10001" ] || fail "app_master_key 必须仅由 API 运行用户读取"
   [ "$(stat -c '%u:%g' "$secrets_dir/internal_service_token")" = "0:20000" ] || fail "internal_service_token 必须授予 API 与 worker 的共享只读组"
+  [ "$(stat -c '%u:%g' "$secrets_dir/agent_console_internal_token")" = "0:20000" ] || fail "agent_console_internal_token 必须授予 API 与 gateway 的共享只读组"
   [ "$(stat -c '%u:%g' "$secrets_dir/restic_password")" = "0:0" ] || fail "restic_password 必须仅由宿主机管理员读取"
   if [ "$repository_kind" = s3 ]; then
     [ "$(stat -c '%u:%g' "$repository_credentials_file")" = "0:0" ] || fail "S3 凭据文件必须仅由宿主机管理员读取"
@@ -62,7 +65,7 @@ for data_name in postgres attachments caddy caddy-config operations; do
 done
 
 if [ -d "$project_dir/.git" ]; then
-  for private_path in deploy/.env.production deploy/secrets/postgres_password deploy/secrets/internal_service_token deploy/secrets/app_master_key deploy/secrets/restic_password deploy/secrets/restic_s3.env; do
+  for private_path in deploy/.env.production deploy/secrets/postgres_password deploy/secrets/internal_service_token deploy/secrets/agent_console_internal_token deploy/secrets/app_master_key deploy/secrets/restic_password deploy/secrets/restic_s3.env; do
     if git -C "$project_dir" ls-files --error-unmatch "$private_path" >/dev/null 2>&1; then
       fail "私有部署文件被 Git 跟踪：$private_path"
     fi
@@ -132,6 +135,9 @@ api_user=$(docker image inspect --format '{{.Config.User}}' "dev-toolbox-api:$ve
 worker_user=$(docker image inspect --format '{{.Config.User}}' "dev-toolbox-ai-worker:$version")
 [ -n "$api_user" ] && [ "$api_user" != 0 ] || fail "API 镜像必须声明非 root 用户"
 [ -n "$worker_user" ] && [ "$worker_user" != 0 ] || fail "worker 镜像必须声明非 root 用户"
+
+docker run --rm --network none --entrypoint /bin/sh "dev-toolbox-gateway:$version" \
+  -c 'test -f /srv/agent-console/index.html' >/dev/null || fail "gateway 镜像缺少 Agent Console 静态产物"
 
 docker run --rm --network none -e APP_DOMAIN="$gateway_site" -e CADDY_TRUSTED_PROXY_CIDRS="$caddy_trusted_proxy_cidrs" \
   -v "$production_config_root/Caddyfile:/etc/caddy/Caddyfile:ro" "dev-toolbox-gateway:$version" \

@@ -59,3 +59,38 @@ func TestLoadRejectsOriginWithPath(t *testing.T) {
 		t.Fatal("expected APP_ORIGIN with path to fail")
 	}
 }
+
+func TestLoadAllowsMissingAgentConsoleToken(t *testing.T) {
+	masterKeyPath := filepath.Join(t.TempDir(), "master-key")
+	if err := os.WriteFile(masterKeyPath, []byte(base64.StdEncoding.EncodeToString(make([]byte, 32))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DATABASE_URL", "postgres://example.invalid/dev_toolbox")
+	t.Setenv("APP_MASTER_KEY_FILE", masterKeyPath)
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("AGENT_CONSOLE_INTERNAL_TOKEN", "")
+	t.Setenv("AGENT_CONSOLE_INTERNAL_TOKEN_FILE", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.AgentConsoleInternalToken != "" {
+		t.Fatalf("AgentConsoleInternalToken = %q, want empty", cfg.AgentConsoleInternalToken)
+	}
+}
+
+func TestLoadRejectsShortAgentConsoleToken(t *testing.T) {
+	masterKeyPath := filepath.Join(t.TempDir(), "master-key")
+	if err := os.WriteFile(masterKeyPath, []byte(base64.StdEncoding.EncodeToString(make([]byte, 32))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DATABASE_URL", "postgres://example.invalid/dev_toolbox")
+	t.Setenv("APP_MASTER_KEY_FILE", masterKeyPath)
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("AGENT_CONSOLE_INTERNAL_TOKEN", "too-short")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected short AGENT_CONSOLE_INTERNAL_TOKEN to fail")
+	}
+}

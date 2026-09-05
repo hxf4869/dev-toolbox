@@ -34,15 +34,18 @@ create_text_secret() {
 
 create_text_secret "$secrets_dir/postgres_password" 48
 create_text_secret "$secrets_dir/internal_service_token" 48
+create_text_secret "$secrets_dir/agent_console_internal_token" 48
 create_text_secret "$secrets_dir/app_master_key" 32
 create_text_secret "$secrets_dir/restic_password" 48
 
 docker run --rm --network none --user root -v "$secrets_dir:/secrets" alpine:3.23.3 sh -c '
   chown 10001:10001 /secrets/postgres_password /secrets/app_master_key
   chown 0:20000 /secrets/internal_service_token
+  chown 0:20000 /secrets/agent_console_internal_token
   chown 0:0 /secrets/restic_password
   chmod 0600 /secrets/postgres_password /secrets/app_master_key /secrets/restic_password
   chmod 0640 /secrets/internal_service_token
+  chmod 0640 /secrets/agent_console_internal_token
 '
 if [ "$repository_kind" = s3 ]; then
   chmod 600 "$repository_credentials_file"

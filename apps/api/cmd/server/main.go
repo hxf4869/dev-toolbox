@@ -87,6 +87,7 @@ func main() {
 	router := http.NewServeMux()
 	operations.RegisterRoutes(router, pool)
 	authService.RegisterRoutes(router)
+	authService.RegisterAgentConsoleRoutes(router, cfg.AgentConsoleInternalToken)
 	aliyunService.RegisterRoutes(router, authService)
 	knowledgeService.RegisterRoutes(router, authService)
 	aiService.RegisterRoutes(router, authService)

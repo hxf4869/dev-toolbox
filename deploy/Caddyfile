@@ -48,6 +48,94 @@
 		reverse_proxy api:8080
 	}
 
+	# Agent Console(同域挂载)。唯一公网路由合同:
+	#   /agent-console/api/*      → forward_auth(dev-toolbox verify)→ relay
+	#   /agent-console/ws         → relay(ticket 在 Sec-WebSocket-Protocol,原样转发)
+	#   /agent-console/bridge/ws  → relay(Bearer 设备凭据,不做浏览器 Cookie forward_auth)
+	#   /agent-console/bridge/pairing/{register,claim} → relay(无 Cookie forward_auth,
+	#                               Relay 侧按来源限速;网关只加 4KiB 保守请求体限制)
+	#   /agent-console/transfers/* → relay(无 forward_auth;device credential +
+	#                               transfer token + 方向由 Relay 校验)
+	#   /internal/*               → 公网无路由,一律 404(只能由网关自身 forward_auth
+	#                               或内网直连 api 上游访问)。
+	handle /internal/* {
+		respond 404
+	}
+
+	handle /agent-console/api/* {
+		# 防伪造说明:不要在此块放顶层 request_header -X-Agent-Console-*——
+		# Caddy 指令顺序中 forward_auth 先于 request_header,删除会落在
+		# copy_headers 重建身份头之后,导致 /agent-console/api/* 恒 401
+		# (e2e_gateway 实测,2026-09-04)。防伪造由 forward_auth 保证:
+		# verify 401 时请求不会到达 relay;verify 2xx 时 copy_headers 的
+		# set 无条件覆盖客户端伪造的同名头。
+		forward_auth api:8080 {
+			uri /internal/agent-console/auth-sessions/verify
+			# forward_auth 固定发 GET,浏览器原始 Cookie/Origin/X-CSRF-Token
+			# 头会随克隆请求带上;原始方法经该 header 交给 dev-toolbox 判定写请求。
+			header_up X-Agent-Console-Method {method}
+			header_up Authorization "Bearer {$AGENT_CONSOLE_INTERNAL_TOKEN}"
+			copy_headers X-Agent-Console-Session-Id X-Agent-Console-Owner-Id
+		}
+		reverse_proxy {$AGENT_CONSOLE_RELAY_UPSTREAM:agent-console-relay:8081} {
+			header_up -Cookie
+			header_up -X-CSRF-Token
+			header_up -Origin
+			header_up -Authorization
+		}
+	}
+
+	# WebSocket:一次性 ticket 走 Sec-WebSocket-Protocol(固定协议名 + Base64URL
+	# ticket),由 Relay 在握手时消费,网关不在此消费、也不改写该 header。
+	handle /agent-console/ws {
+		request_header -X-Agent-Console-Session-Id
+		request_header -X-Agent-Console-Owner-Id
+		reverse_proxy {$AGENT_CONSOLE_RELAY_UPSTREAM:agent-console-relay:8081} {
+			header_up -Cookie
+		}
+	}
+
+	# Bridge 数据面:无浏览器会话,一律不做 Cookie forward_auth。
+	handle /agent-console/bridge/ws {
+		# Bridge WSS,Authorization Bearer 设备凭据必须原样到达 relay;
+		# 身份头只用于浏览器路径,仍删除防伪造。
+		request_header -X-Agent-Console-Session-Id
+		request_header -X-Agent-Console-Owner-Id
+		reverse_proxy {$AGENT_CONSOLE_RELAY_UPSTREAM:agent-console-relay:8081}
+	}
+
+	# 配对注册/认领:短码即凭证,限速由 Relay 按来源执行;网关只加保守
+	# 请求体上限,防止该公网入口被用来缓冲大请求。
+	@agent_console_pairing path /agent-console/bridge/pairing/register /agent-console/bridge/pairing/claim
+	handle @agent_console_pairing {
+		request_header -X-Agent-Console-Session-Id
+		request_header -X-Agent-Console-Owner-Id
+		request_body {
+			max_size 4KiB
+		}
+		reverse_proxy {$AGENT_CONSOLE_RELAY_UPSTREAM:agent-console-relay:8081}
+	}
+
+	# 临时文件传输数据面:Bridge 主动出站 producer/consumer(device credential +
+	# 短期 transfer token)与浏览器流式上传/下载都经此路由;不做浏览器 Cookie
+	# forward_auth(设备出站无 Cookie),Authorization 必须原样到达 relay,
+	# 鉴权(凭据+transfer token+目标设备+方向)完全由 relay 完成;流式不缓冲。
+	handle /agent-console/transfers/* {
+		request_header -X-Agent-Console-Session-Id
+		request_header -X-Agent-Console-Owner-Id
+		reverse_proxy {$AGENT_CONSOLE_RELAY_UPSTREAM:agent-console-relay:8081} {
+			flush_interval -1
+		}
+	}
+
+	# Agent Console 静态产物放在 /srv/agent-console；深链回退到其自身
+	# index.html，不能落入 dev-toolbox 的 /index.html。
+	handle /agent-console/* {
+		root * /srv
+		try_files {path} /agent-console/index.html
+		file_server
+	}
+
 	handle /health/* {
 		reverse_proxy api:8080
 	}

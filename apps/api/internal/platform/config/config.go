@@ -25,6 +25,7 @@ type Config struct {
 	MigrationsPath            string
 	AIWorkerURL               string
 	InternalServiceToken      string
+	AgentConsoleInternalToken string
 	AllowInsecureProviderHTTP bool
 	AppVersion                string
 	OperationsStatusRoot      string
@@ -57,6 +58,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// Agent Console 的独立内部服务令牌（Relay/网关调用 ticket 消费、introspect
+	// 与 forward-auth verify）。允许不配置：此时对应内部路由以 503 拒绝服务，
+	// 已有部署无需新增 Secret 即可升级。
+	agentConsoleToken, err := loadOptionalTextSecret("AGENT_CONSOLE_INTERNAL_TOKEN", "AGENT_CONSOLE_INTERNAL_TOKEN_FILE")
+	if err != nil {
+		return Config{}, err
+	}
 	workerURL := valueOrDefault("AI_WORKER_URL", "http://ai-worker:3001")
 	if err := validateInternalServiceURL(workerURL); err != nil {
 		return Config{}, err
@@ -73,6 +81,7 @@ func Load() (Config, error) {
 		MigrationsPath:            valueOrDefault("MIGRATIONS_PATH", "migrations"),
 		AIWorkerURL:               strings.TrimRight(workerURL, "/"),
 		InternalServiceToken:      internalToken,
+		AgentConsoleInternalToken: agentConsoleToken,
 		AllowInsecureProviderHTTP: strings.EqualFold(os.Getenv("ALLOW_INSECURE_PROVIDER_HTTP"), "true"),
 		AppVersion:                valueOrDefault("APP_VERSION", "development"),
 		OperationsStatusRoot:      filepath.Clean(valueOrDefault("OPERATIONS_STATUS_ROOT", "../../deploy/data/operations")),
@@ -143,11 +152,25 @@ func loadMasterKey() ([]byte, error) {
 }
 
 func loadTextSecret(valueKey, fileKey string) (string, error) {
+	value, err := loadOptionalTextSecret(valueKey, fileKey)
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		return "", fmt.Errorf("%s or %s is required", valueKey, fileKey)
+	}
+	return value, nil
+}
+
+// loadOptionalTextSecret reads a secret that may legitimately be absent; when
+// both sources are empty it returns "" without error, but a configured secret
+// still must satisfy the shared length bounds.
+func loadOptionalTextSecret(valueKey, fileKey string) (string, error) {
 	value := strings.TrimSpace(os.Getenv(valueKey))
 	if value == "" {
 		path := os.Getenv(fileKey)
 		if path == "" {
-			return "", fmt.Errorf("%s or %s is required", valueKey, fileKey)
+			return "", nil
 		}
 		encoded, err := os.ReadFile(path)
 		if err != nil {

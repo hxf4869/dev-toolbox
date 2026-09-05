@@ -10,7 +10,9 @@ import (
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
 )
 
-const RequiredSchemaVersion = 9
+// RequiredSchemaVersion 必须与 migrations/ 最新序号一致:
+// 010_agent_console_ws_tickets.sql 合入后由 9 升到 10。
+const RequiredSchemaVersion = 10
 
 type databasePinger interface {
 	Ping(context.Context) error

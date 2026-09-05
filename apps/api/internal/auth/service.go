@@ -25,6 +25,10 @@ type Service struct {
 	limiter        *loginLimiter
 	dummyHash      string
 	now            func() time.Time
+	// agentConsoleInternalToken guards the /internal/agent-console/* routes.
+	// It is injected through RegisterAgentConsoleRoutes and may be empty, in
+	// which case those routes fail closed (see internalOnly).
+	agentConsoleInternalToken string
 }
 
 func NewService(database *pgxpool.Pool, masterKey []byte, appOrigin, trustedProxyCIDRs string) (*Service, error) {

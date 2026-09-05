@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM node:24.20.0-alpine3.23 AS web-build
 
 ARG APP_VERSION=development
@@ -13,6 +15,16 @@ RUN pnpm install --frozen-lockfile --filter @dev-toolbox/web...
 COPY apps/web apps/web
 RUN pnpm --filter @dev-toolbox/web build
 
+FROM node:24.20.0-alpine3.23 AS agent-console-web-build
+
+RUN corepack enable
+WORKDIR /agent-console
+COPY --from=agent_console_web packages/protocol-ts ./packages/protocol-ts
+COPY --from=agent_console_web apps/web ./apps/web
+WORKDIR /agent-console/apps/web
+RUN pnpm install --ignore-workspace --frozen-lockfile
+RUN pnpm build
+
 FROM caddy:2.11.3-alpine
 
 ARG APP_VERSION=development
@@ -20,4 +32,9 @@ LABEL org.opencontainers.image.title="dev-toolbox-gateway" \
       org.opencontainers.image.version=$APP_VERSION
 
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY deploy/gateway-entrypoint.sh /gateway-entrypoint.sh
 COPY --from=web-build /src/apps/web/dist /srv
+COPY --from=agent-console-web-build /agent-console/apps/web/dist /srv/agent-console
+
+ENTRYPOINT ["/bin/sh", "/gateway-entrypoint.sh"]
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

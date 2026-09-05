@@ -152,10 +152,22 @@ func (service *Service) withAuthentication(mutation bool, requiredScopes []strin
 }
 
 func (service *Service) authenticateSession(request *http.Request, token string) (Session, bool) {
+	session, ok := service.lookupSession(request.Context(), token)
+	if !ok {
+		return Session{}, false
+	}
+	service.touchSession(request.Context(), &session)
+	return session, true
+}
+
+// lookupSession queries and validates a browser session without updating
+// last_seen_at. Callers that represent real browser activity must follow up
+// with touchSession; internal Agent Console endpoints deliberately never do.
+func (service *Service) lookupSession(ctx context.Context, token string) (Session, bool) {
 	now := service.now().UTC()
 	var session Session
 	var csrfHash []byte
-	err := service.database.QueryRow(request.Context(), `
+	err := service.database.QueryRow(ctx, `
 		SELECT s.id, owner.id, owner.username, s.csrf_token_hash, s.created_at, s.last_seen_at,
 		       s.expires_at, s.trusted_device_id
 		FROM auth_sessions s
@@ -176,19 +188,25 @@ func (service *Service) authenticateSession(request *http.Request, token string)
 	if subtle.ConstantTimeCompare(csrfHash, tokenHash(session.CSRFToken)) != 1 {
 		return Session{}, false
 	}
-	if now.Sub(session.LastSeenAt) >= 5*time.Minute {
-		_, updateErr := service.database.Exec(request.Context(), `
-			UPDATE auth_sessions SET last_seen_at = $2::timestamptz
-			WHERE id = $1 AND revoked_at IS NULL
-			  AND last_seen_at < $2::timestamptz - interval '5 minutes'
-		`, session.ID, now)
-		if updateErr != nil {
-			slog.ErrorContext(request.Context(), "auth_session_last_seen_update_failed", "errorType", "database")
-		} else {
-			session.LastSeenAt = now
-		}
-	}
 	return session, true
+}
+
+// touchSession keeps the existing 5-minute last_seen refresh for browser traffic.
+func (service *Service) touchSession(ctx context.Context, session *Session) {
+	now := service.now().UTC()
+	if now.Sub(session.LastSeenAt) < 5*time.Minute {
+		return
+	}
+	_, err := service.database.Exec(ctx, `
+		UPDATE auth_sessions SET last_seen_at = $2::timestamptz
+		WHERE id = $1 AND revoked_at IS NULL
+		  AND last_seen_at < $2::timestamptz - interval '5 minutes'
+	`, session.ID, now)
+	if err != nil {
+		slog.ErrorContext(ctx, "auth_session_last_seen_update_failed", "errorType", "database")
+	} else {
+		session.LastSeenAt = now
+	}
 }
 
 func (service *Service) authenticatePAT(request *http.Request, authorization string) (Actor, bool) {

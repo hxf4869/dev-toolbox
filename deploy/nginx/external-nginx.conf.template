@@ -1,5 +1,11 @@
 limit_req_zone $binary_remote_addr zone=dev_toolbox_login_per_ip:10m rate=6r/m;
 
+# WebSocket 升级用（Agent Console /agent-console/ws）。
+map $http_upgrade $dev_toolbox_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 80;
     listen [::]:80;
@@ -52,6 +58,115 @@ server {
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_pass_header X-Accel-Buffering;
+        proxy_pass http://dev-toolbox-gateway:80;
+    }
+
+    # ========================================================================
+    # Agent Console 同域路由(合同:agent-console docs/ZCODE-BACKEND-EXECUTION-SPEC.md
+    # §20/§22)。本边缘不直接执行 agent-console 鉴权子请求(边缘网络不可直达
+    # dev-toolbox api 与 relay):/agent-console/api/* 的 forward_auth 由内层
+    # dev-toolbox gateway(Caddy)统一完成,transfers/bridge 的鉴权完全由 relay
+    # 校验;边缘只剥离客户端伪造的内部身份头并按合同分段透传:
+    #   - /agent-console/api/*    浏览器会话,Cookie/Origin/X-CSRF-Token 必须原样
+    #                             透传给 gateway 做 forward_auth("api 有 auth");
+    #   - /agent-console/transfers/* 与 /agent-console/bridge/*
+    #                             无浏览器会话,不做任何 auth 拦截("无
+    #                             auth_request");Authorization Bearer(设备凭据/
+    #                             transfer token)必须原样透传,由 relay 校验;
+    #   - WS(=/agent-console/ws、/agent-console/bridge/ws)
+    #                             Upgrade/Connection 升级头与 Sec-WebSocket-Protocol
+    #                             子协议(ticket)原样转发,网关不记录其内容。
+    # ========================================================================
+
+    # 1) 浏览器 REST:鉴权在内层 gateway,此处仅剥离伪造身份头
+    location /agent-console/api/ {
+        proxy_http_version 1.1;
+        proxy_read_timeout 65s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header Connection "";
+        # 置空即不向 gateway 转发这些 header,客户端无法伪造内部身份。
+        proxy_set_header X-Agent-Console-Session-Id "";
+        proxy_set_header X-Agent-Console-Owner-Id "";
+        proxy_request_buffering off;
+        proxy_pass http://dev-toolbox-gateway:80;
+    }
+
+    # 2) 浏览器 WS:ticket 在 Sec-WebSocket-Protocol 子协议中,原样转发
+    #    (nginx 默认透传该 header,此处不得剥离);长连接超时须大于 relay 心跳。
+    location = /agent-console/ws {
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $dev_toolbox_connection_upgrade;
+        proxy_set_header X-Agent-Console-Session-Id "";
+        proxy_set_header X-Agent-Console-Owner-Id "";
+        proxy_pass http://dev-toolbox-gateway:80;
+    }
+
+    # 3) Bridge 出站:WSS(设备凭据)与配对注册/认领。无浏览器 Cookie,
+    #    不做任何 auth 拦截;Authorization 必须原样透传;bridge/ws 亦为
+    #    WebSocket,升级头对普通 POST 无副作用。配对请求体上限由 gateway
+    #    层(4KiB)收紧,边缘沿用全局 110m 即可。
+    location /agent-console/bridge/ {
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $dev_toolbox_connection_upgrade;
+        proxy_set_header X-Agent-Console-Session-Id "";
+        proxy_set_header X-Agent-Console-Owner-Id "";
+        proxy_pass http://dev-toolbox-gateway:80;
+    }
+
+    # 4) 文件数据面:无 auth 拦截,流式不缓冲;读超时覆盖 rendezvous 等待;
+    #    单文件上传初始上限 20 MiB(规格 §22.5)加少量协议开销余量。
+    location /agent-console/transfers/ {
+        proxy_http_version 1.1;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header Connection "";
+        proxy_set_header X-Agent-Console-Session-Id "";
+        proxy_set_header X-Agent-Console-Owner-Id "";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_pass_header X-Accel-Buffering;
+        client_max_body_size 25m;
+        proxy_pass http://dev-toolbox-gateway:80;
+    }
+
+    # 其余 /agent-console/*(前端静态资源等)透传 gateway;同样剥离伪造身份头。
+    location /agent-console/ {
+        proxy_http_version 1.1;
+        proxy_read_timeout 65s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header Connection "";
+        proxy_set_header X-Agent-Console-Session-Id "";
+        proxy_set_header X-Agent-Console-Owner-Id "";
+        proxy_request_buffering off;
         proxy_pass http://dev-toolbox-gateway:80;
     }
 

@@ -5,9 +5,17 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
+      additional_contexts:
+        agent_console_web: ${AGENT_CONSOLE_SOURCE_ROOT:-../../agent-console}
     restart: unless-stopped
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?请在 deploy/.env 配置 APP_DOMAIN}
+      # Agent Console relay 上游;内部令牌经 Secret 文件由 gateway 入口脚本注入 Caddy。
+      # relay 与本网关同网(dev-toolbox_frontend),以网络别名 agent-console-relay 暴露,
+      # 内部监听 8081(agent-console compose 生产 overlay 负责 alias 与端口)。
+      AGENT_CONSOLE_RELAY_UPSTREAM: ${AGENT_CONSOLE_RELAY_UPSTREAM:-agent-console-relay:8081}
+    secrets:
+      - agent_console_internal_token
     ports:
       - "${HTTP_PORT:-8080}:80"
       - "${HTTPS_PORT:-8443}:443"
@@ -45,6 +53,7 @@ services:
       ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
       MIGRATIONS_PATH: /app/migrations
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      AGENT_CONSOLE_INTERNAL_TOKEN_FILE: /run/secrets/agent_console_internal_token
       ALLOW_INSECURE_PROVIDER_HTTP: ${ALLOW_INSECURE_PROVIDER_HTTP:-false}
       AI_WORKER_URL: http://ai-worker:3001
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
@@ -53,6 +62,7 @@ services:
     secrets:
       - postgres_password
       - internal_service_token
+      - agent_console_internal_token
       - app_master_key
     volumes:
       - ./data/attachments:/data:rw
@@ -105,6 +115,20 @@ services:
         condition: service_healthy
     logging: *local-logging
 
+  # Agent Console Relay 由 agent-console 仓库交付,暂不作为真实服务加入本 compose
+  # (生产部署契约检查要求固定四个长期服务)。接入时它必须:
+  #   - 以 external 方式加入 frontend 网络(实际网络名 dev-toolbox_frontend),
+  #     并设置网络别名 agent-console-relay(见 agent-console compose 生产 overlay):
+  #     接收网关 /agent-console/* 反代,并回调 http://api:8080 的
+  #     /internal/agent-console/* 内部端点(Bearer 令牌);
+  #   - 挂载与 api 相同的 agent_console_internal_token Secret;
+  #   - 上游地址与 AGENT_CONSOLE_RELAY_UPSTREAM(默认 agent-console-relay:8081)一致;
+  #   - 自有 PostgreSQL 独立部署,不接入本仓库 backend 网络。
+  # relay:
+  #   image: agent-console-relay:<version>
+  #   networks: [frontend]
+  #   secrets: [agent_console_internal_token]
+
   postgres:
     image: pgvector/pgvector:0.8.6-pg18-trixie
     restart: unless-stopped
@@ -139,5 +163,7 @@ secrets:
     file: ./secrets/postgres_password
   internal_service_token:
     file: ./secrets/internal_service_token
+  agent_console_internal_token:
+    file: ./secrets/agent_console_internal_token
   app_master_key:
     file: ./secrets/app_master_key

@@ -24,6 +24,9 @@
 
 本机需提供 `make`、`openssl`、`jq` 和 OrbStack 的 Docker 兼容运行时。首次启动与后续启动使用同一条命令：
 
+Agent Console 接入构建还要求其仓库默认位于本仓库同级的 `agent-console/`；
+目录不同时，通过绝对路径 `AGENT_CONSOLE_SOURCE_ROOT` 指定。
+
 ```bash
 make up
 ```

@@ -18,6 +18,12 @@ services:
       - /tmp:size=16m,mode=1777
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?请配置正式域名}
+      # Agent Console relay 上游;内部令牌经 Secret 文件由 gateway 入口脚本注入 Caddy。
+      # relay 与本网关同网(dev-toolbox_frontend),以网络别名 agent-console-relay 暴露,
+      # 内部监听 8081(agent-console compose 生产 overlay 负责 alias 与端口)。
+      AGENT_CONSOLE_RELAY_UPSTREAM: ${AGENT_CONSOLE_RELAY_UPSTREAM:-agent-console-relay:8081}
+    secrets:
+      - agent_console_internal_token
     ports:
       - "80:80/tcp"
       - "443:443/tcp"
@@ -58,6 +64,7 @@ services:
       ARTIFACT_SCHEMA_PATH: /app/contracts/ai-artifact.schema.json
       MIGRATIONS_PATH: /app/migrations
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      AGENT_CONSOLE_INTERNAL_TOKEN_FILE: /run/secrets/agent_console_internal_token
       ALLOW_INSECURE_PROVIDER_HTTP: "false"
       AI_WORKER_URL: http://ai-worker:3001
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
@@ -66,6 +73,7 @@ services:
     secrets:
       - postgres_password
       - internal_service_token
+      - agent_console_internal_token
       - app_master_key
     volumes:
       - ${DEPLOY_DATA_ROOT:-./data}/attachments:/data:rw
@@ -134,6 +142,19 @@ services:
     networks: [backend]
     logging: *production-logging
 
+  # Agent Console Relay 由 agent-console 仓库交付,不加入本 compose(部署契约
+  # 检查要求固定四个长期服务)。接入时以 external 方式加入 frontend 网络(实际
+  # 网络名 dev-toolbox_frontend)并设置网络别名 agent-console-relay(见
+  # agent-console compose 生产 overlay):接收网关 /agent-console/* 反代并回调
+  # http://api:8080 的 /internal/agent-console/*(Bearer 令牌),挂载
+  # agent_console_internal_token Secret,上游地址与 AGENT_CONSOLE_RELAY_UPSTREAM
+  # (默认 agent-console-relay:8081)一致;自有 PostgreSQL 独立部署,不接入
+  # 本仓库 backend 网络。
+  # relay:
+  #   image: agent-console-relay:${APP_VERSION}
+  #   networks: [frontend]
+  #   secrets: [agent_console_internal_token]
+
 networks:
   frontend:
     internal: false
@@ -147,5 +168,7 @@ secrets:
     file: ${DEPLOY_SECRETS_ROOT:-./secrets}/postgres_password
   internal_service_token:
     file: ${DEPLOY_SECRETS_ROOT:-./secrets}/internal_service_token
+  agent_console_internal_token:
+    file: ${DEPLOY_SECRETS_ROOT:-./secrets}/agent_console_internal_token
   app_master_key:
     file: ${DEPLOY_SECRETS_ROOT:-./secrets}/app_master_key

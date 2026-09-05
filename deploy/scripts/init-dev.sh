@@ -22,7 +22,7 @@ if [ ! -f "$postgres_password_file" ]; then
   unset postgres_password
 fi
 
-for secret_name in internal_service_token; do
+for secret_name in internal_service_token agent_console_internal_token; do
   secret_file="$secrets_dir/$secret_name"
   if [ ! -f "$secret_file" ]; then
     openssl rand -base64 48 | tr -d '\n' >"$secret_file"

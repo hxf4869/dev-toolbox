@@ -448,8 +448,8 @@ func resetDatabase(t *testing.T, database *pgxpool.Pool) {
 	t.Helper()
 	_, err := database.Exec(context.Background(), `
 		TRUNCATE TABLE idempotency_records, search_fragments, attachments, raw_records,
-		knowledge_items, auth_sessions, trusted_devices, mfa_recovery_codes,
-		auth_challenges, security_events, owner_account CASCADE
+		knowledge_items, agent_console_ws_tickets, auth_sessions, trusted_devices,
+		mfa_recovery_codes, auth_challenges, security_events, owner_account CASCADE
 	`)
 	if err != nil {
 		t.Fatal(err)
