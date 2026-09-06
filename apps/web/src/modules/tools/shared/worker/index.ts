@@ -4,9 +4,11 @@ export {
   WorkerRemoteError,
   WorkerRequestCancelledError,
   WorkerRequestClient,
+  WorkerRequestFailedError,
 } from './requestClient'
 export type {
   WorkerPort,
+  WorkerPortEventType,
   WorkerRequest,
   WorkerRequestClientOptions,
   WorkerRequestOptions,

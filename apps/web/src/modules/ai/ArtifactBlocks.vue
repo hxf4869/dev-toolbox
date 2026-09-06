@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import SafeMarkdown from '../knowledge/SafeMarkdown.vue'
 import type { AttachmentEntry } from '../knowledge/library'
@@ -16,6 +17,17 @@ const copiedKey = ref('')
 const copyErrorKey = ref('')
 const revealedValues = ref(new Set<string>())
 
+// Placeholder tokens the user should fill before copying. `${var}` stays out on
+// purpose: it is regular shell variable syntax, not a fill-in placeholder.
+// Spaces are excluded from `<...>` (shell redirects like `< in.txt >` always
+// contain them, placeholder conventions do not) and commas from `{...}`
+// (brace expansion like `{a,b}`; placeholders never carry commas).
+const PLACEHOLDER_PATTERN = /<[^<>\n{} ]{1,80}>|\{[^<>\n{}$,]{1,80}\}/g
+
+const fillState = ref<{ key: string; command: string; tokens: string[] } | null>(null)
+const fillValues = ref<Record<string, string>>({})
+const fillError = ref(false)
+
 function isBlock<T extends KnownArtifactBlock['type']>(
   block: ArtifactBlock,
   type: T,
@@ -25,6 +37,10 @@ function isBlock<T extends KnownArtifactBlock['type']>(
 
 function attachment(id: string) {
   return props.attachments.find((entry) => entry.id === id)
+}
+
+function commandPlaceholders(command: string): string[] {
+  return Array.from(new Set(command.match(PLACEHOLDER_PATTERN) ?? []))
 }
 
 async function copyExact(key: string, value: string) {
@@ -39,6 +55,55 @@ async function copyExact(key: string, value: string) {
     copiedKey.value = ''
     copyErrorKey.value = key
   }
+}
+
+function requestCommandCopy(key: string, command: string) {
+  const tokens = commandPlaceholders(command)
+  if (!tokens.length) {
+    void copyExact(key, command)
+    return
+  }
+  fillError.value = false
+  fillValues.value = Object.fromEntries(tokens.map((token) => [token, '']))
+  fillState.value = { key, command, tokens }
+}
+
+function substitutedCommand(): string {
+  if (!fillState.value) return ''
+  let result = fillState.value.command
+  for (const [token, value] of Object.entries(fillValues.value)) {
+    if (!value.trim()) continue
+    result = result.split(token).join(value)
+  }
+  return result
+}
+
+async function copyFilledCommand() {
+  const state = fillState.value
+  if (!state) return
+  fillError.value = false
+  try {
+    await navigator.clipboard.writeText(substitutedCommand())
+    copiedKey.value = state.key
+    fillState.value = null
+    window.setTimeout(() => {
+      if (copiedKey.value === state.key) copiedKey.value = ''
+    }, 1600)
+  } catch {
+    fillError.value = true
+  }
+}
+
+async function copyRawCommand() {
+  if (!fillState.value) return
+  const { key, command } = fillState.value
+  fillState.value = null
+  await copyExact(key, command)
+}
+
+function closeFillDialog() {
+  fillState.value = null
+  fillError.value = false
 }
 
 function copyLabel(key: string) {
@@ -86,7 +151,7 @@ function unknownType(block: ArtifactBlock) {
     <div class="artifact-blocks">
       <article v-for="block in content.blocks" :key="block.id" class="artifact-block">
         <template v-if="isBlock(block, 'markdown')">
-          <SafeMarkdown :source="block.markdown" />
+          <SafeMarkdown :source="block.markdown" origin="模型整理" />
         </template>
 
         <template v-else-if="isBlock(block, 'code')">
@@ -96,7 +161,7 @@ function unknownType(block: ArtifactBlock) {
         </template>
 
         <template v-else-if="isBlock(block, 'command')">
-          <header class="code-header"><span>{{ block.shell }} · 命令</span><button type="button" @click="copyExact(block.id, block.command)"><UiIcon name="copy" :size="14" /> {{ copyLabel(block.id) }}</button></header>
+          <header class="code-header"><span>{{ block.shell }} · 命令</span><button type="button" @click="requestCommandCopy(block.id, block.command)"><UiIcon name="copy" :size="14" /> {{ copyLabel(block.id) }}</button></header>
           <p v-if="block.description" class="block-description">{{ block.description }}</p>
           <pre class="code-content" tabindex="0"><code>{{ block.command }}</code></pre>
           <p class="model-caution">模型整理，执行前请核对原文。</p>
@@ -109,7 +174,7 @@ function unknownType(block: ArtifactBlock) {
               <h5>{{ step.title }}</h5>
               <p v-if="step.instruction">{{ step.instruction }}</p>
               <section v-for="(command, commandIndex) in step.commands" :key="`${block.id}-${stepIndex}-${commandIndex}`" class="nested-command">
-                <header class="code-header"><span>{{ command.shell }}</span><button type="button" @click="copyExact(`${block.id}-${stepIndex}-${commandIndex}`, command.command)"><UiIcon name="copy" :size="14" /> {{ copyLabel(`${block.id}-${stepIndex}-${commandIndex}`) }}</button></header>
+                <header class="code-header"><span>{{ command.shell }}</span><button type="button" @click="requestCommandCopy(`${block.id}-${stepIndex}-${commandIndex}`, command.command)"><UiIcon name="copy" :size="14" /> {{ copyLabel(`${block.id}-${stepIndex}-${commandIndex}`) }}</button></header>
                 <p v-if="command.description" class="block-description">{{ command.description }}</p>
                 <pre class="code-content" tabindex="0"><code>{{ command.command }}</code></pre>
               </section>
@@ -168,6 +233,27 @@ function unknownType(block: ArtifactBlock) {
       <ul><li v-for="limitation in content.review.limitations" :key="limitation">{{ limitation }}</li></ul>
     </footer>
     <span class="sr-only" role="status">{{ copiedKey ? '内容已精确复制' : copyErrorKey ? '复制失败，请重试' : '' }}</span>
+
+    <Teleport to="body">
+      <div v-if="fillState" class="fill-overlay" @click.self="closeFillDialog">
+        <section class="fill-dialog" role="dialog" aria-modal="true" aria-labelledby="fill-command-title" @keydown.escape="closeFillDialog">
+          <UiIcon name="circle-help" :size="26" />
+          <h2 id="fill-command-title">命令包含参数占位符</h2>
+          <p>先填写参数再复制。这里只复制命令，不会执行；留空的占位符会按原样保留。</p>
+          <label v-for="token in fillState.tokens" :key="token">
+            <span>{{ token }}</span>
+            <input v-model="fillValues[token]" type="text" autocomplete="off" spellcheck="false" :aria-label="`填写 ${token}`" />
+          </label>
+          <pre class="fill-preview" tabindex="0"><code>{{ substitutedCommand() }}</code></pre>
+          <p v-if="fillError" class="fill-error" role="alert">复制失败，请重试。</p>
+          <div class="fill-actions">
+            <UiButton variant="ghost" @click="closeFillDialog">取消</UiButton>
+            <UiButton variant="secondary" @click="copyRawCommand"><UiIcon name="copy" :size="14" /> 按原样复制</UiButton>
+            <UiButton variant="primary" @click="copyFilledCommand"><UiIcon name="copy" :size="14" /> 复制已填写命令</UiButton>
+          </div>
+        </section>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -233,4 +319,16 @@ th { background: var(--bg-code); color: var(--text-secondary); font-size: 11px; 
 .artifact-review p { margin: var(--space-1) 0; color: var(--text-secondary); }
 .artifact-review ul { margin: var(--space-2) 0 0; padding-left: var(--space-5); }
 @media (max-width: 600px) { .artifact-block { padding: var(--space-3); } .key-values > div { grid-template-columns: 1fr; } .attachment-reference { grid-template-columns: auto minmax(0, 1fr); } .attachment-reference a, .attachment-reference > span { grid-column: 2; } }
+
+.fill-overlay { position: fixed; z-index: var(--layer-overlay); inset: 0; display: grid; place-content: center; padding: var(--space-4); background: var(--scrim); }
+.fill-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; padding: var(--space-5); border: 1px solid var(--border-strong); border-radius: var(--radius-dialog); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); }
+.fill-dialog > svg { color: var(--accent); }
+.fill-dialog h2 { margin: var(--space-3) 0 var(--space-2); font-size: 18px; }
+.fill-dialog > p { margin: 0; color: var(--text-secondary); }
+.fill-dialog label { display: grid; gap: var(--space-1); margin-top: var(--space-3); }
+.fill-dialog label span { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.fill-dialog input { width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); font-family: var(--font-mono); }
+.fill-preview { max-height: 140px; overflow: auto; margin: var(--space-3) 0 0; padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fill-error { margin: var(--space-2) 0 0; color: var(--danger); }
+.fill-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 </style>

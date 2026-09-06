@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from '../../app/auth'
@@ -43,6 +43,8 @@ const sensitivityOptions = [
 const selectedItemID = computed(() =>
   route.name === 'item-detail' ? String(route.params.itemId ?? '') : '',
 )
+const resultsPane = ref<HTMLElement | null>(null)
+let savedScrollTop = 0
 const filters = computed<LibraryFilters>(() => ({
   view: resolveLibraryView(route.query.view, route.query.folderId, route.query.tagId),
   folderId: typeof route.query.folderId === 'string' ? route.query.folderId : undefined,
@@ -96,8 +98,16 @@ const activeFilterChips = computed(() => {
 })
 let debounceTimer: number | undefined
 
+// Opening a result only appends the `hit` fragment parameter to the query; that
+// must not re-run the search, otherwise the list would churn while reading a
+// record and the returned scroll position would be lost.
+const FILTER_QUERY_KEYS = ['view', 'folderId', 'tagId', 'sort', 'kind', 'sensitivity', 'from', 'to'] as const
+function filterSignature() {
+  return JSON.stringify(FILTER_QUERY_KEYS.map((key) => route.query[key] ?? null))
+}
+
 watch(
-  () => JSON.stringify(route.query),
+  filterSignature,
   () => void refreshResults(),
   { immediate: true },
 )
@@ -109,6 +119,12 @@ watch(
     debounceTimer = window.setTimeout(() => void refreshResults(), 200)
   },
 )
+
+watch(selectedItemID, async (next, previous) => {
+  if (next || !previous) return
+  await nextTick()
+  if (resultsPane.value && savedScrollTop > 0) resultsPane.value.scrollTop = savedScrollTop
+})
 
 onMounted(() => {
   window.addEventListener('keydown', onGlobalShortcut)
@@ -125,6 +141,10 @@ onBeforeUnmount(() => {
 
 function updateOnline() {
   online.value = navigator.onLine
+}
+
+function onResultsScroll() {
+  savedScrollTop = resultsPane.value?.scrollTop ?? 0
 }
 
 function onGlobalShortcut(event: KeyboardEvent) {
@@ -194,6 +214,29 @@ function libraryEntry(entry: (typeof library.results)[number]): LibraryItem | nu
 
 function searchEntry(entry: (typeof library.results)[number]): SearchItem | null {
   return entry.kind === 'search' ? entry.item : null
+}
+
+const contentKindLabels: Record<string, string> = { text: '文本', image: '图片', file: '文件', mixed: '混合' }
+const matchedSourceLabels: Record<string, string> = {
+  title: '命中标题',
+  raw_text: '命中原文',
+  code: '命中代码',
+  filename: '命中文件名',
+  metadata: '命中元数据',
+  ai_text: '命中 AI 整理',
+  image_text: '命中图片文字',
+}
+
+function entryKindLabel(entry: (typeof library.results)[number]): string {
+  const search = searchEntry(entry)
+  if (!search) return ''
+  return `${contentKindLabels[search.contentKind] ?? search.contentKind} · `
+}
+
+function entrySourceLabel(entry: (typeof library.results)[number]): string {
+  const search = searchEntry(entry)
+  if (!search) return `${libraryEntry(entry)?.rawRecordCount ?? 0} 条原始记录`
+  return matchedSourceLabels[search.matchedSource] ?? search.matchedSource
 }
 
 async function loadMore() {
@@ -359,7 +402,7 @@ function formatTime(value: string) {
       <UiButton variant="primary" @click="captureOpen = true"><UiIcon name="plus" /> 快速记录</UiButton>
     </header>
 
-    <section class="results-pane" aria-label="资料库结果">
+    <section ref="resultsPane" class="results-pane" aria-label="资料库结果" @scroll.passive="onResultsScroll">
       <header class="results-pane__header">
         <div>
           <strong>{{ library.mode === 'search' ? `“${library.query.trim()}”` : viewTitle }}</strong>
@@ -427,7 +470,7 @@ function formatTime(value: string) {
         <p>只加载安全摘要和元数据。</p>
       </div>
 
-      <div v-else-if="library.error" class="result-state result-state--error" role="alert">
+      <div v-else-if="library.error && library.results.length === 0" class="result-state result-state--error" role="alert">
         <UiIcon name="triangle-alert" :size="25" />
         <h3>{{ library.mode === 'search' ? '搜索暂时不可用' : '资料库暂时不可用' }}</h3>
         <p>{{ library.error }}</p>
@@ -444,7 +487,13 @@ function formatTime(value: string) {
         <UiButton v-else-if="!isTrash" variant="primary" @click="captureOpen = true"><UiIcon name="plus" /> 新建记录</UiButton>
       </div>
 
-      <ol v-else ref="resultList" class="result-list" @keydown="onResultKeydown">
+      <template v-else>
+        <div v-if="library.error" class="refresh-error" role="alert">
+          <UiIcon name="triangle-alert" :size="16" />
+          <span>刷新失败，以下仍是上次结果：{{ library.error }}</span>
+          <button type="button" @click="library.retry"><UiIcon name="rotate-ccw" :size="14" /> 重试</button>
+        </div>
+        <ol ref="resultList" class="result-list" @keydown="onResultKeydown">
         <li v-for="entry in library.results" :key="entryID(entry)" :class="{ active: selectedItemID === entryID(entry) }">
           <RouterLink v-if="!isTrash" :to="detailLocation(entry)" class="result-card">
             <span class="result-card__icon" :class="{ sensitive: entrySensitivity(entry) !== 'normal' }">
@@ -456,7 +505,7 @@ function formatTime(value: string) {
                 <template v-for="(part, index) in searchEntry(entry)?.snippetParts" :key="index"><mark v-if="part.highlighted">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template>
               </span>
               <span v-else class="result-card__summary">{{ libraryEntry(entry)?.summary || '仅包含附件或暂无文本摘要' }}</span>
-              <small>{{ formatTime(entryTime(entry)) }} · {{ searchEntry(entry)?.matchedSource || `${libraryEntry(entry)?.rawRecordCount ?? 0} 条原始记录` }}</small>
+              <small>{{ entryKindLabel(entry) }}{{ formatTime(entryTime(entry)) }} · {{ entrySourceLabel(entry) }}</small>
             </span>
             <span v-if="entrySensitivity(entry) !== 'normal'" class="sensitivity-label">已遮挡</span>
             <UiIcon name="chevron-right" />
@@ -469,7 +518,8 @@ function formatTime(value: string) {
             <UiButton variant="danger" :disabled="destructiveBusy" @click="purgeTarget = { id: entryID(entry), title: entryTitle(entry) }">永久删除</UiButton>
           </div>
         </li>
-      </ol>
+        </ol>
+      </template>
 
       <footer v-if="library.nextCursor" class="results-pane__footer">
         <UiButton variant="secondary" :disabled="library.loading" @click="loadMore">{{ library.loading ? '正在加载' : '加载更多' }}</UiButton>
@@ -532,6 +582,9 @@ function formatTime(value: string) {
 .search-filters__dates input { width: 100%; min-height: 34px; padding: 0 var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-secondary); font-size: 11px; }
 .filter-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border-subtle); }
 .filter-chips button { display: inline-flex; min-height: 28px; align-items: center; gap: var(--space-1); padding: 0 var(--space-2); border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--accent-soft); color: var(--accent); cursor: pointer; font-size: 10px; }
+.refresh-error { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-2) var(--space-2) 0; padding: var(--space-2) var(--space-3); border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-subtle)); border-radius: var(--radius-control); color: var(--danger); font-size: 11px; }
+.refresh-error span { flex: 1; min-width: 0; }
+.refresh-error button { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: 1px solid currentColor; border-radius: var(--radius-control); background: transparent; color: inherit; cursor: pointer; font-size: 11px; }
 .result-state { display: grid; min-height: 430px; place-content: center; justify-items: center; padding: var(--space-6); color: var(--text-secondary); text-align: center; }
 .result-state h3 { margin: var(--space-3) 0 var(--space-1); color: var(--text-primary); font-size: 15px; }
 .result-state p { max-width: 42ch; margin: 0 0 var(--space-4); color: var(--text-muted); }

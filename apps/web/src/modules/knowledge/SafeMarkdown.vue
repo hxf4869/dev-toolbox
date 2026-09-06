@@ -2,7 +2,11 @@
 import MarkdownIt from 'markdown-it'
 import { computed, ref } from 'vue'
 
-const props = defineProps<{ source: string }>()
+const props = withDefaults(defineProps<{ source: string; origin?: string }>(), {
+  // Raw records are the default origin; AI-derived usage passes its own label
+  // so copies never blur the fact/derived boundary.
+  origin: '来自原始记录',
+})
 const copiedIndex = ref<number | null>(null)
 const copyErrorIndex = ref<number | null>(null)
 
@@ -29,7 +33,7 @@ const rendered = computed(() => {
     const language = renderer.utils.escapeHtml(token.info.trim().split(/\s+/u)[0] ?? '')
     const className = language ? ` class="language-${language}"` : ''
     const copyLabel = copiedIndex.value === blockIndex ? '已复制' : copyErrorIndex.value === blockIndex ? '复制失败，重试' : '复制代码块'
-    return `<section class="safe-code-block"><header><span>${language || '代码'} · 来自原始记录</span><button type="button" data-code-index="${blockIndex}">${copyLabel}</button></header><pre tabindex="0"><code${className}>${renderer.utils.escapeHtml(token.content)}</code></pre></section>`
+    return `<section class="safe-code-block"><header><span>${language || '代码'} · ${renderer.utils.escapeHtml(props.origin)}</span><button type="button" data-code-index="${blockIndex}">${copyLabel}</button></header><pre tabindex="0"><code${className}>${renderer.utils.escapeHtml(token.content)}</code></pre></section>`
   }
   return { html: renderer.render(props.source), codeBlocks }
 })

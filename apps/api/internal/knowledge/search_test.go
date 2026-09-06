@@ -64,6 +64,51 @@ func TestSearchCursorRejectsSortMismatchAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestContentKindFromRecordKinds(t *testing.T) {
+	tests := []struct {
+		kinds []string
+		want  string
+	}{
+		{kinds: nil, want: "text"},
+		{kinds: []string{"text"}, want: "text"},
+		{kinds: []string{"image"}, want: "image"},
+		{kinds: []string{"file"}, want: "file"},
+		{kinds: []string{"mixed"}, want: "mixed"},
+		{kinds: []string{"text", "image"}, want: "mixed"},
+		{kinds: []string{"file", "text"}, want: "mixed"},
+	}
+	for _, test := range tests {
+		if got := contentKindFromRecordKinds(test.kinds); got != test.want {
+			t.Fatalf("contentKindFromRecordKinds(%v) = %q, want %q", test.kinds, got, test.want)
+		}
+	}
+}
+
+// The item_record_kinds aggregation must run after the per-item dedup, i.e.
+// once per surviving item inside best — not per scored fragment row, where it
+// re-executes for every hit and repeats in full on every cursor page.
+func TestSearchRecordKindsAggregateRunsAfterPerItemDedup(t *testing.T) {
+	sql := searchCTE([]string{"i.deleted_at IS NULL", "f.active = true"},
+		"f.normalized_content LIKE '%x%'", "f.search_vector @@ query", "f.normalized_content % 'x'",
+		"1 AS match_class", "1.0::real AS similarity")
+	scoredPart, bestPart, found := strings.Cut(sql, ", best AS (")
+	if !found {
+		t.Fatal("search CTE lost the best dedup stage")
+	}
+	if strings.Contains(scoredPart, "item_record_kinds") {
+		t.Fatal("item_record_kinds must not be aggregated inside scored (per fragment row, before dedup and LIMIT)")
+	}
+	if !strings.Contains(bestPart, "item_record_kinds") {
+		t.Fatal("item_record_kinds must be aggregated inside best, once per surviving item")
+	}
+	if !strings.Contains(bestPart, "item_rank = 1") {
+		t.Fatal("best must keep the per-item dedup")
+	}
+	if !strings.Contains(bestPart, "rr.item_id = ranked.item_id") {
+		t.Fatal("item_record_kinds must correlate on the item id, so the returned contentKind stays item-level")
+	}
+}
+
 func TestSensitivityOnlyAutoUpgrades(t *testing.T) {
 	tests := []struct {
 		current  string

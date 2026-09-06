@@ -262,9 +262,13 @@ async function save() {
     savedMessage.value = `“${response.item.title}”已保存。可以继续录入下一条。`
     await focusEditor()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '保存失败，请重试'
-    if (error instanceof ApiError && error.requestId) {
-      errorMessage.value += `（请求 ${error.requestId}）`
+    if (error instanceof ApiError) {
+      errorMessage.value = error.message
+      if (error.requestId) errorMessage.value += `（请求 ${error.requestId}）`
+    } else {
+      // Network-level failure: the request outcome is unknown, so keep the
+      // content and tell the user that retrying is safe (same idempotency key).
+      errorMessage.value = '网络连接中断，内容已保留；点击重试安全，不会产生重复记录。'
     }
   } finally {
     saving.value = false

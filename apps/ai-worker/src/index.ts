@@ -9,6 +9,7 @@ import {
   type AssistantRunnerOptions,
 } from './assistant/index.js'
 import { loadConfig } from './config.js'
+import { createWorkerShutdown, type WorkerShutdown } from './lifecycle.js'
 import { log } from './logger.js'
 import {
   generateJsonTypesWithAI,
@@ -36,11 +37,22 @@ const taskRunner = new TaskRunner(
   config.allowInsecureProviderHttp,
 )
 const taskLoopController = new AbortController()
+let taskLoopSettled: Promise<unknown> = Promise.resolve()
+let assistantSettled: Promise<unknown> = Promise.resolve()
+// Assigned once the server exists; lanes started earlier can only reference it.
+let shutdown: WorkerShutdown = () => {}
 const assistantOptions: AssistantRunnerOptions = {
   apiInternalUrl: config.apiInternalUrl,
   serviceToken: config.serviceToken,
   workerId: config.workerId,
   allowInsecureProviderHttp: config.allowInsecureProviderHttp,
+  onLaneFailure: (lane, error) => {
+    log('error', 'assistant_lane_died', {
+      lane,
+      errorType: error instanceof Error ? error.name : 'unknown',
+    })
+    shutdown(`${lane} assistant lane died unexpectedly`, 1)
+  },
 }
 const assistantRunners = startAssistantRunners(assistantOptions)
 
@@ -52,7 +64,14 @@ if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) {
 }
 
 const server = createServer((request, response) => {
-  void handleRequest(request, response)
+  void handleRequest(request, response).catch((error: unknown) => {
+    log('error', 'http_handler_failed', { errorType: error instanceof Error ? error.name : 'unknown' })
+    if (!response.headersSent) {
+      writeJson(response, 500, { error: { code: 'INTERNAL_ERROR', message: 'AI worker 内部错误' } })
+      return
+    }
+    response.end()
+  })
 })
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -269,27 +288,24 @@ function isProtocol(value: unknown): value is ProviderProtocol {
   return value === 'openai-completions' || value === 'openai-responses' || value === 'anthropic-messages'
 }
 
+shutdown = createWorkerShutdown({
+  server,
+  stopLanes: () => {
+    taskLoopController.abort(new Error('worker is shutting down'))
+    assistantSettled = assistantRunners.stop()
+  },
+  lanesSettled: () => Promise.all([taskLoopSettled, assistantSettled]),
+})
+
 server.listen(port, host, () => {
   log('info', 'worker_started', { address: config.address })
-  void runTaskLoop(taskClient, taskRunner, taskLoopController.signal).catch((error: unknown) => {
+  taskLoopSettled = runTaskLoop(taskClient, taskRunner, taskLoopController.signal).catch((error: unknown) => {
     if (!taskLoopController.signal.aborted) {
       log('error', 'task_loop_failed', { errorType: error instanceof Error ? error.name : 'unknown' })
-      process.exitCode = 1
+      shutdown('task lane died unexpectedly', 1)
     }
   })
 })
 
-function shutdown(signal: string): void {
-  log('info', 'worker_stopping', { signal })
-  taskLoopController.abort(new Error(`worker received ${signal}`))
-  assistantRunners.stop()
-  server.close((error) => {
-    if (error) {
-      log('error', 'worker_stop_failed', { errorType: error.name })
-      process.exitCode = 1
-    }
-  })
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'))
-process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM', 0))
+process.on('SIGINT', () => shutdown('SIGINT', 0))

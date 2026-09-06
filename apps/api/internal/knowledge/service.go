@@ -29,6 +29,10 @@ type Service struct {
 	timezone       *time.Location
 	auth           *auth.Service
 	now            func() time.Time
+	// decode bounds the concurrent heavy image decodes of this process.
+	decode *decodeLimiter
+	// flights coalesces concurrent thumbnail generation per attachment.
+	flights *thumbnailFlights
 }
 
 type createInput struct {
@@ -102,6 +106,8 @@ func NewService(database *pgxpool.Pool, root string, timezone *time.Location) (*
 		quarantineRoot: quarantineRoot,
 		timezone:       timezone,
 		now:            time.Now,
+		decode:         newDecodeLimiter(thumbnailDecodeConcurrency),
+		flights:        newThumbnailFlights(),
 	}, nil
 }
 

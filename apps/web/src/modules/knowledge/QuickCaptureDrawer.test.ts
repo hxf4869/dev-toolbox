@@ -50,6 +50,9 @@ describe('QuickCaptureDrawer', () => {
       new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }),
     )
     await flushPromises()
+    expect(document.querySelector('.capture-state--error')?.textContent).toContain(
+      '网络连接中断，内容已保留',
+    )
 
     const retry = Array.from(document.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('重试'),

@@ -1,6 +1,8 @@
 package knowledge
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/png"
@@ -8,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	xdraw "golang.org/x/image/draw"
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
@@ -22,7 +26,157 @@ const (
 	previewMaxEdge     = 16384
 	previewMaxPixels   = 40_000_000
 	thumbnailMediaType = "image/png"
+	// A single decode may cost up to ~160MB of RGBA buffer at the 40-megapixel
+	// preview ceiling; decoding one image at a time bounds the concurrent
+	// memory budget of the whole process.
+	thumbnailDecodeConcurrency = 1
 )
+
+// Sentinel failures of the registration pass; they map to distinct responses.
+var (
+	errThumbnailGone    = errors.New("attachment or its knowledge item is gone")
+	errThumbnailChanged = errors.New("attachment original changed while the thumbnail was generated")
+	errThumbnailDenied  = errors.New("caller may no longer read this attachment")
+)
+
+// decodeLimiter is a shared in-process permit pool for the expensive image
+// decode; waiting respects request cancellation.
+type decodeLimiter struct {
+	permits chan struct{}
+}
+
+func newDecodeLimiter(size int) *decodeLimiter {
+	limiter := &decodeLimiter{permits: make(chan struct{}, size)}
+	for range size {
+		limiter.permits <- struct{}{}
+	}
+	return limiter
+}
+
+func (limiter *decodeLimiter) acquire(ctx context.Context) (func(), error) {
+	select {
+	case <-limiter.permits:
+		var once sync.Once
+		release := func() {
+			once.Do(func() { limiter.permits <- struct{}{} })
+		}
+		return release, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// InFlightDecodes reports how many heavy image decodes currently hold a
+// decode permit. Read-only diagnostics for observability and integration
+// tests; it never changes scheduling behavior.
+func (service *Service) InFlightDecodes() int {
+	return cap(service.decode.permits) - len(service.decode.permits)
+}
+
+// thumbnailFlights coalesces concurrent generation of the same attachment so
+// only one request decodes it; waiters re-check the stored derivative after
+// the winner finishes. The unique (attachment_id, kind) key stays the final
+// deduplication guarantee.
+type thumbnailFlights struct {
+	mu       sync.Mutex
+	inflight map[uuid.UUID]chan struct{}
+}
+
+func newThumbnailFlights() *thumbnailFlights {
+	return &thumbnailFlights{inflight: make(map[uuid.UUID]chan struct{})}
+}
+
+func (flights *thumbnailFlights) enter(ctx context.Context, attachmentID uuid.UUID) (func(), error) {
+	for {
+		flights.mu.Lock()
+		if done, busy := flights.inflight[attachmentID]; busy {
+			flights.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		done := make(chan struct{})
+		flights.inflight[attachmentID] = done
+		flights.mu.Unlock()
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				flights.mu.Lock()
+				delete(flights.inflight, attachmentID)
+				close(done)
+				flights.mu.Unlock()
+			})
+		}, nil
+	}
+}
+
+// thumbnailLookup carries the immutable original identity plus the current
+// derivative state, read without any row lock.
+type thumbnailLookup struct {
+	attachmentID   uuid.UUID
+	kind           string
+	mediaType      string
+	width          *int
+	height         *int
+	sensitivity    string
+	originalKey    string
+	contentSHA     []byte
+	originalSize   int64
+	derivativeID   uuid.UUID
+	derivativeKey  string
+	derivativeSize int64
+	derivativeTime time.Time
+	derivativeSet  bool
+}
+
+// lookupThumbnail reads attachment identity and derivative state in one short
+// read-only transaction; it never takes the attachment row lock, so cache
+// hits do not serialize behind each other or behind generation.
+func (service *Service) lookupThumbnail(ctx context.Context, attachmentID uuid.UUID) (*thumbnailLookup, error) {
+	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	lookup := &thumbnailLookup{attachmentID: attachmentID}
+	err = tx.QueryRow(ctx, `
+		SELECT a.kind, a.media_type, a.width, a.height, i.sensitivity,
+		       a.storage_key, a.content_sha256, a.size_bytes
+		FROM attachments a
+		JOIN raw_records r ON r.id = a.raw_record_id
+		JOIN knowledge_items i ON i.id = r.item_id
+		WHERE a.id = $1 AND a.status = 'ready' AND i.deleted_at IS NULL
+	`, attachmentID).Scan(
+		&lookup.kind, &lookup.mediaType, &lookup.width, &lookup.height, &lookup.sensitivity,
+		&lookup.originalKey, &lookup.contentSHA, &lookup.originalSize,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errThumbnailGone
+	}
+	if err != nil {
+		return nil, err
+	}
+	err = tx.QueryRow(ctx, `
+		SELECT id, storage_key, size_bytes, created_at
+		FROM attachment_derivatives WHERE attachment_id = $1 AND kind = 'thumbnail'
+	`, attachmentID).Scan(&lookup.derivativeID, &lookup.derivativeKey, &lookup.derivativeSize, &lookup.derivativeTime)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		lookup.derivativeID = uuid.NewSHA1(fragmentNS, []byte(attachmentID.String()+":thumbnail"))
+		lookup.derivativeKey = filepath.ToSlash(filepath.Join("derivatives", attachmentID.String()[0:2], attachmentID.String()+".png"))
+	case err != nil:
+		return nil, err
+	default:
+		lookup.derivativeSet = true
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return lookup, nil
+}
 
 func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
@@ -31,78 +185,54 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 		writeAttachmentNotFound(response, request)
 		return
 	}
-	tx, err := service.database.BeginTx(request.Context(), pgx.TxOptions{})
+	ctx := request.Context()
+	lookup, err := service.lookupThumbnail(ctx, attachmentID)
+	if err != nil {
+		writeThumbnailLookupFailure(response, request, err)
+		return
+	}
+	if !authorizeThumbnailRequest(response, request, lookup) {
+		return
+	}
+	if service.serveHealthyDerivative(response, request, lookup) {
+		return
+	}
+	// Coalesce concurrent generation of the same attachment in-process.
+	leave, err := service.flights.enter(ctx, attachmentID)
 	if err != nil {
 		writeThumbnailInternal(response, request)
 		return
 	}
-	defer tx.Rollback(request.Context())
-
-	var metadata attachmentMetadata
-	err = tx.QueryRow(request.Context(), `
-		SELECT a.id, a.kind, a.original_name, a.display_name, a.client_media_type,
-		       a.media_type, a.size_bytes, a.width, a.height, a.created_at,
-		       r.item_id, a.raw_record_id, a.storage_key, i.sensitivity
-		FROM attachments a
-		JOIN raw_records r ON r.id = a.raw_record_id
-		JOIN knowledge_items i ON i.id = r.item_id
-		WHERE a.id = $1 AND a.status = 'ready' AND i.deleted_at IS NULL
-		FOR UPDATE OF a
-	`, attachmentID).Scan(
-		&metadata.ID, &metadata.Kind, &metadata.OriginalName, &metadata.DisplayName,
-		&metadata.ClientMediaType, &metadata.MediaType, &metadata.SizeBytes,
-		&metadata.Width, &metadata.Height, &metadata.CreatedAt, &metadata.ItemID,
-		&metadata.RawRecordID, &metadata.StorageKey, &metadata.Sensitivity,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeAttachmentNotFound(response, request)
+	defer leave()
+	// The attachment state and the derivative may both have changed while
+	// waiting for the in-flight generation.
+	lookup, err = service.lookupThumbnail(ctx, attachmentID)
+	if err != nil {
+		writeThumbnailLookupFailure(response, request, err)
 		return
 	}
+	if !authorizeThumbnailRequest(response, request, lookup) {
+		return
+	}
+	if service.serveHealthyDerivative(response, request, lookup) {
+		return
+	}
+	service.generateThumbnail(response, request, lookup)
+}
+
+// generateThumbnail decodes outside any database transaction under the shared
+// decode permit, writes an independent temporary file, and only then opens a
+// short transaction that re-verifies the attachment and registers the
+// derivative.
+func (service *Service) generateThumbnail(response http.ResponseWriter, request *http.Request, lookup *thumbnailLookup) {
+	ctx := request.Context()
+	release, err := service.decode.acquire(ctx)
 	if err != nil {
 		writeThumbnailInternal(response, request)
 		return
 	}
-	if !requestActorCanReadSensitivity(request, metadata.Sensitivity) {
-		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感附件")
-		return
-	}
-	if !previewAllowed(metadata.Kind, metadata.MediaType, metadata.Width, metadata.Height) {
-		httpapi.WriteError(response, request, http.StatusUnsupportedMediaType, "PREVIEW_UNAVAILABLE", "该附件不支持安全预览")
-		return
-	}
-
-	var derivativeID uuid.UUID
-	var storageKey string
-	var sizeBytes int64
-	var createdAt time.Time
-	derivativeExists := true
-	err = tx.QueryRow(request.Context(), `
-		SELECT id, storage_key, size_bytes, created_at
-		FROM attachment_derivatives WHERE attachment_id = $1 AND kind = 'thumbnail'
-	`, attachmentID).Scan(&derivativeID, &storageKey, &sizeBytes, &createdAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		derivativeExists = false
-		derivativeID = uuid.NewSHA1(fragmentNS, []byte(attachmentID.String()+":thumbnail"))
-		storageKey = filepath.ToSlash(filepath.Join("derivatives", attachmentID.String()[0:2], attachmentID.String()+".png"))
-	} else if err != nil {
-		writeThumbnailInternal(response, request)
-		return
-	}
-	if derivativeExists {
-		path, pathErr := service.storagePath(storageKey)
-		if pathErr == nil {
-			if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() && info.Size() == sizeBytes {
-				if err := tx.Commit(request.Context()); err != nil {
-					writeThumbnailInternal(response, request)
-					return
-				}
-				service.serveThumbnail(response, request, path, createdAt)
-				return
-			}
-		}
-	}
-
-	originalPath, err := service.storagePath(metadata.StorageKey)
+	defer release()
+	originalPath, err := service.storagePath(lookup.originalKey)
 	if err != nil {
 		writeThumbnailInternal(response, request)
 		return
@@ -123,7 +253,7 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 		httpapi.WriteError(response, request, http.StatusUnsupportedMediaType, "PREVIEW_UNAVAILABLE", "图片尺寸超过一期安全预览上限")
 		return
 	}
-	if metadata.Width == nil || metadata.Height == nil || *metadata.Width != width || *metadata.Height != height {
+	if lookup.width == nil || lookup.height == nil || *lookup.width != width || *lookup.height != height {
 		httpapi.WriteError(response, request, http.StatusConflict, "ATTACHMENT_INTEGRITY_FAILED", "附件原件元数据不一致")
 		return
 	}
@@ -144,6 +274,7 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 	targetWidth, targetHeight := thumbnailDimensions(width, height)
 	thumbnail := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
 	xdraw.CatmullRom.Scale(thumbnail, thumbnail.Bounds(), decoded, bounds, xdraw.Over, nil)
+
 	temporary, err := os.CreateTemp(service.tempRoot, "thumbnail-*.png")
 	if err != nil {
 		writeThumbnailInternal(response, request)
@@ -170,7 +301,7 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 		writeThumbnailInternal(response, request)
 		return
 	}
-	finalPath, err := service.storagePath(storageKey)
+	finalPath, err := service.storagePath(lookup.derivativeKey)
 	if err != nil {
 		cleanupTemporary()
 		writeThumbnailInternal(response, request)
@@ -191,30 +322,131 @@ func (service *Service) getAttachmentThumbnail(response http.ResponseWriter, req
 		writeThumbnailInternal(response, request)
 		return
 	}
-	sizeBytes = info.Size()
-	createdAt = service.now().UTC()
-	_, err = tx.Exec(request.Context(), `
+
+	// Short registration transaction: re-verify the attachment and register
+	// the generated file. The heavy work above never holds a database lock.
+	createdAt := service.now().UTC()
+	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		removeUnregisteredDerivative(lookup, finalPath)
+		writeThumbnailInternal(response, request)
+		return
+	}
+	defer tx.Rollback(ctx)
+	verifyErr := verifyAndRegisterDerivative(ctx, tx, request, lookup, info.Size(), createdAt)
+	if verifyErr == nil {
+		verifyErr = tx.Commit(ctx)
+	}
+	if verifyErr != nil {
+		removeUnregisteredDerivative(lookup, finalPath)
+		writeThumbnailRegistrationFailure(response, request, verifyErr)
+		return
+	}
+	service.serveThumbnail(response, request, finalPath, createdAt)
+}
+
+// thumbnailOriginal is checked against the current database row so a deleted
+// attachment, a trashed knowledge item, or a replaced original never gets its
+// freshly generated thumbnail registered or served.
+func verifyAndRegisterDerivative(ctx context.Context, querier derivativeQuerier, request *http.Request, lookup *thumbnailLookup, generatedSize int64, createdAt time.Time) error {
+	var storageKey string
+	var contentSHA []byte
+	var sizeBytes int64
+	var width, height *int
+	var sensitivity string
+	err := querier.QueryRow(ctx, `
+		SELECT a.storage_key, a.content_sha256, a.size_bytes, a.width, a.height, i.sensitivity
+		FROM attachments a
+		JOIN raw_records r ON r.id = a.raw_record_id
+		JOIN knowledge_items i ON i.id = r.item_id
+		WHERE a.id = $1 AND a.status = 'ready' AND i.deleted_at IS NULL
+	`, lookup.attachmentID).Scan(&storageKey, &contentSHA, &sizeBytes, &width, &height, &sensitivity)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errThumbnailGone
+	}
+	if err != nil {
+		return err
+	}
+	if storageKey != lookup.originalKey || !bytes.Equal(contentSHA, lookup.contentSHA) || sizeBytes != lookup.originalSize ||
+		width == nil || height == nil || lookup.width == nil || lookup.height == nil ||
+		*width != *lookup.width || *height != *lookup.height {
+		return errThumbnailChanged
+	}
+	if !requestActorCanReadSensitivity(request, sensitivity) {
+		return errThumbnailDenied
+	}
+	_, err = querier.Exec(ctx, `
 		INSERT INTO attachment_derivatives (id, attachment_id, kind, storage_key, media_type, size_bytes, created_at)
 		VALUES ($1, $2, 'thumbnail', $3, $4, $5, $6)
 		ON CONFLICT (attachment_id, kind) DO UPDATE
 		SET storage_key = EXCLUDED.storage_key, media_type = EXCLUDED.media_type,
 		    size_bytes = EXCLUDED.size_bytes, created_at = EXCLUDED.created_at
-	`, derivativeID, attachmentID, storageKey, thumbnailMediaType, sizeBytes, createdAt)
+	`, lookup.derivativeID, lookup.attachmentID, lookup.derivativeKey, thumbnailMediaType, generatedSize, createdAt)
+	return err
+}
+
+type derivativeQuerier interface {
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
+	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
+}
+
+// removeUnregisteredDerivative only cleans up a file when this request had to
+// create the derivative record from scratch; an existing record (regenerated
+// cache) keeps its file. Owners of a failed generation never touch files they
+// did not rename into place themselves.
+func removeUnregisteredDerivative(lookup *thumbnailLookup, finalPath string) {
+	if !lookup.derivativeSet {
+		_ = os.Remove(finalPath)
+	}
+}
+
+func (service *Service) serveHealthyDerivative(response http.ResponseWriter, request *http.Request, lookup *thumbnailLookup) bool {
+	if !lookup.derivativeSet {
+		return false
+	}
+	path, err := service.storagePath(lookup.derivativeKey)
 	if err != nil {
-		if !derivativeExists {
-			_ = os.Remove(finalPath)
-		}
-		writeThumbnailInternal(response, request)
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != lookup.derivativeSize {
+		return false
+	}
+	service.serveThumbnail(response, request, path, lookup.derivativeTime)
+	return true
+}
+
+func authorizeThumbnailRequest(response http.ResponseWriter, request *http.Request, lookup *thumbnailLookup) bool {
+	if !requestActorCanReadSensitivity(request, lookup.sensitivity) {
+		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感附件")
+		return false
+	}
+	if !previewAllowed(lookup.kind, lookup.mediaType, lookup.width, lookup.height) {
+		httpapi.WriteError(response, request, http.StatusUnsupportedMediaType, "PREVIEW_UNAVAILABLE", "该附件不支持安全预览")
+		return false
+	}
+	return true
+}
+
+func writeThumbnailLookupFailure(response http.ResponseWriter, request *http.Request, err error) {
+	if errors.Is(err, errThumbnailGone) {
+		writeAttachmentNotFound(response, request)
 		return
 	}
-	if err := tx.Commit(request.Context()); err != nil {
-		if !derivativeExists {
-			_ = os.Remove(finalPath)
-		}
+	writeThumbnailInternal(response, request)
+}
+
+func writeThumbnailRegistrationFailure(response http.ResponseWriter, request *http.Request, err error) {
+	switch {
+	case errors.Is(err, errThumbnailGone):
+		writeAttachmentNotFound(response, request)
+	case errors.Is(err, errThumbnailChanged):
+		httpapi.WriteError(response, request, http.StatusConflict, "ATTACHMENT_INTEGRITY_FAILED", "附件原件元数据不一致")
+	case errors.Is(err, errThumbnailDenied):
+		httpapi.WriteError(response, request, http.StatusForbidden, "FORBIDDEN", "Token 无权读取敏感附件")
+	default:
 		writeThumbnailInternal(response, request)
-		return
 	}
-	service.serveThumbnail(response, request, finalPath, createdAt)
 }
 
 func previewAllowed(kind, mediaType string, width, height *int) bool {

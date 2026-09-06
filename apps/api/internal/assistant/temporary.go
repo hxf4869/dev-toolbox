@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -187,21 +186,18 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 			last_reasoning_effort = EXCLUDED.last_reasoning_effort, last_used_at = EXCLUDED.last_used_at
 	`, execution.modelID, reasoningOrNull(input.Reasoning), service.now().UTC())
 
-	flusher, canFlush := response.(http.Flusher)
-	if !canFlush {
+	stream, streamErr := newSSEWriter(response)
+	if streamErr != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
-	controller := http.NewResponseController(response)
-	_ = controller.SetWriteDeadline(time.Time{})
 	response.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	response.Header().Set("Cache-Control", "no-store, no-transform")
 	response.Header().Set("X-Accel-Buffering", "no")
 	response.WriteHeader(http.StatusOK)
-	fmt.Fprint(response, "\n")
-	flusher.Flush()
-
-	stream := &sseWriter{writer: response, flusher: flusher}
+	if stream.writeRaw("\n") != nil {
+		return
+	}
 	sequence := 0
 	emit := func(event string, payload map[string]any) bool {
 		return writeTemporaryEvent(stream, &sequence, event, payload)

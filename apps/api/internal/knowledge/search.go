@@ -44,9 +44,22 @@ type searchResult struct {
 	MatchedFragmentID   uuid.UUID     `json:"matchedFragmentId"`
 	EffectiveCapturedAt time.Time     `json:"effectiveCapturedAt"`
 	Sensitivity         string        `json:"sensitivity"`
+	ContentKind         string        `json:"contentKind"`
 	ArtifactIsStale     *bool         `json:"artifactIsStale"`
 	matchClass          int
 	similarity          float64
+}
+
+// contentKindFromRecordKinds reduces the distinct raw-record kinds of one item
+// to the item-level kind used by library views and filters.
+func contentKindFromRecordKinds(kinds []string) string {
+	if len(kinds) == 0 {
+		return "text"
+	}
+	if len(kinds) == 1 {
+		return kinds[0]
+	}
+	return "mixed"
 }
 
 type searchCursor struct {
@@ -209,6 +222,61 @@ func uniqueStrings(values []string) []string {
 	return result
 }
 
+// searchCTE builds the shared search pipeline: all matching fragments scored
+// per row, then a per-item dedup (ranked/best) that keeps one row per item
+// before cursor filtering and LIMIT.
+func searchCTE(filters []string, literal, token, fuzzy, matchClass, similarityScore string) string {
+	return `WITH scored AS (
+		SELECT i.id AS item_id, i.title, i.sensitivity, item_times.effective_at,
+		       f.id AS fragment_id, f.source_kind, f.content,
+		       CASE WHEN f.artifact_id IS NULL THEN NULL
+		         WHEN artifact.artifact_type = 'image_analysis' THEN NOT (
+		           COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) @> COALESCE((
+		             SELECT to_jsonb(array_agg(candidate.id::text ORDER BY candidate.id))
+		             FROM attachments candidate JOIN raw_records source ON source.id = candidate.raw_record_id
+		             WHERE source.item_id = i.id AND candidate.status = 'ready' AND candidate.kind = 'image'
+		           ), '[]'::jsonb)
+		           AND COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) <@ COALESCE((
+		             SELECT to_jsonb(array_agg(candidate.id::text ORDER BY candidate.id))
+		             FROM attachments candidate JOIN raw_records source ON source.id = candidate.raw_record_id
+		             WHERE source.item_id = i.id AND candidate.status = 'ready' AND candidate.kind = 'image'
+		           ), '[]'::jsonb)
+		         )
+		         ELSE NOT (
+		           COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) @> (
+		             SELECT to_jsonb(array_agg(source.id::text ORDER BY source.id)) FROM raw_records source WHERE source.item_id = i.id
+		           )
+		           AND COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) <@ (
+		             SELECT to_jsonb(array_agg(source.id::text ORDER BY source.id)) FROM raw_records source WHERE source.item_id = i.id
+		           )
+		         )
+		       END AS artifact_is_stale,
+		       ` + matchClass + ` AS match_class, ` + similarityScore + ` AS similarity
+		FROM search_fragments f
+		JOIN knowledge_items i ON i.id = f.item_id
+		JOIN LATERAL (
+			SELECT effective_captured_at AS effective_at
+			FROM raw_records WHERE item_id = i.id
+			ORDER BY effective_captured_at DESC, id DESC LIMIT 1
+		) item_times ON true
+		LEFT JOIN ai_artifacts artifact ON artifact.id = f.artifact_id
+		LEFT JOIN ai_task_runs artifact_task ON artifact_task.id = artifact.task_run_id
+		WHERE ` + strings.Join(filters, " AND ") + `
+		  AND (` + literal + ` OR ` + token + ` OR ` + fuzzy + `)
+	), ranked AS (
+		SELECT scored.*, ROW_NUMBER() OVER (
+			PARTITION BY item_id ORDER BY match_class DESC, similarity DESC, fragment_id DESC
+		) AS item_rank
+		FROM scored
+	), best AS (
+		SELECT ranked.*,
+		       (SELECT COALESCE(array_agg(DISTINCT record_kinds.kind), ARRAY[]::text[])
+		        FROM (SELECT rr.content_kind AS kind FROM raw_records rr WHERE rr.item_id = ranked.item_id) record_kinds
+		       ) AS item_record_kinds
+		FROM ranked WHERE item_rank = 1
+	)`
+}
+
 func (service *Service) runSearch(request *http.Request, input validatedSearch) ([]searchResult, int64, *string, error) {
 	arguments := &queryArguments{}
 	normalizedQuery := normalizeSearch(input.Query)
@@ -255,51 +323,7 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	similarityScore := `CASE WHEN (` + literal + ` OR ` + token + `) THEN 1.0::real
 		ELSE similarity(f.normalized_content, ` + queryParameter + `) END`
 
-	cte := `WITH scored AS (
-		SELECT i.id AS item_id, i.title, i.sensitivity, item_times.effective_at,
-		       f.id AS fragment_id, f.source_kind, f.content,
-		       CASE WHEN f.artifact_id IS NULL THEN NULL
-		         WHEN artifact.artifact_type = 'image_analysis' THEN NOT (
-		           COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) @> COALESCE((
-		             SELECT to_jsonb(array_agg(candidate.id::text ORDER BY candidate.id))
-		             FROM attachments candidate JOIN raw_records source ON source.id = candidate.raw_record_id
-		             WHERE source.item_id = i.id AND candidate.status = 'ready' AND candidate.kind = 'image'
-		           ), '[]'::jsonb)
-		           AND COALESCE(artifact_task.input_snapshot->'attachmentIds', '[]'::jsonb) <@ COALESCE((
-		             SELECT to_jsonb(array_agg(candidate.id::text ORDER BY candidate.id))
-		             FROM attachments candidate JOIN raw_records source ON source.id = candidate.raw_record_id
-		             WHERE source.item_id = i.id AND candidate.status = 'ready' AND candidate.kind = 'image'
-		           ), '[]'::jsonb)
-		         )
-		         ELSE NOT (
-		           COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) @> (
-		             SELECT to_jsonb(array_agg(source.id::text ORDER BY source.id)) FROM raw_records source WHERE source.item_id = i.id
-		           )
-		           AND COALESCE(artifact_task.input_snapshot->'rawRecordIds', '[]'::jsonb) <@ (
-		             SELECT to_jsonb(array_agg(source.id::text ORDER BY source.id)) FROM raw_records source WHERE source.item_id = i.id
-		           )
-		         )
-		       END AS artifact_is_stale,
-		       ` + matchClass + ` AS match_class, ` + similarityScore + ` AS similarity
-		FROM search_fragments f
-		JOIN knowledge_items i ON i.id = f.item_id
-		JOIN LATERAL (
-			SELECT effective_captured_at AS effective_at
-			FROM raw_records WHERE item_id = i.id
-			ORDER BY effective_captured_at DESC, id DESC LIMIT 1
-		) item_times ON true
-		LEFT JOIN ai_artifacts artifact ON artifact.id = f.artifact_id
-		LEFT JOIN ai_task_runs artifact_task ON artifact_task.id = artifact.task_run_id
-		WHERE ` + strings.Join(filters, " AND ") + `
-		  AND (` + literal + ` OR ` + token + ` OR ` + fuzzy + `)
-	), ranked AS (
-		SELECT scored.*, ROW_NUMBER() OVER (
-			PARTITION BY item_id ORDER BY match_class DESC, similarity DESC, fragment_id DESC
-		) AS item_rank
-		FROM scored
-	), best AS (
-		SELECT * FROM ranked WHERE item_rank = 1
-	)`
+	cte := searchCTE(filters, literal, token, fuzzy, matchClass, similarityScore)
 
 	tx, err := service.database.BeginTx(request.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -338,7 +362,7 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	}
 	rows, err := tx.Query(request.Context(), cte+`
 		SELECT item_id, title, sensitivity, effective_at, fragment_id, source_kind,
-		       content, artifact_is_stale, match_class, similarity, `+totalExpression+` AS total_count
+		       content, artifact_is_stale, match_class, similarity, item_record_kinds, `+totalExpression+` AS total_count
 		FROM best`+cursorFilter+` ORDER BY `+order+` LIMIT `+limitParameter, arguments.values...)
 	if err != nil {
 		return nil, 0, nil, err
@@ -349,11 +373,13 @@ func (service *Service) runSearch(request *http.Request, input validatedSearch) 
 	for rows.Next() {
 		var result searchResult
 		var content string
+		var recordKinds []string
 		if err := rows.Scan(&result.ItemID, &result.Title, &result.Sensitivity, &result.EffectiveCapturedAt,
 			&result.MatchedFragmentID, &result.MatchedSource, &content, &result.ArtifactIsStale,
-			&result.matchClass, &result.similarity, &total); err != nil {
+			&result.matchClass, &result.similarity, &recordKinds, &total); err != nil {
 			return nil, 0, nil, err
 		}
+		result.ContentKind = contentKindFromRecordKinds(recordKinds)
 		if result.Sensitivity == "normal" {
 			result.SnippetParts = highlightedParts(content, input.Query)
 		} else {

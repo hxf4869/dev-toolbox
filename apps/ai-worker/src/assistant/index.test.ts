@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { generateEmbeddings } from '../model-gateway.js'
-import { AssistantClient, type ClaimedIndexBatch } from './client.js'
-import { EmbeddingIndexRunner } from './index.js'
+import { AssistantClient, AssistantClientError, type ClaimedIndexBatch } from './client.js'
+import { EmbeddingIndexRunner, startAssistantRunners } from './index.js'
 
 const batch: ClaimedIndexBatch = {
   generation: 2,
@@ -83,6 +83,100 @@ describe('EmbeddingIndexRunner CPU requests', () => {
       .rejects.toMatchObject({ status: 502, code: 'INVALID_API_RESPONSE' })
   })
 })
+
+describe('assistant lane loops', () => {
+  it('keeps the index lane alive when failIndexBatch reports a transient 500 (T24)', async () => {
+    const fetch = stubIndexLaneFetch({
+      embeddings: () => new Response('upstream down', { status: 500 }),
+      fail: () => new Response('api busy', { status: 500 }),
+    })
+    const runners = startAssistantRunners({ ...laneOptions() })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(requestsTo(fetch, '/index/claim')).toHaveLength(1)
+    expect(requestsTo(fetch, '/v1/embeddings')).toHaveLength(2)
+    expect(requestsTo(fetch, '/index/fail')).toHaveLength(1)
+
+    // The lane survives the failed failure-report and claims again.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(requestsTo(fetch, '/index/claim').length).toBeGreaterThanOrEqual(2)
+
+    // stop() is awaitable and resolves once the loops settled.
+    await expect(runners.stop()).resolves.toBeUndefined()
+  })
+
+  it('treats a stale-lease 409 as terminal for the batch and keeps claiming (T26)', async () => {
+    const fetch = stubIndexLaneFetch({
+      embeddings: () => Response.json({ data: [{ embedding: [0.5, 0.5, 0.5, 0.5] }] }),
+      complete: () => new Response(null, { status: 409 }),
+      fail: () => new Response(null, { status: 409 }),
+    })
+    const runners = startAssistantRunners({ ...laneOptions() })
+
+    await vi.advanceTimersByTimeAsync(0)
+    // One embedding attempt, one 409-terminated completion, one swallowed 409 failure
+    // report; the stale leaseVersion must never be retried for the same batch.
+    expect(requestsTo(fetch, '/v1/embeddings')).toHaveLength(1)
+    expect(requestsTo(fetch, '/index/complete')).toHaveLength(1)
+    expect(requestsTo(fetch, '/index/fail')).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(requestsTo(fetch, '/index/claim').length).toBeGreaterThanOrEqual(2)
+
+    await expect(runners.stop()).resolves.toBeUndefined()
+  })
+
+  it('reports a non-recoverable report defect through onLaneFailure (T25)', async () => {
+    const fetch = stubIndexLaneFetch({
+      embeddings: () => new Response('upstream down', { status: 500 }),
+      fail: () => new Response('validation failed', { status: 400 }),
+    })
+    const onLaneFailure = vi.fn()
+    const runners = startAssistantRunners({ ...laneOptions(), onLaneFailure })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onLaneFailure).toHaveBeenCalledOnce()
+    const [lane, error] = onLaneFailure.mock.calls[0]!
+    expect(lane).toBe('index')
+    expect(error).toBeInstanceOf(AssistantClientError)
+    expect((error as AssistantClientError).status).toBe(400)
+    expect(requestsTo(fetch, '/index/claim')).toHaveLength(1)
+
+    // stop() stays awaitable even though the lane already died.
+    await runners.stop()
+  })
+})
+
+function laneOptions() {
+  return {
+    apiInternalUrl: 'http://api.example.test',
+    serviceToken: 'synthetic-service-token',
+    workerId: 'loop-test-worker',
+    allowInsecureProviderHttp: true,
+    chatSlots: 0,
+  }
+}
+
+function stubIndexLaneFetch(handlers: {
+  embeddings: () => Response
+  complete?: () => Response
+  fail: () => Response
+}) {
+  let claimCalls = 0
+  const fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+    const url = String(input)
+    if (url.endsWith('/index/claim')) {
+      claimCalls += 1
+      return claimCalls === 1 ? Response.json(batch) : new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/v1/embeddings')) return handlers.embeddings()
+    if (url.endsWith('/index/complete')) return handlers.complete?.() ?? new Response(null, { status: 204 })
+    if (url.endsWith('/index/fail')) return handlers.fail()
+    throw new Error(`unexpected synthetic request: ${url}`)
+  })
+  vi.stubGlobal('fetch', fetch)
+  return fetch
+}
 
 function createRunner() {
   return new EmbeddingIndexRunner(

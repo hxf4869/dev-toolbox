@@ -8,6 +8,7 @@ import {
   normalizeArtifactDraft,
 } from './artifact-draft.js'
 import type { ArtifactContract } from './artifact-schema.js'
+import { log } from './logger.js'
 import { ProviderGatewayError, runProviderTurn, type ProviderTurnRequest } from './model-gateway.js'
 import { PromptStore } from './prompts.js'
 import {
@@ -917,8 +918,28 @@ export async function runTaskLoop(
       await abortableDelay(idleDelayMs, signal)
       continue
     }
-    await runner.run(claim, signal)
+    try {
+      await runner.run(claim, signal)
+    } catch (error) {
+      // A transient API failure while reporting a finished task must not kill
+      // the lane: the lease expires server-side and the task is re-claimed.
+      // Lease conflicts (409) and task failures are handled inside runner.run.
+      if (!isRecoverableReportError(error)) throw error
+      if (signal.aborted) return
+      log('warn', 'task_report_failed', {
+        errorType: error instanceof Error ? error.name : 'unknown',
+        status: error.status,
+      })
+      await abortableDelay(idleDelayMs, signal)
+    }
   }
+}
+
+// Transient API failures: network unreachable (status 0) and 5xx responses.
+// Anything else escaping the runner is an unexpected defect and must surface
+// to the process shutdown so the container restart policy takes over.
+function isRecoverableReportError(error: unknown): error is TaskClientError {
+  return error instanceof TaskClientError && (error.status === 0 || error.status >= 500)
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

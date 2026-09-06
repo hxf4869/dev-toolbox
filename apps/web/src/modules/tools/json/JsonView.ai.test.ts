@@ -189,7 +189,7 @@ describe('JSON AI explicit send flow', () => {
 class DelayedWorker {
   static instances: DelayedWorker[] = []
   readonly messages: Array<{ type: string; requestId: string }> = []
-  readonly listeners = new Set<(event: MessageEvent<unknown>) => void>()
+  readonly listeners = new Map<string, Set<(event: MessageEvent<unknown>) => void>>()
   terminated = false
 
   constructor() {
@@ -204,8 +204,13 @@ class DelayedWorker {
     this.messages.push(message)
   }
 
-  addEventListener(_type: 'message', listener: (event: MessageEvent<unknown>) => void) {
-    this.listeners.add(listener)
+  addEventListener(type: string, listener: (event: MessageEvent<unknown>) => void) {
+    let group = this.listeners.get(type)
+    if (!group) {
+      group = new Set()
+      this.listeners.set(type, group)
+    }
+    group.add(listener)
   }
 
   removeEventListener() {
@@ -218,7 +223,7 @@ class DelayedWorker {
 
   emit(requestId: string, result: unknown) {
     const event = new MessageEvent('message', { data: { type: 'result', requestId, result } })
-    for (const listener of this.listeners) listener(event)
+    for (const listener of this.listeners.get('message') ?? []) listener(event)
   }
 }
 

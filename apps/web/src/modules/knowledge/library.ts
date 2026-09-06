@@ -55,6 +55,8 @@ export interface LibraryItem {
   attachments: AttachmentEntry[]
 }
 
+export type ContentKind = 'text' | 'image' | 'file' | 'mixed'
+
 export interface SearchItem {
   itemId: string
   title: string
@@ -63,6 +65,7 @@ export interface SearchItem {
   matchedFragmentId: string
   effectiveCapturedAt: string
   sensitivity: Sensitivity
+  contentKind: ContentKind
   artifactIsStale: boolean | null
 }
 

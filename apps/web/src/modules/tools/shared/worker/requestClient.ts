@@ -1,10 +1,12 @@
 import { isWorkerOutputEnvelope } from './protocol'
 import type { WorkerCancelEnvelope, WorkerRequestEnvelope } from './protocol'
 
+export type WorkerPortEventType = 'message' | 'error' | 'messageerror'
+
 export interface WorkerPort {
   postMessage(message: unknown, transfer?: Transferable[]): void
-  addEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void
-  removeEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void
+  addEventListener(type: WorkerPortEventType, listener: (event: MessageEvent<unknown>) => void): void
+  removeEventListener(type: WorkerPortEventType, listener: (event: MessageEvent<unknown>) => void): void
   terminate(): void
 }
 
@@ -49,6 +51,14 @@ export class WorkerRemoteError extends Error {
     super(message)
     this.name = 'WorkerRemoteError'
     this.code = code
+  }
+}
+
+/** The Worker itself failed (load error, messageerror, or a failed send); pending requests can never complete. */
+export class WorkerRequestFailedError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = 'WorkerRequestFailedError'
   }
 }
 
@@ -102,7 +112,14 @@ export class WorkerRequestClient<TPayload, TResult> {
     if (options.supersede) this.superseded.set(options.supersede, requestId)
 
     const envelope: WorkerRequestEnvelope<TPayload> = { type: 'request', requestId, payload }
-    worker.postMessage(envelope, options.transfer)
+    try {
+      worker.postMessage(envelope, options.transfer)
+    } catch (error) {
+      // Sending failed (for example DataCloneError): release every registration and
+      // express the failure through the already created Promise. The task is not retried.
+      this.finish(requestId)
+      rejectPromise(new WorkerRequestFailedError('Worker request could not be sent', error))
+    }
 
     return {
       requestId,
@@ -114,8 +131,12 @@ export class WorkerRequestClient<TPayload, TResult> {
   cancel(requestId: string): boolean {
     const pending = this.pending.get(requestId)
     if (!pending) return false
-    const envelope: WorkerCancelEnvelope = { type: 'cancel', requestId }
-    this.worker?.postMessage(envelope)
+    try {
+      const envelope: WorkerCancelEnvelope = { type: 'cancel', requestId }
+      this.worker?.postMessage(envelope)
+    } catch {
+      // Cancellation is expressed locally; the settle path below must still run.
+    }
     this.finish(requestId)
     pending.reject(new WorkerRequestCancelledError())
 
@@ -142,20 +163,43 @@ export class WorkerRequestClient<TPayload, TResult> {
     pending.reject(new WorkerRemoteError(event.data.error.code, event.data.error.message))
   }
 
+  // A fatal Worker event (script failed to load, internal error, or a message that
+  // could not be deserialized) means no pending request can ever complete. Terminate
+  // the Worker and settle every pending request exactly once; the next request
+  // lazily creates a fresh Worker. Safe to fire repeatedly.
+  private readonly onFatalWorkerEvent = (event: MessageEvent<unknown>) => {
+    const message = event.type === 'messageerror'
+      ? 'Worker message could not be deserialized'
+      : 'Worker encountered an error'
+    this.detachWorker()
+    const error = new WorkerRequestFailedError(message)
+    for (const [requestId, pending] of this.pending) {
+      this.finish(requestId)
+      pending.reject(error)
+    }
+  }
+
   private ensureWorker() {
     if (this.worker) return this.worker
     const worker = this.createWorker()
     worker.addEventListener('message', this.onMessage)
+    worker.addEventListener('error', this.onFatalWorkerEvent)
+    worker.addEventListener('messageerror', this.onFatalWorkerEvent)
     this.worker = worker
     return worker
   }
 
+  private detachWorker() {
+    if (!this.worker) return
+    this.worker.removeEventListener('message', this.onMessage)
+    this.worker.removeEventListener('error', this.onFatalWorkerEvent)
+    this.worker.removeEventListener('messageerror', this.onFatalWorkerEvent)
+    this.worker.terminate()
+    this.worker = null
+  }
+
   private terminateWorker(message: string) {
-    if (this.worker) {
-      this.worker.removeEventListener('message', this.onMessage)
-      this.worker.terminate()
-      this.worker = null
-    }
+    this.detachWorker()
     const error = new WorkerRequestCancelledError(message)
     for (const [requestId, pending] of this.pending) {
       this.finish(requestId)

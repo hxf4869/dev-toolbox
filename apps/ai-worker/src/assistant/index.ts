@@ -43,10 +43,14 @@ export interface AssistantRunnerOptions {
   readonly workerId: string
   readonly allowInsecureProviderHttp: boolean
   readonly chatSlots?: number
+  // Invoked when a lane loop exits unexpectedly (not due to shutdown). The
+  // host process must react by exiting so the container restart policy takes
+  // over; only setting an exit code leaves HTTP green while the lane is dead.
+  readonly onLaneFailure?: (lane: 'chat' | 'index', error: unknown) => void
 }
 
 export interface RunningAssistant {
-  stop(): void
+  stop(): Promise<void>
 }
 
 // startAssistantRunners launches the assistant chat lane (default two slots)
@@ -64,8 +68,8 @@ export function startAssistantRunners(options: AssistantRunnerOptions): RunningA
     loops.push(
       runAssistantLoop(client, runner, controller.signal).catch((error: unknown) => {
         if (!controller.signal.aborted) {
-          log('error', 'assistant_loop_failed', { errorType: error instanceof Error ? error.name : 'unknown' })
-          process.exitCode = 1
+          log('error', 'assistant_loop_failed', { lane: 'chat', errorType: error instanceof Error ? error.name : 'unknown' })
+          options.onLaneFailure?.('chat', error)
         }
       }),
     )
@@ -73,17 +77,17 @@ export function startAssistantRunners(options: AssistantRunnerOptions): RunningA
   loops.push(
     runIndexLoop(client, indexRunner, controller.signal).catch((error: unknown) => {
       if (!controller.signal.aborted) {
-        log('error', 'assistant_index_loop_failed', { errorType: error instanceof Error ? error.name : 'unknown' })
-        process.exitCode = 1
+        log('error', 'assistant_loop_failed', { lane: 'index', errorType: error instanceof Error ? error.name : 'unknown' })
+        options.onLaneFailure?.('index', error)
       }
     }),
   )
 
   return {
-    stop(): void {
+    stop(): Promise<void> {
       controller.abort(new Error('assistant runners stopping'))
       // Loops finish their current claim; abortableDelay resolves promptly.
-      void Promise.allSettled(loops)
+      return Promise.allSettled(loops).then(() => undefined)
     },
   }
 }
@@ -106,7 +110,21 @@ async function runAssistantLoop(
       await abortableDelay(idleDelayMs, signal)
       continue
     }
-    await runner.run(claim, signal)
+    try {
+      await runner.run(claim, signal)
+    } catch (error) {
+      // A transient API failure while reporting a finished run must not kill
+      // the lane: the lease expires server-side and the run is retried. Lease
+      // conflicts (409) and task-level failures are handled inside runner.run.
+      if (!isRecoverableReportError(error)) throw error
+      if (signal.aborted) return
+      log('warn', 'assistant_run_report_failed', {
+        lane: 'chat',
+        errorType: error instanceof Error ? error.name : 'unknown',
+        status: error.status,
+      })
+      await abortableDelay(idleDelayMs, signal)
+    }
   }
 }
 
@@ -128,8 +146,30 @@ async function runIndexLoop(
       await abortableDelay(idleDelayMs, signal)
       continue
     }
-    await runner.run(batch, signal)
+    try {
+      await runner.run(batch, signal)
+    } catch (error) {
+      // Same discipline as the chat lane: a transient failure while
+      // completing/failing a batch (including failAll itself) must not kill
+      // the lane; the expired lease makes the API re-offer the fragments.
+      // A stale-lease 409 is terminal for that batch and handled in failAll.
+      if (!isRecoverableReportError(error)) throw error
+      if (signal.aborted) return
+      log('warn', 'assistant_run_report_failed', {
+        lane: 'index',
+        errorType: error instanceof Error ? error.name : 'unknown',
+        status: error.status,
+      })
+      await abortableDelay(idleDelayMs, signal)
+    }
   }
+}
+
+// Transient API failures: network unreachable (status 0) and 5xx responses.
+// Anything else escaping a runner is an unexpected defect and must surface to
+// the lane-failure handler so the process exits instead of faking health.
+function isRecoverableReportError(error: unknown): error is AssistantClientError {
+  return error instanceof AssistantClientError && (error.status === 0 || error.status >= 500)
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

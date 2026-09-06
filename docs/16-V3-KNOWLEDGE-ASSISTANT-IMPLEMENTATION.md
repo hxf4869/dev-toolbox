@@ -1318,7 +1318,7 @@ type TerminalEvent = {sequence: number; run: AssistantRunDTO}
 
 ### 15.2 Go/Caddy 必改点
 
-- 当前 Go 全局 `WriteTimeout=60s` 不适合长 SSE。SSE handler 通过 `http.NewResponseController` 清除该连接的写 deadline，普通 API 继续保留原超时。
+- 当前 Go 全局 `WriteTimeout=60s` 不适合长 SSE。SSE handler 通过 `http.NewResponseController` 为每次事件/心跳写入维持滑动写预算（15 秒）：写入与 Flush 均检查并返回错误以结束流，慢客户端或代理断连由写超时释放连接，普通 API 继续保留原超时。不支持设置写 deadline 的 ResponseWriter 降级为无预算流式输出（仅测试替身会遇到）。
 - 现有日志 ResponseWriter wrapper 增加标准 `Unwrap()`/flush 兼容，不能靠不安全类型断言。
 - 每次写入检查错误和 request context，SSE handler 断开即退出；持久 Run 本身不取消。
 - Caddy 官方会对 `text/event-stream` 立即 flush，因此首版不设置全局 `flush_interval -1`。负值会改变客户端断线传播，可能破坏临时会话“断线即取消”的合同。

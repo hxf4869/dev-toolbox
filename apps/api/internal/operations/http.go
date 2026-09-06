@@ -27,6 +27,7 @@ func RegisterRoutes(router *http.ServeMux, database databasePinger) {
 	handler := Handler{database: database}
 	router.HandleFunc("GET /health/live", handler.live)
 	router.HandleFunc("GET /health/ready", handler.ready)
+	router.HandleFunc("GET /api/v1/version", handler.version)
 }
 
 func (handler Handler) live(response http.ResponseWriter, _ *http.Request) {

@@ -17,11 +17,54 @@ import (
 )
 
 const sseHeartbeatInterval = 15 * time.Second
-const ssePollInterval = 250 * time.Millisecond
+const ssePollInterval = time.Second
+
+// Every network write gets a fresh bounded window. The stream itself may stay
+// open for a whole run, but a client or proxy that stops reading must release
+// the connection instead of blocking the handler forever.
+const sseWriteTimeout = 15 * time.Second
+
+// sseEventBatchSize bounds how many stored events one read loads into memory.
+// A terminal run closes the stream only after a batch that was not full, so
+// the whole tail is always streamed before the terminal event.
+const sseEventBatchSize = 128
 
 type sseWriter struct {
-	writer  io.Writer
-	flusher http.Flusher
+	writer     io.Writer
+	controller *http.ResponseController
+	// deadline is the absolute write deadline currently installed on the
+	// connection. Installing a fresh one before every small write would churn
+	// the poll timers while a write is in flight, so it is only re-installed
+	// once the remaining window drops below half the budget.
+	deadline        time.Time
+	deadlineSupport bool
+}
+
+func newSSEWriter(response http.ResponseWriter) (*sseWriter, error) {
+	controller := http.NewResponseController(response)
+	supported := controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) == nil
+	return &sseWriter{
+		writer:          response,
+		controller:      controller,
+		deadline:        time.Now().Add(sseWriteTimeout),
+		deadlineSupport: supported,
+	}, nil
+}
+
+// renewBudget restarts the per-write window. Call it before every write and
+// after every successful one: a fast writer keeps sliding its window forward,
+// while a stalled write keeps whatever absolute deadline was installed before
+// it blocked, so the connection is released within the budget.
+func (stream *sseWriter) renewBudget() error {
+	if !stream.deadlineSupport {
+		return nil
+	}
+	now := time.Now()
+	if stream.deadline.Sub(now) > sseWriteTimeout/2 {
+		return nil
+	}
+	stream.deadline = now.Add(sseWriteTimeout)
+	return stream.controller.SetWriteDeadline(stream.deadline)
 }
 
 func (stream *sseWriter) write(event string, payload any) error {
@@ -29,11 +72,16 @@ func (stream *sseWriter) write(event string, payload any) error {
 	if err != nil {
 		return err
 	}
+	if err := stream.renewBudget(); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(stream.writer, "event: %s\ndata: %s\n\n", event, encoded); err != nil {
 		return err
 	}
-	stream.flusher.Flush()
-	return nil
+	if err := stream.controller.Flush(); err != nil {
+		return err
+	}
+	return stream.renewBudget()
 }
 
 func (stream *sseWriter) writeID(event, id string, payload any) error {
@@ -41,19 +89,42 @@ func (stream *sseWriter) writeID(event, id string, payload any) error {
 	if err != nil {
 		return err
 	}
+	if err := stream.renewBudget(); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(stream.writer, "id: %s\nevent: %s\ndata: %s\n\n", id, event, encoded); err != nil {
 		return err
 	}
-	stream.flusher.Flush()
-	return nil
+	if err := stream.controller.Flush(); err != nil {
+		return err
+	}
+	return stream.renewBudget()
 }
 
 func (stream *sseWriter) writeComment(comment string) error {
+	if err := stream.renewBudget(); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(stream.writer, ": %s\n\n", comment); err != nil {
 		return err
 	}
-	stream.flusher.Flush()
-	return nil
+	if err := stream.controller.Flush(); err != nil {
+		return err
+	}
+	return stream.renewBudget()
+}
+
+func (stream *sseWriter) writeRaw(raw string) error {
+	if err := stream.renewBudget(); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprint(stream.writer, raw); err != nil {
+		return err
+	}
+	if err := stream.controller.Flush(); err != nil {
+		return err
+	}
+	return stream.renewBudget()
 }
 
 // runEventsStream implements the persistent run event stream (docs/16 §15.1):
@@ -70,23 +141,18 @@ func (service *Service) runEventsStream(response http.ResponseWriter, request *h
 		writeValidationError(response, request)
 		return
 	}
-	flusher, supportsFlush := response.(http.Flusher)
-	if !supportsFlush {
+	stream, streamErr := newSSEWriter(response)
+	if streamErr != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
-	// A long SSE stream must not inherit the server write deadline; clearing it
-	// per connection keeps ordinary API timeouts intact (docs/16 §15.2).
-	controller := http.NewResponseController(response)
-	_ = controller.SetWriteDeadline(time.Time{})
 	response.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	response.Header().Set("Cache-Control", "no-store, no-transform")
 	response.Header().Set("X-Accel-Buffering", "no")
 	response.WriteHeader(http.StatusOK)
-	fmt.Fprint(response, "retry: 3000\n\n")
-	flusher.Flush()
-
-	stream := &sseWriter{writer: response, flusher: flusher}
+	if err := stream.writeRaw("retry: 3000\n\n"); err != nil {
+		return
+	}
 	ctx := request.Context()
 	// Snapshot in one consistent read; after this only newer events stream.
 	snapshotData, err := service.buildSnapshot(ctx, run.ID)
@@ -108,16 +174,6 @@ func (service *Service) runEventsStream(response http.ResponseWriter, request *h
 	defer service.broadcast.unsubscribe(run.ID, channel)
 	_ = after
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-heartbeat.C:
-			if err := stream.writeComment("heartbeat"); err != nil {
-				return
-			}
-		case <-channel:
-		case <-poll.C:
-		}
 		events, terminal, err := service.readEventsAfter(ctx, run.ID, lastSequence)
 		if err != nil {
 			return
@@ -130,6 +186,23 @@ func (service *Service) runEventsStream(response http.ResponseWriter, request *h
 		}
 		if terminal {
 			return
+		}
+		if len(events) == sseEventBatchSize {
+			// The batch was full, keep draining a long tail immediately
+			// instead of waiting for the next broadcast or fallback tick.
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			if err := stream.writeComment("heartbeat"); err != nil {
+				return
+			}
+		case <-channel:
+			// Broadcast wake-up: new events were committed for this run.
+		case <-poll.C:
+			// Fallback tick: covers notifications lost across processes.
 		}
 	}
 }
@@ -231,34 +304,66 @@ type readEvent struct {
 	Payload  map[string]any
 }
 
-// readEventsAfter loads and converts events beyond a sequence. Terminal run
-// states are emitted exactly once as run.completed/run.stopped/run.failed.
+// readEventsAfter streams stored events beyond a sequence, then synthesizes
+// the terminal event exactly once after all of them (docs/16 §15.1: terminal
+// then close). Terminal run states are emitted as
+// run.completed/run.stopped/run.failed.
 func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, after int64) ([]readEvent, bool, error) {
+	progressed, err := hasRunProgress(ctx, service.database, runID, after)
+	if err != nil || !progressed {
+		return nil, false, err
+	}
 	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	run, err := scanRunRow(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM assistant_runs WHERE id = $1`, runID))
+	events, terminal, err := service.loadEventBatch(ctx, tx, runID, after)
 	if err != nil {
 		return nil, false, err
 	}
-	sources, err := service.loadRunSources(ctx, tx, runID)
+	return events, terminal, tx.Commit(ctx)
+}
+
+// hasRunProgress is the cheap wake-up check for one broadcast or fallback
+// tick: a single non-transactional query. Idle streams stop here and never
+// open a repeatable-read transaction or load run sources.
+func hasRunProgress(ctx context.Context, querier rowQuerier, runID uuid.UUID, after int64) (bool, error) {
+	var sequence int64
+	var status string
+	err := querier.QueryRow(ctx, `
+		SELECT COALESCE((SELECT max(sequence) FROM assistant_run_events WHERE run_id = $1), 0),
+		       status
+		FROM assistant_runs WHERE id = $1
+	`, runID).Scan(&sequence, &status)
+	if err != nil {
+		return false, err
+	}
+	if sequence > after {
+		return true, nil
+	}
+	return status == "succeeded" || status == "failed" || status == "stopped", nil
+}
+
+// loadEventBatch reads one bounded batch of stored events in the caller's
+// consistent read and converts them to the public shape. Run sources are only
+// loaded when the batch actually contains a citation event. A terminal run is
+// only reported once the batch was not full, so a tail spanning several
+// batches is never truncated by an early terminal.
+func (service *Service) loadEventBatch(ctx context.Context, querier rowQuerier, runID uuid.UUID, after int64) ([]readEvent, bool, error) {
+	run, err := scanRunRow(querier.QueryRow(ctx, `SELECT `+runColumns+` FROM assistant_runs WHERE id = $1`, runID))
 	if err != nil {
 		return nil, false, err
 	}
-	sourcesByOrdinal := make(map[int]sourceRow, len(sources))
-	for _, source := range sources {
-		sourcesByOrdinal[source.Ordinal] = source
-	}
-	rows, err := tx.Query(ctx, `
+	rows, err := querier.Query(ctx, `
 		SELECT sequence, event_type, payload FROM assistant_run_events
-		WHERE run_id = $1 AND sequence > $2 ORDER BY sequence
-	`, runID, after)
+		WHERE run_id = $1 AND sequence > $2 ORDER BY sequence LIMIT $3
+	`, runID, after, sseEventBatchSize)
 	if err != nil {
 		return nil, false, err
 	}
-	events := make([]readEvent, 0)
+	events := make([]readEvent, 0, sseEventBatchSize)
+	citationIndexes := make([]int, 0)
 	for rows.Next() {
 		var event readEvent
 		var rawType string
@@ -281,22 +386,7 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 				"stopRequested": run.StopRequestedAt != nil,
 			}
 		case "answer.citation":
-			ordinalValue, ok := event.Payload["sourceOrdinal"].(float64)
-			if !ok {
-				rows.Close()
-				return nil, false, errors.New("invalid stored citation event")
-			}
-			source, ok := sourcesByOrdinal[int(ordinalValue)]
-			if !ok || source.CitedNumber == nil {
-				rows.Close()
-				return nil, false, errors.New("citation source missing")
-			}
-			citationNumber := *source.CitedNumber
-			event.Payload = map[string]any{
-				"sequence": event.Sequence, "citationNumber": citationNumber,
-				"token":  "[[C" + itoa(citationNumber) + "]]",
-				"source": service.sourceDTO(run, source, citationNumber),
-			}
+			citationIndexes = append(citationIndexes, len(events))
 		}
 		events = append(events, event)
 	}
@@ -304,42 +394,85 @@ func (service *Service) readEventsAfter(ctx context.Context, runID uuid.UUID, af
 	if err := rows.Err(); err != nil {
 		return nil, false, err
 	}
-	terminal := false
-	var terminalRunDTO *AssistantRunDTO
-	if run.isTerminal() {
-		dto, err := service.runDTO(ctx, tx, run)
-		if err != nil {
+	if len(citationIndexes) > 0 {
+		if err := service.applyCitations(ctx, querier, run, events, citationIndexes); err != nil {
 			return nil, false, err
 		}
-		terminalRunDTO = &dto
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, err
+	if run.isTerminal() && len(events) < sseEventBatchSize {
+		return service.appendTerminalEvent(ctx, querier, run, events, after)
 	}
-	// Synthesize the terminal event after all stored events.
-	if run.isTerminal() {
-		if last := len(events); last > 0 && isTerminalType(events[last-1].Type) {
-			terminal = true
-		} else {
-			next := after
-			if len(events) > 0 {
-				next = events[len(events)-1].Sequence
-			}
-			eventType := "run.failed"
-			switch run.Status {
-			case "succeeded":
-				eventType = "run.completed"
-			case "stopped":
-				eventType = "run.stopped"
-			}
-			events = append(events, readEvent{
-				Sequence: next + 1, Type: eventType,
-				Payload: map[string]any{"sequence": next + 1, "run": *terminalRunDTO},
-			})
-			terminal = true
+	return events, false, nil
+}
+
+// applyCitations converts stored citation events with the run's source
+// snapshots; it runs only for batches that contain at least one citation.
+func (service *Service) applyCitations(ctx context.Context, querier rowQuerier, run runRow, events []readEvent, citationIndexes []int) error {
+	sources, err := service.loadRunSources(ctx, querier, run.ID)
+	if err != nil {
+		return err
+	}
+	sourcesByOrdinal := make(map[int]sourceRow, len(sources))
+	for _, source := range sources {
+		sourcesByOrdinal[source.Ordinal] = source
+	}
+	for _, index := range citationIndexes {
+		event := &events[index]
+		ordinalValue, ok := event.Payload["sourceOrdinal"].(float64)
+		if !ok {
+			return errors.New("invalid stored citation event")
+		}
+		source, ok := sourcesByOrdinal[int(ordinalValue)]
+		if !ok || source.CitedNumber == nil {
+			return errors.New("citation source missing")
+		}
+		citationNumber := *source.CitedNumber
+		event.Payload = map[string]any{
+			"sequence": event.Sequence, "citationNumber": citationNumber,
+			"token":  "[[C" + itoa(citationNumber) + "]]",
+			"source": service.sourceDTO(run, source, citationNumber),
 		}
 	}
-	return events, terminal, nil
+	return nil
+}
+
+// appendTerminalEvent appends the synthesized terminal event after every
+// stored event of the batch. A stored terminal-type event closes the stream
+// without a synthesized one — including when such an event was the last event
+// of a previous full batch, in which case this batch is empty and the stored
+// event at the after position is checked before synthesizing.
+func (service *Service) appendTerminalEvent(ctx context.Context, querier rowQuerier, run runRow, events []readEvent, after int64) ([]readEvent, bool, error) {
+	if last := len(events); last > 0 && isTerminalType(events[last-1].Type) {
+		return events, true, nil
+	}
+	if len(events) == 0 && after > 0 {
+		var latestType string
+		if err := querier.QueryRow(ctx, `
+			SELECT event_type FROM assistant_run_events WHERE run_id = $1 AND sequence = $2
+		`, run.ID, after).Scan(&latestType); err == nil && isTerminalType(latestType) {
+			return events, true, nil
+		}
+	}
+	next := after
+	if len(events) > 0 {
+		next = events[len(events)-1].Sequence
+	}
+	dto, err := service.runDTO(ctx, querier, run)
+	if err != nil {
+		return nil, false, err
+	}
+	eventType := "run.failed"
+	switch run.Status {
+	case "succeeded":
+		eventType = "run.completed"
+	case "stopped":
+		eventType = "run.stopped"
+	}
+	events = append(events, readEvent{
+		Sequence: next + 1, Type: eventType,
+		Payload: map[string]any{"sequence": next + 1, "run": dto},
+	})
+	return events, true, nil
 }
 
 func isTerminalType(value string) bool {

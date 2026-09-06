@@ -34,11 +34,13 @@ import (
 const v3InternalToken = "v3-synthetic-internal-service-token"
 
 type v3Harness struct {
-	server    *httptest.Server
-	client    *http.Client
-	csrf      string
-	database  *pgxpool.Pool
-	assistant *assistant.Service
+	server         *httptest.Server
+	client         *http.Client
+	csrf           string
+	database       *pgxpool.Pool
+	assistant      *assistant.Service
+	knowledge      *knowledge.Service
+	attachmentRoot string
 }
 
 func newV3Harness(t *testing.T, workerURLs ...string) *v3Harness {
@@ -72,7 +74,8 @@ func newV3Harness(t *testing.T, workerURLs ...string) *v3Harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	knowledgeService, err := knowledge.NewService(database, t.TempDir(), location)
+	attachmentRoot := t.TempDir()
+	knowledgeService, err := knowledge.NewService(database, attachmentRoot, location)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +124,8 @@ func newV3Harness(t *testing.T, workerURLs ...string) *v3Harness {
 	}, "")
 	assertStatus(t, confirm, http.StatusOK)
 	csrf := decodeResponse[apiResponse](t, confirm).CSRFToken
-	return &v3Harness{server: server, client: client, csrf: csrf, database: database, assistant: assistantService}
+	return &v3Harness{server: server, client: client, csrf: csrf, database: database,
+		assistant: assistantService, knowledge: knowledgeService, attachmentRoot: attachmentRoot}
 }
 
 func resetV3Database(t *testing.T, database *pgxpool.Pool) {
