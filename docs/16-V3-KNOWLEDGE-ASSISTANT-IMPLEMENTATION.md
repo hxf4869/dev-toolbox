@@ -579,7 +579,9 @@ Prompt 文件由 Backend owner 版本化；当前为 `assistant-answer-v2`，进
 
 ### 10.3 滚动摘要
 
-当成功消息超过 16 条，或估算 Prompt 将超过模型 context window 的 60% 时，使用当前模型、关闭思考，对最旧的成功消息生成/更新结构化摘要；最近至少保留 8 次完整问答原文。
+当成功消息超过 16 条时，claim 在回答上下文之外带回独立的摘要维护输入 `summarySource`：尚未被摘要覆盖的最旧成功消息（按 sequence 升序）加上前一版结构化摘要及其基准水位 `throughMessageSequence`；最近至少保留 8 次完整问答原文。回答侧 context 中的摘要仍按输入预算裁剪，与维护输入解耦。
+
+摘要为累计语义：Worker 在回答成功后使用当前模型、关闭思考，把前一版摘要与新增未覆盖消息共同作为模型输入生成新一版摘要，目标水位只推进到实际进入模型输入的最后一条消息。维护输入有独立于回答输入的模型预算（约 context window 的 60% 减去生成预留），放不下时跳过本轮维护、不推进水位；基准摘要与新增消息同样过敏感策略扫描并脱敏。写入契约见 §14.1。
 
 摘要必须保留：
 
@@ -588,7 +590,7 @@ Prompt 文件由 Backend owner 版本化；当前为 `assistant-answer-v2`，进
 - 已排除假设及原因，避免新模型重复已知错误。
 - 未解决问题。
 
-摘要失败不删除完整历史；真正需要压缩而摘要仍失败时，本轮返回稳定错误，不把失败/停止内容硬塞进上下文。
+摘要失败不删除完整历史，也不影响本轮回答成败；维护为 best-effort，下一轮 claim 仍有未覆盖消息时再次执行，不把失败/停止内容硬塞进上下文。
 
 ### 10.4 自动标题
 
@@ -629,7 +631,7 @@ claim
 → 批量提交 reasoning/answer 事件
 → 校验引用与用量
 → complete / fail / stopped
-→ best-effort 标题或摘要维护
+→ complete 成功且租约心跳停止后：best-effort 标题/摘要维护（独立取消域，总预算 60 秒，响应原 shutdownSignal）
 ```
 
 Provider 瞬时失败只在第一个用户可见 delta 之前允许一次同模型重试。已经出现 reasoning 或 answer delta 后，Worker/Provider 中断直接失败，保留部分内容，不自动重新生成另一份可能不同的答案。
@@ -1187,7 +1189,7 @@ type TemporaryStreamRequestDTO = {
 
 ## 14. 内部 Worker API
 
-内部路径不经 Caddy，全部使用现有 service token。Run/index 状态写操作都带 `workerId + leaseVersion`。Run 已进入终态后的标题/摘要维护不再占用执行 lease：它们必须携带原 `runId`，只允许幂等条件更新；标题还必须带 `title_origin != 'user'` 条件，绝不覆盖用户标题。
+内部路径不经 Caddy，全部使用现有 service token。Run/index 状态写操作都带 `workerId + leaseVersion`。Run 已进入终态后的标题/摘要维护不再占用执行 lease：它们必须携带原 `runId`，只允许幂等条件更新；标题还必须带 `title_origin != 'user'` 条件，绝不覆盖用户标题。维护在 complete 成功且租约心跳停止之后运行，位于独立取消域并有 60 秒总预算（`auxiliaryMaintenanceBudgetMs`），响应 Run 原始 shutdownSignal，title/summary 调用均携带该 signal。
 
 ### 14.1 持久 Run
 
@@ -1201,6 +1203,8 @@ POST /internal/assistant/runs/{id}/fail
 POST /internal/assistant/runs/{id}/title
 POST /internal/assistant/runs/{id}/summary
 ```
+
+`summary` 请求必填 `baselineThroughMessageSequence`：本次候选摘要所合并的存储摘要水位，0 表示尚无存储摘要；缺失（如旧版 Worker）或不在 `[0, throughMessageSequence)` 区间返回 422。写入为原子条件更新：仅当存储水位仍等于基准且目标水位前进时应用，否则保留原摘要并返回 `applied=false`，防止并发维护互相覆盖。
 
 claim 快照包括：模型/密钥、思考、策略、最近成功消息、摘要、Prompt 版本、当前 stop 状态和 Embedding 配置。Worker 不自行查询 Provider 配置数据库。
 
@@ -1318,7 +1322,7 @@ type TerminalEvent = {sequence: number; run: AssistantRunDTO}
 
 ### 15.2 Go/Caddy 必改点
 
-- 当前 Go 全局 `WriteTimeout=60s` 不适合长 SSE。SSE handler 通过 `http.NewResponseController` 为每次事件/心跳写入维持滑动写预算（15 秒）：写入与 Flush 均检查并返回错误以结束流，慢客户端或代理断连由写超时释放连接，普通 API 继续保留原超时。不支持设置写 deadline 的 ResponseWriter 降级为无预算流式输出（仅测试替身会遇到）。
+- 当前 Go 全局 `WriteTimeout=60s` 不适合长 SSE。SSE 生命周期开始时先清除继承的服务器写截止时间；每次实际 write+flush 前通过 `http.NewResponseController` 安装 15 秒写预算，成功后立即清除，空闲（模型/prepare 阶段与心跳间隔）不计预算。写入与 Flush 的错误（含预算到期）均结束流，慢客户端或代理断连由写超时释放连接，普通 API 继续保留原超时。不支持设置写 deadline 的 ResponseWriter 降级为无预算流式输出（仅测试替身会遇到）；日志中间件的 statusWriter 通过 `FlushError()` 透传底层 flush 错误。
 - 现有日志 ResponseWriter wrapper 增加标准 `Unwrap()`/flush 兼容，不能靠不安全类型断言。
 - 每次写入检查错误和 request context，SSE handler 断开即退出；持久 Run 本身不取消。
 - Caddy 官方会对 `text/event-stream` 立即 flush，因此首版不设置全局 `flush_interval -1`。负值会改变客户端断线传播，可能破坏临时会话“断线即取消”的合同。

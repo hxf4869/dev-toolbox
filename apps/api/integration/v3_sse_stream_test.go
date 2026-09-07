@@ -30,7 +30,7 @@ type sseStreamRun struct {
 }
 
 type sseSnapshotPayload struct {
-	LastSequence     int64  `json:"lastSequence"`
+	LastSequence     int64 `json:"lastSequence"`
 	AssistantMessage struct {
 		Content string `json:"content"`
 	} `json:"assistantMessage"`

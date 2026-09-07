@@ -25,8 +25,17 @@ func (writer *statusWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
 }
 
+// FlushError forwards a real flush failure (broken client, proxy disconnect)
+// to callers such as http.ResponseController. Implementing it is required:
+// ResponseController prefers FlushError over the no-return-value Flush and
+// never unwraps past a Flush implementation, so without this method the
+// logging wrapper would swallow transport errors from SSE streams.
+func (writer *statusWriter) FlushError() error {
+	return http.NewResponseController(writer.ResponseWriter).Flush()
+}
+
 func (writer *statusWriter) Flush() {
-	_ = http.NewResponseController(writer.ResponseWriter).Flush()
+	_ = writer.FlushError()
 }
 
 func RequestID(next http.Handler) http.Handler {

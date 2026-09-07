@@ -30,6 +30,17 @@ const heartbeatIntervalMs = 10_000
 const batchIntervalMs = 150
 const batchMaximumBytes = 4 * 1024
 const maximumAnswerRuntimeMs = 10 * 60_000
+// Auxiliary title/summary maintenance runs after the run already succeeded.
+// Its total wall-clock budget is independent of and far below the answer
+// runtime cap, so a slow Provider cannot hold a chat execution slot for the
+// full answer window (docs/16 §11.2).
+const auxiliaryMaintenanceBudgetMs = 60_000
+// The summary maintenance input gets its own model budget: the rolling
+// summary trigger threshold (60% of the context window, docs/16 §10.3) minus
+// a fixed generation reserve. It is independent of the answer input budget
+// the Go API applies to claim.context.
+const summaryMaintenanceShare = 0.6
+const summaryGenerationReserveTokens = 1024
 
 export interface AssistantRunnerOptions {
   readonly apiInternalUrl: string
@@ -81,9 +92,18 @@ export class AssistantRunner {
       } catch (failError) {
         if (!isLeaseConflict(failError)) throw failError
       }
+      return
     } finally {
+      // Ends the execution-lease heartbeat on every path. A tick that is
+      // still in flight is neutralized inside RunHeartbeat, so its late 409
+      // against the already-succeeded run cannot abort the maintenance below
+      // (docs/16 §14).
       heartbeat.stop()
     }
+    // Auxiliary maintenance only ever runs for a completed answer, after the
+    // lease heartbeat stopped, in its own bounded cancel scope. It never
+    // touches the execution lease and its failure never fails the answer.
+    await this.maintainTitleAndSummary(claim, shutdownSignal)
   }
 
   private async execute(
@@ -158,7 +178,6 @@ export class AssistantRunner {
 
     await this.emitPhase(claim, heartbeat, 'answer')
     await this.streamAnswer(claim, usage, timings, heartbeat, evidenceState, sources, deadline)
-    await this.maintainTitleAndSummary(claim, heartbeat)
   }
 
   private async rewriteQuery(
@@ -378,82 +397,172 @@ export class AssistantRunner {
     await this.emit(claim, heartbeat, [{ eventId: randomUUID(), type: 'run.status', payload: { phase } }])
   }
 
-  // Best-effort title after the first successful answer and summary upkeep.
-  private async maintainTitleAndSummary(claim: ClaimedAssistantRun, heartbeat: RunHeartbeat): Promise<void> {
-    const firstAnswer = claim.context.messages.filter((message) => message.role === 'assistant').length === 0
-    if (firstAnswer) {
-      try {
-        const titleRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
-        const message = await collectAssistantTurn({
-          protocol: claim.model.protocol,
-          baseUrl: claim.model.baseUrl,
-          apiKey: claim.model.apiKey,
-          modelId: claim.model.upstreamModelId,
-          contextWindow: claim.model.contextWindow,
-          maxOutputTokens: Math.min(64, claim.model.maxOutputTokens),
-          reasoning: 'off',
-          context: {
-            systemPrompt: titlePrompt,
-            messages: [
-              {
-                role: 'user',
-                content: redactProviderInput(titleRedactor, claim.context.question),
-                timestamp: Date.now(),
-              },
-            ],
-          },
-          allowInsecureHttp: this.allowInsecureProviderHttp,
-          deadlineAt: new Date(Date.now() + maximumAnswerRuntimeMs),
-          signal: heartbeat.signal,
-        })
-        const title = message.text.trim().replace(/^["'「『]|["'」』]$/g, '').slice(0, 30)
-        if (title.length > 0) {
-          await this.client.runTitle(claim.run.id, title)
-        }
-      } catch {
-        // Title failure keeps the provisional title and never fails the answer.
-      }
+  // Best-effort title after the first successful answer and cumulative
+  // summary upkeep. Runs strictly after completeRun returned and the
+  // execution-lease heartbeat stopped, inside its own finite cancel scope
+  // that still responds to the run's original shutdown signal. It reuses the
+  // lease-free title/summary API and never re-issues the answer request
+  // (docs/16 §11.2, §14).
+  private async maintainTitleAndSummary(claim: ClaimedAssistantRun, shutdownSignal?: AbortSignal): Promise<void> {
+    if (shutdownSignal?.aborted) return
+    const maintenance = new AbortController()
+    const deadline = Date.now() + auxiliaryMaintenanceBudgetMs
+    const budgetTimer = setTimeout(
+      () => maintenance.abort(new Error('assistant auxiliary maintenance budget exhausted')),
+      auxiliaryMaintenanceBudgetMs,
+    )
+    const abortOnShutdown = (): void => {
+      maintenance.abort(shutdownSignal?.reason)
     }
-    const summarySource = (claim.context as { summarySource?: { throughMessageSequence: number; messages: { role: string; content: string }[] } | null }).summarySource
-    if (summarySource && summarySource.messages.length > 0) {
-      try {
-        const summaryRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
-        const message = await collectAssistantTurn({
-          protocol: claim.model.protocol,
-          baseUrl: claim.model.baseUrl,
-          apiKey: claim.model.apiKey,
-          modelId: claim.model.upstreamModelId,
-          contextWindow: claim.model.contextWindow,
-          maxOutputTokens: Math.min(1024, claim.model.maxOutputTokens),
-          reasoning: 'off',
-          context: {
-            systemPrompt: summaryPrompt(),
-            messages: [
-              {
-                role: 'user',
-                content: summarySource.messages.map((entry) => redactProviderInput(
-                  summaryRedactor,
-                  `${entry.role === 'user' ? '用户' : '助手'}: ${entry.content}`,
-                )).join('\n\n'),
-                timestamp: Date.now(),
-              },
-            ],
-          },
-          allowInsecureHttp: this.allowInsecureProviderHttp,
-          deadlineAt: new Date(Date.now() + maximumAnswerRuntimeMs),
-          signal: heartbeat.signal,
-        })
-        const parsed = parseSummary(message.text)
-        if (parsed !== null) {
-          await this.client.runSummary(claim.run.id, parsed, summarySource.throughMessageSequence, {
-            modelId: claim.model.id, displayName: claim.model.displayName,
-          })
-        }
-      } catch {
-        // Summary failure keeps the complete history; the run stays successful.
-      }
+    shutdownSignal?.addEventListener('abort', abortOnShutdown, { once: true })
+    try {
+      await this.maintainTitle(claim, maintenance.signal, deadline)
+      await this.maintainSummary(claim, maintenance.signal, deadline)
+    } finally {
+      clearTimeout(budgetTimer)
+      shutdownSignal?.removeEventListener('abort', abortOnShutdown)
     }
   }
+
+  private async maintainTitle(claim: ClaimedAssistantRun, signal: AbortSignal, deadline: number): Promise<void> {
+    const firstAnswer = claim.context.messages.filter((message) => message.role === 'assistant').length === 0
+    if (!firstAnswer) return
+    try {
+      const titleRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
+      const message = await collectAssistantTurn({
+        protocol: claim.model.protocol,
+        baseUrl: claim.model.baseUrl,
+        apiKey: claim.model.apiKey,
+        modelId: claim.model.upstreamModelId,
+        contextWindow: claim.model.contextWindow,
+        maxOutputTokens: Math.min(64, claim.model.maxOutputTokens),
+        reasoning: 'off',
+        context: {
+          systemPrompt: titlePrompt,
+          messages: [
+            {
+              role: 'user',
+              content: redactProviderInput(titleRedactor, claim.context.question),
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        allowInsecureHttp: this.allowInsecureProviderHttp,
+        deadlineAt: new Date(deadline),
+        signal,
+      })
+      const title = message.text.trim().replace(/^["'「『]|["'」』]$/g, '').slice(0, 30)
+      if (title.length > 0) {
+        await this.client.runTitle(claim.run.id, title, signal)
+      }
+    } catch {
+      // Title failure keeps the provisional title and never fails the answer.
+    }
+  }
+
+  private async maintainSummary(claim: ClaimedAssistantRun, signal: AbortSignal, deadline: number): Promise<void> {
+    const summarySource = claim.context.summarySource
+    if (summarySource === null || summarySource.messages.length === 0) return
+    const redactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
+    // The maintenance input merges the stored baseline summary with the new
+    // uncovered messages; its watermark targets only what actually entered
+    // the model input (docs/16 §10.3).
+    const input = summaryMaintenanceInput(claim.model.contextWindow, redactor, summarySource)
+    if (input === null) return
+    try {
+      const message = await collectAssistantTurn({
+        protocol: claim.model.protocol,
+        baseUrl: claim.model.baseUrl,
+        apiKey: claim.model.apiKey,
+        modelId: claim.model.upstreamModelId,
+        contextWindow: claim.model.contextWindow,
+        maxOutputTokens: Math.min(1024, claim.model.maxOutputTokens),
+        reasoning: 'off',
+        context: {
+          systemPrompt: summaryPrompt(),
+          messages: [
+            {
+              role: 'user',
+              content: input.prompt,
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        allowInsecureHttp: this.allowInsecureProviderHttp,
+        deadlineAt: new Date(deadline),
+        signal,
+      })
+      const parsed = parseSummary(message.text)
+      if (parsed !== null) {
+        await this.client.runSummary(
+          claim.run.id, parsed, input.throughMessageSequence, input.baselineThroughMessageSequence,
+          { modelId: claim.model.id, displayName: claim.model.displayName }, signal,
+        )
+      }
+    } catch {
+      // Summary failure keeps the complete history and the stored baseline;
+      // the run stays successful.
+    }
+  }
+}
+
+interface SummaryMaintenanceInput {
+  readonly prompt: string
+  readonly throughMessageSequence: number
+  readonly baselineThroughMessageSequence: number
+}
+
+// summaryMaintenanceInput assembles the cumulative summary model input: the
+// redacted stored baseline summary plus the consecutive oldest-first prefix
+// of uncovered messages that fits the maintenance budget (docs/16 §10.3).
+// The target watermark is the sequence of the last message actually included,
+// so it can never advance past content the model did not see. Returns null —
+// skip maintenance without advancing anything — when even the baseline alone
+// does not fit or no message fits beside it.
+export function summaryMaintenanceInput(
+  contextWindow: number,
+  redactor: StreamRedactor | null,
+  summarySource: NonNullable<ClaimedAssistantRun['context']['summarySource']>,
+): SummaryMaintenanceInput | null {
+  const budget = Math.floor(contextWindow * summaryMaintenanceShare) - summaryGenerationReserveTokens
+  if (budget <= 0) return null
+  const baseline = summarySource.prior === null ? 0 : summarySource.prior.throughMessageSequence
+  const sections: string[] = []
+  let used = 0
+  if (summarySource.prior !== null) {
+    // The stored baseline is Provider input like any other content and goes
+    // through the same redactor (docs/16 §6.2).
+    const baselineText = redactProviderInput(redactor, JSON.stringify(summarySource.prior.summary))
+    const baselineCost = estimateTokens(baselineText)
+    if (baselineCost > budget) return null
+    sections.push('以下是当前会话已有的结构化摘要（维护基准）：\n' + baselineText)
+    used = baselineCost
+  }
+  const lines: string[] = []
+  let through = baseline
+  for (const message of summarySource.messages) {
+    const line = redactProviderInput(redactor, `${message.role === 'user' ? '用户' : '助手'}: ${message.content}`)
+    const cost = estimateTokens(line)
+    if (used + cost > budget) break
+    lines.push(line)
+    used += cost
+    through = message.sequence
+  }
+  if (lines.length === 0) return null
+  sections.push('以下是该基准之后新增、尚未进入摘要的成功对话：\n' + lines.join('\n\n'))
+  sections.push(
+    '请把基准摘要与新增对话合并为一份更新后的完整结构化摘要：' +
+    '基准中仍然成立的旧事实、旧纠正、已排除假设与未解决问题必须保留，' +
+    '新增对话中的新事实、用户更正、新排除的假设与新问题并入对应字段；' +
+    '不要丢失仍然成立的基准内容，不要输出四个字段之外的任何内容。',
+  )
+  return { prompt: sections.join('\n\n'), throughMessageSequence: through, baselineThroughMessageSequence: baseline }
+}
+
+// Same deliberately conservative CJK-first estimate as the Go API: at most
+// one token per three UTF-8 bytes never underestimates Chinese text.
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(Buffer.byteLength(text, 'utf8') / 3))
 }
 
 function providerHistoryMessages(
@@ -706,16 +815,22 @@ class RunHeartbeat {
 
   private async tick(): Promise<void> {
     if (this.#stopped) return
+    let result: { readonly stopRequested: boolean }
     try {
-      const result = await this.client.heartbeatRun(this.claim.run.id, this.claim.run.leaseVersion)
-      if (result.stopRequested) {
-        this.stopRequested = true
-        this.#controller.abort(new Error('assistant run stop requested'))
-        return
-      }
+      result = await this.client.heartbeatRun(this.claim.run.id, this.claim.run.leaseVersion)
     } catch (error) {
+      // stop() may have run while this request was in flight (the execution
+      // phase already ended); a late 409 against the succeeded run must not
+      // flip leaseLost or abort anything afterwards (docs/16 §14).
+      if (this.#stopped) return
       this.leaseLost = true
       this.#controller.abort(error)
+      return
+    }
+    if (this.#stopped) return
+    if (result.stopRequested) {
+      this.stopRequested = true
+      this.#controller.abort(new Error('assistant run stop requested'))
       return
     }
     this.#timer = setTimeout(() => {

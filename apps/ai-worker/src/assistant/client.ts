@@ -43,15 +43,32 @@ export interface ClaimedAssistantRun {
     readonly dimensions: number | null
   }
   readonly context: {
-    readonly summary: {
-      readonly confirmedFacts: readonly string[]
-      readonly corrections: readonly string[]
-      readonly rejectedHypotheses: readonly string[]
-      readonly unresolvedQuestions: readonly string[]
-    } | null
+    readonly summary: AssistantSummary | null
     readonly messages: readonly { readonly role: 'user' | 'assistant'; readonly content: string }[]
     readonly question: string
+    // Lease-free summary maintenance input (docs/16 §10.3): the stored
+    // baseline summary with its exact watermark plus the uncovered messages,
+    // independent of the budget-trimmed answer-side summary. Null when
+    // nothing needs compressing.
+    readonly summarySource: {
+      readonly messages: readonly {
+        readonly sequence: number
+        readonly role: 'user' | 'assistant'
+        readonly content: string
+      }[]
+      readonly prior: {
+        readonly throughMessageSequence: number
+        readonly summary: AssistantSummary
+      } | null
+    } | null
   }
+}
+
+export interface AssistantSummary {
+  readonly confirmedFacts: readonly string[]
+  readonly corrections: readonly string[]
+  readonly rejectedHypotheses: readonly string[]
+  readonly unresolvedQuestions: readonly string[]
 }
 
 export interface ClaimedIndexBatch {
@@ -187,10 +204,17 @@ export class AssistantClient {
     }, 8 * 1024, signal)
   }
 
-  async runSummary(runId: string, summary: Record<string, string[]>, throughMessageSequence: number, modelSnapshot: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
+  async runSummary(
+    runId: string,
+    summary: Record<string, string[]>,
+    throughMessageSequence: number,
+    baselineThroughMessageSequence: number,
+    modelSnapshot: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<void> {
     await this.jsonRequest(`/internal/assistant/runs/${runId}/summary`, {
       method: 'POST',
-      body: JSON.stringify({ summary, throughMessageSequence, modelSnapshot }),
+      body: JSON.stringify({ summary, throughMessageSequence, baselineThroughMessageSequence, modelSnapshot }),
     }, 256 * 1024, signal)
   }
 

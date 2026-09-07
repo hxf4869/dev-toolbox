@@ -37,14 +37,33 @@ type claimRunContext struct {
 	Summary  *claimRunSummary  `json:"summary"`
 	Messages []claimRunMessage `json:"messages"`
 	Question string            `json:"question"`
-	// SummarySource carries the oldest successful messages to compress when the
-	// rolling summary must be regenerated (docs/16 §10.3); nil otherwise.
+	// SummarySource carries the lease-free summary maintenance input: the
+	// stored baseline summary with its exact watermark, plus the oldest
+	// successful messages not yet covered. It is independent of the
+	// answer-side Summary, which the input budget may drop (docs/16 §10.3);
+	// nil when nothing needs compressing.
 	SummarySource *claimSummarySource `json:"summarySource"`
 }
 
 type claimSummarySource struct {
-	ThroughMessageSequence int64             `json:"throughMessageSequence"`
-	Messages               []claimRunMessage `json:"messages"`
+	// Messages are the successful messages to compress, in ascending
+	// sequence order so a consecutive prefix is well-defined.
+	Messages []claimSummaryMessage `json:"messages"`
+	// Prior is the stored structured summary together with the watermark it
+	// covers, read in the same query as the summary content; nil when the
+	// conversation has no stored summary yet (baseline 0).
+	Prior *claimSummaryPrior `json:"prior"`
+}
+
+type claimSummaryPrior struct {
+	ThroughMessageSequence int64           `json:"throughMessageSequence"`
+	Summary                claimRunSummary `json:"summary"`
+}
+
+type claimSummaryMessage struct {
+	Sequence int64  `json:"sequence"`
+	Role     string `json:"role"`
+	Content  string `json:"content"`
 }
 
 type claimRunResult struct {
@@ -402,14 +421,24 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 	}
 	budget := inputContextBudgetTokens(run.ContextWindow, run.MaxOutputTokens)
 
+	// The stored summary content and its watermark are read in one query so
+	// the maintenance baseline pair cannot be split by a lease-free summary
+	// write committed between two reads.
 	var summaryContent []byte
+	var summarizedThrough int64
 	hasSummary := false
 	if err := tx.QueryRow(ctx, `
-		SELECT content FROM assistant_conversation_summaries WHERE conversation_id = $1
-	`, run.ConversationID).Scan(&summaryContent); err == nil {
+		SELECT content, through_message_sequence FROM assistant_conversation_summaries WHERE conversation_id = $1
+	`, run.ConversationID).Scan(&summaryContent, &summarizedThrough); err == nil {
 		hasSummary = true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
+	}
+	var summary claimRunSummary
+	if hasSummary {
+		if err := json.Unmarshal(summaryContent, &summary); err != nil {
+			return nil, err
+		}
 	}
 	// The current question always stays; it reserves its budget first.
 	question := input.Content
@@ -427,10 +456,6 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 	}
 	budget -= sourceHeadroom
 	if hasSummary {
-		var summary claimRunSummary
-		if err := json.Unmarshal(summaryContent, &summary); err != nil {
-			return nil, err
-		}
 		encoded, _ := json.Marshal(summary)
 		if summaryBytes := estimateTokens(string(encoded)); summaryBytes < budget {
 			context.Summary = &summary
@@ -461,15 +486,11 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	var summarizedThrough int64
+	var prior *claimSummaryPrior
 	if hasSummary {
-		if err := tx.QueryRow(ctx,
-			`SELECT through_message_sequence FROM assistant_conversation_summaries WHERE conversation_id = $1`,
-			run.ConversationID).Scan(&summarizedThrough); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return nil, err
-		}
+		prior = &claimSummaryPrior{ThroughMessageSequence: summarizedThrough, Summary: summary}
 	}
-	summarySource := service.summarySourceFor(history, summarizedThrough)
+	summarySource := service.summarySourceFor(history, summarizedThrough, prior)
 	for _, entry := range history {
 		stripped := entry.content
 		if entry.role == "assistant" {
@@ -500,36 +521,37 @@ type historyEntry struct {
 // (docs/16 §10.3): more than 16 successful messages in the conversation.
 // The most recent 16 successful messages (8 complete Q&A pairs) always stay
 // verbatim; older ones not yet covered by the stored summary are compressed.
-func (service *Service) summarySourceFor(history []historyEntry, summarizedThrough int64) *claimSummarySource {
+// The stored summary (content and watermark read in one query) travels along
+// as the maintenance baseline, so the next summary accumulates the previous
+// one instead of replacing it.
+func (service *Service) summarySourceFor(history []historyEntry, summarizedThrough int64, prior *claimSummaryPrior) *claimSummarySource {
 	if len(history) <= SummaryMessageTrigger {
 		return nil
 	}
 	// history is newest-first; the newest SummaryMessageTrigger stay verbatim.
 	older := history[SummaryMessageTrigger:]
 	compress := make([]historyEntry, 0, len(older))
-	through := int64(0)
 	for _, entry := range older {
 		if entry.sequence <= summarizedThrough {
 			continue
 		}
 		compress = append(compress, entry)
-		if entry.sequence > through {
-			through = entry.sequence
-		}
 	}
 	if len(compress) == 0 {
 		return nil
 	}
-	messages := make([]claimRunMessage, 0, len(compress))
+	messages := make([]claimSummaryMessage, 0, len(compress))
+	// compress is newest-first; emit ascending sequence order for the model
+	// and so the maintenance target watermark is the last element's sequence.
 	for index := len(compress) - 1; index >= 0; index-- {
 		entry := compress[index]
 		content := entry.content
 		if entry.role == "assistant" {
 			content = stripCitationTokens(content)
 		}
-		messages = append(messages, claimRunMessage{Role: entry.role, Content: content})
+		messages = append(messages, claimSummaryMessage{Sequence: entry.sequence, Role: entry.role, Content: content})
 	}
-	return &claimSummarySource{ThroughMessageSequence: through, Messages: messages}
+	return &claimSummarySource{Messages: messages, Prior: prior}
 }
 
 // contextBudgetTokens reserves the system prompt, sources headroom, answer
@@ -563,6 +585,21 @@ func claimContextMatchesSensitivePattern(value claimRunContext) bool {
 	for _, message := range value.Messages {
 		if contentMatchesSensitivePattern(message.Content) {
 			return true
+		}
+	}
+	// The summary maintenance input is a second outbound Provider call in the
+	// same run; the block policy must scan its baseline and new messages too.
+	if value.SummarySource != nil {
+		if value.SummarySource.Prior != nil {
+			encoded, err := json.Marshal(value.SummarySource.Prior.Summary)
+			if err != nil || contentMatchesSensitivePattern(string(encoded)) {
+				return true
+			}
+		}
+		for _, message := range value.SummarySource.Messages {
+			if contentMatchesSensitivePattern(message.Content) {
+				return true
+			}
 		}
 	}
 	return false

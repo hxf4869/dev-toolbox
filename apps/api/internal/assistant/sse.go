@@ -21,8 +21,9 @@ const ssePollInterval = time.Second
 
 // Every network write gets a fresh bounded window. The stream itself may stay
 // open for a whole run, but a client or proxy that stops reading must release
-// the connection instead of blocking the handler forever.
-const sseWriteTimeout = 15 * time.Second
+// the connection instead of blocking the handler forever. A variable so the
+// write-budget tests can shrink it; production keeps 15 seconds.
+var sseWriteTimeout = 15 * time.Second
 
 // sseEventBatchSize bounds how many stored events one read loads into memory.
 // A terminal run closes the stream only after a batch that was not full, so
@@ -32,39 +33,53 @@ const sseEventBatchSize = 128
 type sseWriter struct {
 	writer     io.Writer
 	controller *http.ResponseController
-	// deadline is the absolute write deadline currently installed on the
-	// connection. Installing a fresh one before every small write would churn
-	// the poll timers while a write is in flight, so it is only re-installed
-	// once the remaining window drops below half the budget.
-	deadline        time.Time
+	// deadlineSupport records whether the underlying ResponseWriter can
+	// install write deadlines. Plain test writers cannot and degrade to
+	// unbounded streaming; production connections always carry the per-write
+	// budget below.
 	deadlineSupport bool
 }
 
 func newSSEWriter(response http.ResponseWriter) (*sseWriter, error) {
 	controller := http.NewResponseController(response)
-	supported := controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) == nil
+	// The stream may legitimately stay idle for a whole model/prepare phase,
+	// so it must not inherit the server-wide write deadline: clear it for the
+	// whole life of this response. Idle stretches are then bounded by the
+	// run/prepare budgets, request cancellation and heartbeats, while every
+	// actual write arms a fresh bounded window first (see armWriteBudget).
+	// A real deadline error means the connection is already unusable and must
+	// end the stream; only a writer without deadline support degrades.
+	err := controller.SetWriteDeadline(time.Time{})
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return nil, err
+	}
 	return &sseWriter{
 		writer:          response,
 		controller:      controller,
-		deadline:        time.Now().Add(sseWriteTimeout),
-		deadlineSupport: supported,
+		deadlineSupport: err == nil,
 	}, nil
 }
 
-// renewBudget restarts the per-write window. Call it before every write and
-// after every successful one: a fast writer keeps sliding its window forward,
-// while a stalled write keeps whatever absolute deadline was installed before
-// it blocked, so the connection is released within the budget.
-func (stream *sseWriter) renewBudget() error {
+// armWriteBudget gives the upcoming write a fresh bounded window. Called
+// before every write: a write that blocks on a stalled client keeps the
+// absolute deadline it was armed with, so the connection is released within
+// the budget instead of blocking the handler forever.
+func (stream *sseWriter) armWriteBudget() error {
 	if !stream.deadlineSupport {
 		return nil
 	}
-	now := time.Now()
-	if stream.deadline.Sub(now) > sseWriteTimeout/2 {
+	return stream.controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+}
+
+// clearWriteBudget removes the write deadline again after a successful
+// write+flush, so idle waiting between events is never counted against the
+// budget. A failure here means the connection is unusable; the caller ends
+// the stream instead of writing again on it.
+func (stream *sseWriter) clearWriteBudget() error {
+	if !stream.deadlineSupport {
 		return nil
 	}
-	stream.deadline = now.Add(sseWriteTimeout)
-	return stream.controller.SetWriteDeadline(stream.deadline)
+	return stream.controller.SetWriteDeadline(time.Time{})
 }
 
 func (stream *sseWriter) write(event string, payload any) error {
@@ -72,7 +87,7 @@ func (stream *sseWriter) write(event string, payload any) error {
 	if err != nil {
 		return err
 	}
-	if err := stream.renewBudget(); err != nil {
+	if err := stream.armWriteBudget(); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stream.writer, "event: %s\ndata: %s\n\n", event, encoded); err != nil {
@@ -81,7 +96,7 @@ func (stream *sseWriter) write(event string, payload any) error {
 	if err := stream.controller.Flush(); err != nil {
 		return err
 	}
-	return stream.renewBudget()
+	return stream.clearWriteBudget()
 }
 
 func (stream *sseWriter) writeID(event, id string, payload any) error {
@@ -89,7 +104,7 @@ func (stream *sseWriter) writeID(event, id string, payload any) error {
 	if err != nil {
 		return err
 	}
-	if err := stream.renewBudget(); err != nil {
+	if err := stream.armWriteBudget(); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stream.writer, "id: %s\nevent: %s\ndata: %s\n\n", id, event, encoded); err != nil {
@@ -98,11 +113,11 @@ func (stream *sseWriter) writeID(event, id string, payload any) error {
 	if err := stream.controller.Flush(); err != nil {
 		return err
 	}
-	return stream.renewBudget()
+	return stream.clearWriteBudget()
 }
 
 func (stream *sseWriter) writeComment(comment string) error {
-	if err := stream.renewBudget(); err != nil {
+	if err := stream.armWriteBudget(); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stream.writer, ": %s\n\n", comment); err != nil {
@@ -111,11 +126,11 @@ func (stream *sseWriter) writeComment(comment string) error {
 	if err := stream.controller.Flush(); err != nil {
 		return err
 	}
-	return stream.renewBudget()
+	return stream.clearWriteBudget()
 }
 
 func (stream *sseWriter) writeRaw(raw string) error {
-	if err := stream.renewBudget(); err != nil {
+	if err := stream.armWriteBudget(); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprint(stream.writer, raw); err != nil {
@@ -124,7 +139,7 @@ func (stream *sseWriter) writeRaw(raw string) error {
 	if err := stream.controller.Flush(); err != nil {
 		return err
 	}
-	return stream.renewBudget()
+	return stream.clearWriteBudget()
 }
 
 // runEventsStream implements the persistent run event stream (docs/16 §15.1):

@@ -14,8 +14,11 @@ import (
 
 // T28: a client that reads only the response head and never drains the body
 // must not pin the connection forever. A real TCP server is required; a
-// ResponseRecorder cannot reproduce a blocked write.
+// ResponseRecorder cannot reproduce a blocked write. The budget is shrunk
+// because the round at which the socket buffer finally fills is
+// environment-dependent; only "blocked write times out" must be deterministic.
 func TestSSEWriteBudgetReleasesStalledClient(t *testing.T) {
+	withShrunkWriteBudget(t, 500*time.Millisecond)
 	released := make(chan struct{})
 	events := make(chan string, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

@@ -21,7 +21,7 @@ const claim: ClaimedAssistantRun = {
   reasoning: { reasoning: 'off', displayName: '不思考' }, sensitivePolicy: 'allow',
   promptVersion: 'assistant-answer-v1', retrievalVersion: 'hybrid-rrf-v1',
   knowledge: { state: 'unavailable', generation: null, baseUrl: '', apiKey: '', modelId: '', dimensions: null },
-  context: { summary: null, messages: [{ role: 'user', content: '合成问题' }, { role: 'assistant', content: '合成回答' }], question: '继续' },
+  context: { summary: null, messages: [{ role: 'user', content: '合成问题' }, { role: 'assistant', content: '合成回答' }], question: '继续', summarySource: null },
 }
 
 const cases = [

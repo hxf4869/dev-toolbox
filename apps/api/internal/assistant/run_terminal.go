@@ -257,12 +257,19 @@ func (service *Service) runTitle(response http.ResponseWriter, request *http.Req
 type summaryInput struct {
 	Summary                claimRunSummary `json:"summary"`
 	ThroughMessageSequence int64           `json:"throughMessageSequence"`
-	ModelSnapshot          map[string]any  `json:"modelSnapshot"`
+	// BaselineThroughMessageSequence is the watermark of the stored summary
+	// the worker merged into this candidate; 0 means no stored summary
+	// existed. A missing field (for example an old worker) is rejected so a
+	// summary can never be written without a comparable baseline.
+	BaselineThroughMessageSequence *int64         `json:"baselineThroughMessageSequence"`
+	ModelSnapshot                  map[string]any `json:"modelSnapshot"`
 }
 
-// runSummary is a lease-free, idempotent conditional update: only a newer
-// throughMessageSequence replaces the stored summary; validation failures
-// keep the previous one (docs/16 §8.8).
+// runSummary is a lease-free, idempotent conditional update: in one atomic
+// statement it only replaces the stored summary when its watermark still
+// equals the baseline the worker built on and the target watermark advances
+// (docs/16 §8.8, §10.3). Validation failures, stale baselines and lost
+// races keep the previously stored summary and report applied=false.
 func (service *Service) runSummary(response http.ResponseWriter, request *http.Request) {
 	run, ok := service.loadRunOr404(response, request)
 	if !ok {
@@ -274,6 +281,12 @@ func (service *Service) runSummary(response http.ResponseWriter, request *http.R
 		return
 	}
 	if !validSummary(&input.Summary) || input.ModelSnapshot == nil {
+		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "内部助手请求无效")
+		return
+	}
+	if input.BaselineThroughMessageSequence == nil ||
+		*input.BaselineThroughMessageSequence < 0 ||
+		*input.BaselineThroughMessageSequence >= input.ThroughMessageSequence {
 		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "内部助手请求无效")
 		return
 	}
@@ -289,8 +302,10 @@ func (service *Service) runSummary(response http.ResponseWriter, request *http.R
 		ON CONFLICT (conversation_id) DO UPDATE SET
 			through_message_sequence = EXCLUDED.through_message_sequence,
 			content = EXCLUDED.content, model_snapshot = EXCLUDED.model_snapshot, updated_at = EXCLUDED.updated_at
-		WHERE assistant_conversation_summaries.through_message_sequence < EXCLUDED.through_message_sequence
-	`, run.ID, input.ThroughMessageSequence, string(encodedContent), string(encodedModel), service.now().UTC())
+		WHERE assistant_conversation_summaries.through_message_sequence = $6
+		  AND EXCLUDED.through_message_sequence > assistant_conversation_summaries.through_message_sequence
+	`, run.ID, input.ThroughMessageSequence, string(encodedContent), string(encodedModel),
+		service.now().UTC(), *input.BaselineThroughMessageSequence)
 	if err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
