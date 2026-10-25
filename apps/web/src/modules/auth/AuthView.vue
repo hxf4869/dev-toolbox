@@ -4,6 +4,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
+import CopyButton from '../tools/shared/ui/CopyButton.vue'
 
 const auth = useAuthStore()
 const username = ref('owner')
@@ -14,8 +15,11 @@ const trustDevice = ref(false)
 const deviceName = ref('当前浏览器')
 const busy = ref(false)
 const errorMessage = ref('')
-const copied = ref(false)
 const codeInput = ref<HTMLInputElement | null>(null)
+const passwordInput = ref<HTMLInputElement | null>(null)
+const enrollmentHeading = ref<HTMLHeadingElement | null>(null)
+// UiButton 根节点是原生 button；手动重试后仅在焦点丢失时回退到标题或重试按钮。
+const retryButton = ref<{ $el: HTMLButtonElement } | null>(null)
 
 const isEnrollment = computed(() => auth.stage === 'totp_setup')
 const challengeExpiredLabel = computed(() => {
@@ -31,19 +35,37 @@ watch(
     errorMessage.value = ''
     code.value = ''
     if (stage === 'totp_setup' && !auth.provisioning) {
-      busy.value = true
-      try {
-        await auth.loadTOTPProvisioning()
-      } catch (error) {
-        errorMessage.value = messageFor(error)
-      } finally {
-        busy.value = false
-      }
+      await loadProvisioning(false)
     }
     if (stage === 'mfa_required') await nextTick(() => codeInput.value?.focus())
   },
   { immediate: true },
 )
+
+// watch 自动加载与手动重试共用同一挑战加载与 busy 生命周期；仅手动重试在焦点丢失时回退焦点。
+async function loadProvisioning(restoreFocus: boolean) {
+  errorMessage.value = ''
+  busy.value = true
+  let focusTarget: HTMLElement | null = null
+  try {
+    await auth.loadTOTPProvisioning()
+    if (restoreFocus) focusTarget = enrollmentHeading.value
+  } catch (error) {
+    errorMessage.value = messageFor(error)
+    if (restoreFocus) focusTarget = retryButton.value?.$el ?? null
+  } finally {
+    busy.value = false
+  }
+  if (!focusTarget) return
+  await nextTick()
+  if (!document.activeElement || document.activeElement === document.body) {
+    focusTarget.focus()
+  }
+}
+
+function retryProvisioning() {
+  void loadProvisioning(true)
+}
 
 async function submitLogin() {
   errorMessage.value = ''
@@ -54,7 +76,8 @@ async function submitLogin() {
   } catch (error) {
     errorMessage.value = messageFor(error)
   } finally {
-    busy.value = false
+    // 登录进入 totp_setup 后 busy 由 loadProvisioning 接管，避免 finally 提前清掉加载态。
+    if (auth.stage !== 'totp_setup') busy.value = false
   }
 }
 
@@ -94,18 +117,18 @@ function changeMethod(next: 'totp' | 'recovery_code') {
   void nextTick(() => codeInput.value?.focus())
 }
 
+// challenge 失效后由用户主动回到密码阶段；仅清客户端状态，不发请求。
+function restartLogin() {
+  auth.clearAuthentication()
+  void nextTick(() => passwordInput.value?.focus())
+}
+
 function normalizeCode() {
   if (method.value === 'totp' || isEnrollment.value) {
     code.value = code.value.replace(/\D/g, '').slice(0, 6)
   } else {
     code.value = code.value.toUpperCase().slice(0, 32)
   }
-}
-
-async function copyRecoveryCodes() {
-  await navigator.clipboard.writeText(auth.recoveryCodes.join('\n'))
-  copied.value = true
-  window.setTimeout(() => (copied.value = false), 1600)
 }
 
 function downloadRecoveryCodes() {
@@ -132,7 +155,6 @@ function messageFor(error: unknown) {
     <header class="auth-brand" aria-label="开发百宝箱">
       <span class="auth-brand__mark"><UiIcon name="wrench" :size="19" /></span>
       <strong>开发百宝箱</strong>
-      <span>v1.0</span>
     </header>
 
     <section v-if="auth.stage === 'checking'" class="auth-card auth-card--loading" aria-live="polite">
@@ -143,7 +165,7 @@ function messageFor(error: unknown) {
 
     <section v-else-if="auth.stage === 'anonymous'" class="auth-card" aria-labelledby="login-title">
       <div class="auth-card__icon"><UiIcon name="lock-keyhole" /></div>
-      <p class="eyebrow">OWNER ACCESS</p>
+      <p class="eyebrow">所有者登录</p>
       <h1 id="login-title">登录开发百宝箱</h1>
       <p class="intro">单用户实例不提供网页注册。请输入由主机管理员初始化的凭据。</p>
 
@@ -164,6 +186,7 @@ function messageFor(error: unknown) {
         <label>
           <span>密码</span>
           <input
+            ref="passwordInput"
             v-model="password"
             name="password"
             type="password"
@@ -181,7 +204,7 @@ function messageFor(error: unknown) {
 
     <section v-else-if="auth.stage === 'mfa_required'" class="auth-card" aria-labelledby="mfa-title">
       <div class="auth-card__icon"><UiIcon :name="method === 'totp' ? 'shield-check' : 'key-round'" /></div>
-      <p class="eyebrow">SECOND FACTOR</p>
+      <p class="eyebrow">第二重验证</p>
       <h1 id="mfa-title">{{ method === 'totp' ? '两步验证' : '恢复码登录' }}</h1>
       <p class="intro">
         {{ method === 'totp' ? '输入身份验证器中的 6 位动态验证码。' : '每个恢复码只能使用一次。' }}
@@ -221,6 +244,9 @@ function messageFor(error: unknown) {
         <UiButton type="submit" variant="primary" :disabled="busy || !code">
           {{ busy ? '正在验证' : '验证并登录' }}
         </UiButton>
+        <UiButton type="button" variant="ghost" :disabled="busy" @click="restartLogin">
+          重新输入密码
+        </UiButton>
       </form>
       <button
         class="text-action"
@@ -234,8 +260,8 @@ function messageFor(error: unknown) {
     <section v-else-if="auth.stage === 'totp_setup'" class="enrollment" aria-labelledby="enrollment-title">
       <header class="enrollment__header">
         <div>
-          <p class="eyebrow">SECURITY SETUP</p>
-          <h1 id="enrollment-title">绑定身份验证器（TOTP）</h1>
+          <p class="eyebrow">安全设置</p>
+          <h1 id="enrollment-title" ref="enrollmentHeading" tabindex="-1">绑定身份验证器（TOTP）</h1>
           <p>密钥只在本次绑定挑战中显示，确认后即进入双因素登录。</p>
         </div>
         <span class="status-chip"><UiIcon name="shield-check" /> 必需</span>
@@ -293,9 +319,6 @@ function messageFor(error: unknown) {
               <input v-model="deviceName" maxlength="120" />
             </label>
             <div class="setup-actions">
-              <UiButton v-if="auth.enrollmentCanCancel" type="button" variant="ghost" @click="auth.cancelEnrollment">
-                取消重置
-              </UiButton>
               <UiButton type="submit" variant="primary" :disabled="busy || code.length !== 6">
                 {{ busy ? '正在确认' : '确认并启用' }}
               </UiButton>
@@ -303,11 +326,37 @@ function messageFor(error: unknown) {
           </div>
         </form>
       </div>
+
+      <!-- 恢复入口不依赖 provisioning 是否加载成功，加载/确认失败或挑战失效时始终可达。 -->
+      <div class="setup-actions">
+        <UiButton
+          v-if="!auth.provisioning"
+          ref="retryButton"
+          type="button"
+          variant="ghost"
+          :disabled="busy"
+          @click="retryProvisioning"
+        >
+          重新获取绑定信息
+        </UiButton>
+        <UiButton
+          v-if="auth.enrollmentCanCancel"
+          type="button"
+          variant="ghost"
+          :disabled="busy"
+          @click="auth.cancelEnrollment"
+        >
+          取消重置
+        </UiButton>
+        <UiButton v-else type="button" variant="ghost" :disabled="busy" @click="restartLogin">
+          重新输入密码
+        </UiButton>
+      </div>
     </section>
 
     <section v-else-if="auth.stage === 'recovery_codes'" class="recovery" aria-labelledby="recovery-title">
       <div class="recovery__success"><UiIcon name="shield-check" :size="22" /></div>
-      <p class="eyebrow">ONE-TIME RECOVERY</p>
+      <p class="eyebrow">一次性恢复码</p>
       <h1 id="recovery-title">身份验证已启用</h1>
       <p>请立即保存下面 10 个恢复码。每个只能使用一次，离开后不会再次显示。</p>
       <div class="notice notice--warning">
@@ -318,9 +367,7 @@ function messageFor(error: unknown) {
         <li v-for="recoveryCode in auth.recoveryCodes" :key="recoveryCode"><code>{{ recoveryCode }}</code></li>
       </ol>
       <div class="recovery__actions">
-        <UiButton variant="secondary" @click="copyRecoveryCodes">
-          <UiIcon name="copy" /> {{ copied ? '已复制' : '全部复制' }}
-        </UiButton>
+        <CopyButton :text="auth.recoveryCodes.join('\n')" label="全部复制" />
         <UiButton variant="secondary" @click="downloadRecoveryCodes">
           <UiIcon name="download" /> 下载备份
         </UiButton>
@@ -349,12 +396,6 @@ function messageFor(error: unknown) {
   align-items: center;
   gap: var(--space-2);
   color: var(--text-primary);
-}
-
-.auth-brand > span:last-child {
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
 }
 
 .auth-brand__mark,
@@ -755,6 +796,11 @@ input {
   }
 
   .recovery__actions > * {
+    width: 100%;
+  }
+
+  /* CopyButton 根节点是 span，全宽规则需穿透到内部原生 button。 */
+  .recovery__actions :deep(.copy-button .button) {
     width: 100%;
   }
 

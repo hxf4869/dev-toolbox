@@ -64,16 +64,23 @@ func (service *Service) completeRun(response http.ResponseWriter, request *http.
 		writeAssistantLeaseConflict(response, request)
 		return
 	}
+	stopRequested := storedRun.StopRequestedAt != nil
+	runStatus, messageStatus := "succeeded", "complete"
+	if stopRequested {
+		// A stop acknowledged before this late complete wins: the run ends
+		// stopped with the partial streamed answer preserved (docs/16 §11.3).
+		runStatus, messageStatus = "stopped", "stopped"
+	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE assistant_runs SET status = 'succeeded', finished_at = $2, phase = NULL,
+		UPDATE assistant_runs SET status = $2, finished_at = $3, phase = NULL,
 		       lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-		       rewrite_input_tokens = $3, rewrite_output_tokens = $4,
-		       answer_input_tokens = $5, answer_output_tokens = $6,
-		       rewrite_ms = $7, embedding_ms = $8, retrieval_ms = $9, reasoning_ms = $10, answer_ms = $11,
-		       answer_context_tokens = $12,
+		       rewrite_input_tokens = $4, rewrite_output_tokens = $5,
+		       answer_input_tokens = $6, answer_output_tokens = $7,
+		       rewrite_ms = $8, embedding_ms = $9, retrieval_ms = $10, reasoning_ms = $11, answer_ms = $12,
+		       answer_context_tokens = $13,
 		       error_code = NULL, error_detail = NULL
 		WHERE id = $1
-	`, run.ID, now, input.Usage.RewriteInputTokens, input.Usage.RewriteOutputTokens,
+	`, run.ID, runStatus, now, input.Usage.RewriteInputTokens, input.Usage.RewriteOutputTokens,
 		input.Usage.AnswerInputTokens, input.Usage.AnswerOutputTokens,
 		input.Timings.RewriteMS, input.Timings.EmbeddingMS, input.Timings.RetrievalMS,
 		input.Timings.ReasoningMS, input.Timings.AnswerMS, input.Usage.AnswerContextTokens); err != nil {
@@ -81,8 +88,8 @@ func (service *Service) completeRun(response http.ResponseWriter, request *http.
 		return
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE assistant_messages SET status = 'complete', completed_at = $2 WHERE id = $1
-	`, storedRun.OutputMessageID, now); err != nil {
+		UPDATE assistant_messages SET status = $2, completed_at = $3 WHERE id = $1
+	`, storedRun.OutputMessageID, messageStatus, now); err != nil {
 		writeAssistantInternalFailure(response, request)
 		return
 	}
@@ -91,7 +98,7 @@ func (service *Service) completeRun(response http.ResponseWriter, request *http.
 		return
 	}
 	service.broadcast.notify(storedRun.ID)
-	httpapi.WriteJSON(response, http.StatusOK, map[string]any{"status": "succeeded"})
+	httpapi.WriteJSON(response, http.StatusOK, map[string]any{"status": runStatus})
 }
 
 func negativeUsage(usage runUsageInput) bool {

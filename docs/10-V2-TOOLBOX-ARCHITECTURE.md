@@ -134,7 +134,7 @@ CodeMirror 6 约束：
 | 桌面编辑器/Diff | `monaco-editor` | 仅 JSON/YAML 桌面路由动态加载 |
 | 手机编辑器/Diff | `@codemirror/state`、`@codemirror/view`、`@codemirror/commands`、`@codemirror/lang-json`、`@codemirror/lang-yaml`、`@codemirror/merge` | 仅手机 JSON/YAML 路由 |
 | JSON 无损数值 | `lossless-json` | 所有 JSON 解析和序列化禁止绕回原生 `JSON.parse/stringify` 破坏数值 |
-| JSON Schema | `ajv` 的 2020 入口 | 仅 Draft 2020-12；没有 `loadSchema`，无远程 `$ref` |
+| JSON Schema | `@hyperjump/json-schema` 固定精确版本 | 仅 Draft 2020-12（声明其他 `$schema` 拒绝）；解释式校验、无 `new Function`/eval，兼容无 `unsafe-eval` 的 CSP；本地注册并逐次清理，远程 `$ref`/`$dynamicRef` 与自定义 `$vocabulary` 在进入校验器前拒绝，运行时零取数 |
 | JSONPath | `jsonpath-plus` | 锁定精确版本，`eval: false`，不开放脚本过滤 |
 | YAML 1.2 | `yaml` | strict、无 custom tags、`maxAliasCount=100` |
 | JWT | `jose` | 只用浏览器 WebCrypto 和本地 key/JWKS |
@@ -147,11 +147,11 @@ CodeMirror 6 约束：
 
 ### 4.1 无损 JSON 的已知边界
 
-`lossless-json` 的大数不是原生 JavaScript `number`，而 Ajv 的 `type: number/integer` 和数值关键字都要求原生 number。本期选择明确降级，不写动态 Schema 改写器：
+`lossless-json` 的大数不是原生 JavaScript `number`，而校验引擎的 `type: number/integer` 和数值关键字都要求原生 number。本期选择明确降级，不写动态 Schema 改写器：
 
 - 格式化、压缩、路径、Diff、Schema 生成和类型生成始终保留数字原始词法值。
-- 校验前遍历无损 AST；只有当每个 `LosslessNumber` 都被当前锁定版本库判定为可安全转为 JavaScript number 时，才构造一份仅用于 Ajv 的 shadow value；原 AST/文本不改变。
-- 只要任一数字不安全，Ajv 仍编译并验证 Schema 本身，但本次**整份实例 Schema 校验不执行**；UI 显示“实例包含无法安全映射到 JavaScript number 的数值，为避免错误结论，本次实例校验未执行”。
+- 校验前遍历无损 AST；只有当每个 `LosslessNumber` 都被当前锁定版本库判定为可安全转为 JavaScript number 时，才构造一份仅用于校验引擎的 shadow value；原 AST/文本不改变。
+- 只要任一数字不安全，引擎仍验证 Schema 本身，但本次**整份实例 Schema 校验不执行**；UI 显示“实例包含无法安全映射到 JavaScript number 的数值，为避免错误结论，本次实例校验未执行”。
 - 该状态是 `not_run_precision_guard`，不是 pass/fail/partial pass；不继续评估 `oneOf`、`if/then`、`$ref` 或任何其他实例关键字，避免组合语义产生假结果。
 - 不把不安全值强转为 `number`，也不为本期实现任意精度 JSON Schema 引擎。
 
@@ -312,7 +312,7 @@ Browser image
 ### 10.2 浏览器
 
 - 首页初始包不包含编辑器、OCR、语言模型或全部工具实现。
-- Monaco、CodeMirror、Ajv、Tesseract 分别按需要形成异步 chunk；禁止为方便把它们导入共享 shell。
+- Monaco、CodeMirror、JSON Schema 校验器、Tesseract 分别按需要形成异步 chunk；禁止为方便把它们导入共享 shell。
 - 5 MiB 文本操作和文件摘要不在主线程做完整计算。
 - OCR 页面必须显示模型下载体积可能较大、客户端内存/CPU 占用明显；不承诺低端手机流畅，本地失败时只提供用户主动选择云 OCR 的按钮。
 - 构建验收以实际 bundle 报告证明依赖没有进入非目标 chunk，不在设计阶段虚构一个任意 gzip 数字门槛。

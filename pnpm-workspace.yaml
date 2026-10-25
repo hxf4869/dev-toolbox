@@ -15,4 +15,6 @@ minimumReleaseAgeExclude:
   - '@earendil-works/pi-ai@0.84.4'
   - '@earendil-works/pi-telemetry@0.84.4'
 patchedDependencies:
+  '@hyperjump/browser@1.6.0': patches/@hyperjump__browser@1.6.0.patch
   monaco-editor@0.56.0: patches/monaco-editor@0.56.0.patch
+  tesseract.js@7.0.0: patches/tesseract.js@7.0.0.patch

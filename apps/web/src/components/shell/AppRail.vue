@@ -4,12 +4,15 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { useAuthStore } from '../../app/auth'
 import { useThemeStore } from '../../app/theme'
+import { ApiError } from '../../lib/api'
 import UiIcon from '../ui/UiIcon.vue'
 
 const route = useRoute()
 const theme = useThemeStore()
 const auth = useAuthStore()
 const loggingOut = ref(false)
+const logoutError = ref('')
+const logoutButton = ref<HTMLButtonElement | null>(null)
 
 const links = [
   { label: '工作台', title: '工作台', to: '/', icon: 'house' as const, active: () => route.name === 'home' },
@@ -38,7 +41,7 @@ const links = [
     label: 'AI 任务',
     title: 'AI 任务',
     to: '/ai/tasks',
-    icon: 'sparkles' as const,
+    icon: 'clock' as const,
     active: () => route.meta.module === 'ai',
   },
   {
@@ -54,11 +57,21 @@ const themeLabel = computed(() => theme.resolved === 'dark' ? '切换为浅色�
 
 async function logout() {
   loggingOut.value = true
+  logoutError.value = ''
   try {
     await auth.logout()
+  } catch (error) {
+    logoutError.value = error instanceof ApiError
+      ? `退出登录未完成：${error.message}`
+      : '退出登录未完成：网络连接中断，请检查网络后重试。'
   } finally {
     loggingOut.value = false
   }
+}
+
+function dismissLogoutError() {
+  logoutError.value = ''
+  logoutButton.value?.focus()
 }
 </script>
 
@@ -94,11 +107,19 @@ async function logout() {
         <UiIcon :name="theme.resolved === 'dark' ? 'sun' : 'moon'" />
         <span>{{ themeLabel }}</span>
       </button>
-      <button class="rail__item" type="button" :disabled="loggingOut" aria-label="退出登录" title="退出登录" @click="logout">
+      <button ref="logoutButton" class="rail__item" type="button" :disabled="loggingOut" aria-label="退出登录" title="退出登录" @click="logout">
         <UiIcon name="log-out" />
         <span>{{ loggingOut ? '正在退出' : '退出登录' }}</span>
       </button>
     </nav>
+
+    <div v-if="logoutError" class="rail__logout-error" role="alert">
+      <UiIcon name="triangle-alert" />
+      <span>{{ logoutError }}</span>
+      <button type="button" aria-label="关闭退出失败提示" title="关闭退出失败提示" @click="dismissLogoutError">
+        <UiIcon name="x" />
+      </button>
+    </div>
   </header>
 </template>
 
@@ -176,6 +197,37 @@ async function logout() {
 
 .rail__item:disabled { cursor: wait; opacity: .5; }
 
+.rail__logout-error {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: clamp(var(--space-4), 2vw, var(--space-8));
+  display: flex;
+  width: min(360px, calc(100vw - 2 * clamp(var(--space-4), 2vw, var(--space-8))));
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-subtle));
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-overlay);
+  color: var(--danger);
+}
+
+.rail__logout-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.rail__logout-error > button {
+  display: inline-grid;
+  min-width: 44px;
+  min-height: 44px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 @media (max-width: 1100px) {
   .rail { grid-template-columns: max-content minmax(0, 1fr) max-content; gap: var(--space-3); }
   .rail__primary { justify-content: center; }
@@ -185,6 +237,7 @@ async function logout() {
 
 @media (max-width: 720px) {
   .rail { gap: var(--space-1); padding-inline: var(--space-2); }
+  .rail__logout-error { right: var(--space-2); width: min(360px, calc(100vw - 2 * var(--space-2))); }
   .rail__brand { min-width: 44px; justify-content: center; }
   .rail__brand > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .rail__primary { overflow-x: auto; justify-content: flex-start; scrollbar-width: none; }

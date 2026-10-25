@@ -79,4 +79,45 @@ describe('assistant interaction details', () => {
     expect(document.body.textContent).toContain('AI 派生，未人工验证')
     wrapper.unmount()
   })
+
+  it('keeps keyboard focus on the close button while a retry reloads the source', async () => {
+    const trigger = document.querySelector<HTMLButtonElement>('#citation-trigger')!
+    trigger.focus()
+    const wrapper = mount(CitationDrawer, {
+      attachTo: document.body,
+      props: {
+        open: false,
+        source: null,
+        loading: false,
+        error: '来源暂时无法读取',
+        citationNumber: 1,
+      },
+    })
+
+    await wrapper.setProps({ open: true })
+    await nextTick()
+    const close = document.querySelector<HTMLButtonElement>('button[aria-label="关闭来源详情"]')!
+    const retry = document.querySelector<HTMLButtonElement>('button.button')!
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+
+    retry.click()
+    expect(wrapper.emitted('retry')).toHaveLength(1)
+
+    await wrapper.setProps({ loading: true, error: '' })
+    await nextTick()
+    expect(document.activeElement).toBe(close)
+
+    await wrapper.setProps({ loading: false, source: sourceFixtures.available })
+    await nextTick()
+    expect(document.activeElement).toBe(close)
+
+    close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    await wrapper.setProps({ open: false })
+    await nextTick()
+    expect(document.activeElement).toBe(trigger)
+    expect(wrapper.emitted('retry')).toHaveLength(1)
+    wrapper.unmount()
+  })
 })

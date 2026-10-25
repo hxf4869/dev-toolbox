@@ -104,6 +104,17 @@ describe('workdays and Cron dialects', () => {
     expect(seven.nextRuns).toHaveLength(5)
   })
 
+  it('combines restricted Unix day-of-month and day-of-week as OR per crontab semantics', () => {
+    const preview = previewCron({ dialect: 'unix', expression: '0 9 1 * MON', timeZone: 'UTC', baseTime: '2026-08-31T10:00:00Z' })
+    expect(preview.nextRuns.map((run) => run.iso)).toEqual([
+      '2026-09-01T09:00:00.000Z',
+      '2026-09-07T09:00:00.000Z',
+      '2026-09-14T09:00:00.000Z',
+      '2026-09-21T09:00:00.000Z',
+      '2026-09-28T09:00:00.000Z',
+    ])
+  })
+
   it('rejects field count, strict question-mark semantics, and concrete DOM+DOW', () => {
     expect(() => validateCronExpression({ dialect: 'unix', expression: '0 0 9 * * *', timeZone: 'UTC' })).toThrow('恰好 5 段')
     expect(() => validateCronExpression({ dialect: 'spring_quartz', expression: '0 0 9 ? * MON', timeZone: 'UTC' })).toThrow('无法')

@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
 )
@@ -98,6 +99,13 @@ func (service *Service) patchFolder(response http.ResponseWriter, request *http.
 		return
 	}
 	if err != nil {
+		// assistant_folders_name_unique(lower(btrim(name)))冲突与 createFolder 一致
+		// 返回稳定 422,原名称与数据保持不变。
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+			writeValidationError(response, request)
+			return
+		}
 		writeAssistantInternalFailure(response, request)
 		return
 	}
@@ -138,6 +146,14 @@ func (service *Service) deleteFolder(response http.ResponseWriter, request *http
 		return
 	}
 	if input.ConversationAction == "delete" {
+		// 在 active-run 检查前按 id 稳定顺序锁住文件夹内会话行,与
+		// prepareNewMessages/prepareRetryMessages 共用同一行锁:并发发送的
+		// queued run 要么先于此事务提交(返回 ASSISTANT_RUN_ALREADY_ACTIVE),
+		// 要么等删除提交后才能取得行锁,不会被级联删除吞掉(docs/16 §13.2)。
+		if _, err := tx.Exec(ctx, `SELECT id FROM assistant_conversations WHERE folder_id = $1 ORDER BY id FOR UPDATE`, id); err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
 		var active bool
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS (

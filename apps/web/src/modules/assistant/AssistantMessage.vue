@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import UiIcon from '../../components/ui/UiIcon.vue'
 import AssistantMarkdown from './AssistantMarkdown.vue'
@@ -14,8 +14,25 @@ const emit = defineEmits<{
 }>()
 
 const copyState = ref<'idle' | 'success' | 'error'>('idle')
+let copyFeedbackTimer: number | undefined
 const answerStarted = computed(() => props.message.content.length > 0)
 const streaming = computed(() => props.message.status === 'streaming')
+const copyText = computed(() => {
+  let copy = props.message.content
+  for (const citation of props.message.citations) {
+    copy = copy.replaceAll(`[[C${citation.citationNumber}]]`, '')
+  }
+  return copy
+})
+
+function clearCopyFeedbackTimer() {
+  window.clearTimeout(copyFeedbackTimer)
+}
+
+watch(copyText, () => {
+  clearCopyFeedbackTimer()
+  copyState.value = 'idle'
+})
 
 function openCitation(number: number) {
   const citation = props.message.citations.find((entry) => entry.citationNumber === number)
@@ -24,17 +41,17 @@ function openCitation(number: number) {
 
 async function copyAnswer() {
   if (!props.message.content) return
+  const text = copyText.value
   try {
-    let copy = props.message.content
-    for (const citation of props.message.citations) {
-      copy = copy.replaceAll(`[[C${citation.citationNumber}]]`, '')
-    }
-    await navigator.clipboard.writeText(copy)
+    await navigator.clipboard.writeText(text)
+    if (copyText.value !== text) return
     copyState.value = 'success'
   } catch {
+    if (copyText.value !== text) return
     copyState.value = 'error'
   }
-  window.setTimeout(() => {
+  clearCopyFeedbackTimer()
+  copyFeedbackTimer = window.setTimeout(() => {
     copyState.value = 'idle'
   }, 1600)
 }
@@ -47,6 +64,8 @@ function statusText() {
   if (props.message.status === 'streaming' && !props.message.content) return '正在生成回答…'
   return ''
 }
+
+onBeforeUnmount(clearCopyFeedbackTimer)
 </script>
 
 <template>

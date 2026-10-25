@@ -1,0 +1,12 @@
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 7679fb882feaa9d903a12e24d01af01a7fab87f1..9aede1a9bc58904d14bc01eca4f95aa1f0380c73 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -71,6 +71,6 @@ export const fileSchemePlugin: UriSchemePlugin;
+ export const httpSchemePlugin: UriSchemePlugin;
+ 
+ export class HttpError extends Error {
+-  public constructor(response, message = undefined);
++  public constructor(response: Response, message?: string);
+   public get response(): Response;
+ }

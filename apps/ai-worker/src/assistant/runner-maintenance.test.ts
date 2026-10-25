@@ -34,6 +34,10 @@ interface StubHandlers {
   holdComplete?: (release: () => void) => void
   // Heartbeat responses by call number (1-based); the last entry repeats.
   heartbeatResponses?: (call: number) => Response | Promise<Response>
+  // Events responses by call number (1-based); defaults to no stop request.
+  eventsResponses?: (call: number) => Response
+  // Status carried by the /complete response; defaults to 'succeeded'.
+  completeStatus?: string
   summarySource?: ClaimedAssistantRun['context']['summarySource']
   contextSummary?: ClaimedAssistantRun['context']['summary']
   historyMessages?: ClaimedAssistantRun['context']['messages']
@@ -64,14 +68,18 @@ function createHarness(handlers: StubHandlers = {}) {
       const respond = handlers.heartbeatResponses ?? (() => jsonResponse({ stopRequested: false }))
       return respond(calls.filter((call) => /\/heartbeat$/.test(call.url)).length)
     }
-    if (/\/events$/.test(url)) return jsonResponse({ stopRequested: false, lastSequence: 1 })
+    if (/\/events$/.test(url)) {
+      const respond = handlers.eventsResponses ?? (() => jsonResponse({ stopRequested: false, lastSequence: 1 }))
+      return respond(calls.filter((call) => /\/events$/.test(call.url)).length)
+    }
     if (/\/complete$/.test(url)) {
+      const status = handlers.completeStatus ?? 'succeeded'
       if (handlers.holdComplete) {
         return new Promise<Response>((resolve) => {
-          handlers.holdComplete!(() => resolve(jsonResponse({ status: 'succeeded' })))
+          handlers.holdComplete!(() => resolve(jsonResponse({ status })))
         })
       }
-      return jsonResponse({ status: 'succeeded' })
+      return jsonResponse({ status })
     }
     if (/\/fail$/.test(url)) return jsonResponse({ status: 'failed' })
     if (/\/title$/.test(url)) return jsonResponse({ applied: true })
@@ -446,5 +454,60 @@ describe('auxiliary maintenance lifecycle after success (R2-DT03)', () => {
     const titleWrite = calls.find((call) => /\/title$/.test(call.url))
     expect(titleWrite).toBeDefined()
     expect(JSON.parse(titleWrite!.body)).toEqual({ title: '合成维护标题' })
+  })
+})
+
+describe('stop signal consumption across API responses (DT-R17)', () => {
+  it('interrupts the run before the answer when the first events response reports stopRequested', async () => {
+    const { runner, claim, providerCalls, calls } = createHarness({
+      // Knowledge is unavailable, so the very first /events request carries
+      // sources.ready; answering it with a stop request must end the run
+      // before any Provider answer call.
+      eventsResponses: (call) => call === 1
+        ? jsonResponse({ stopRequested: true, lastSequence: 1 })
+        : jsonResponse({ stopRequested: false, lastSequence: 1 }),
+    })
+    await drive(runner.run(claim))
+
+    expect(providerCalls.filter((call) => call.kind === 'answer')).toHaveLength(0)
+    expect(calls.filter((call) => /\/complete$/.test(call.url))).toHaveLength(0)
+    const fail = calls.find((call) => /\/fail$/.test(call.url))
+    expect(fail).toBeDefined()
+    expect((JSON.parse(fail!.body) as { errorCode: string }).errorCode).toBe('ASSISTANT_PROVIDER_UNAVAILABLE')
+    expect(calls.filter((call) => /\/title$/.test(call.url))).toHaveLength(0)
+    expect(calls.filter((call) => /\/summary$/.test(call.url))).toHaveLength(0)
+  })
+
+  it('interrupts the answer stream when an answer-delta events flush reports stopRequested', async () => {
+    const { runner, claim, calls } = createHarness({
+      // sources.ready and run.status(answer) stay quiet; the first answer
+      // batch flush answers with a stop request.
+      eventsResponses: (call) => call >= 3
+        ? jsonResponse({ stopRequested: true, lastSequence: 1 })
+        : jsonResponse({ stopRequested: false, lastSequence: 1 }),
+    })
+    await drive(runner.run(claim))
+
+    const eventsBodies = calls.filter((call) => /\/events$/.test(call.url)).map((call) => call.body)
+    expect(eventsBodies.some((body) => body.includes('answer.delta'))).toBe(true)
+    expect(calls.filter((call) => /\/complete$/.test(call.url))).toHaveLength(0)
+    expect(calls.filter((call) => /\/fail$/.test(call.url))).toHaveLength(1)
+    expect(calls.filter((call) => /\/title$/.test(call.url))).toHaveLength(0)
+    expect(calls.filter((call) => /\/summary$/.test(call.url))).toHaveLength(0)
+  })
+
+  it('skips maintenance when complete returns the stopped terminal status', async () => {
+    const { runner, claim, providerCalls, calls } = createHarness({
+      completeStatus: 'stopped',
+      summarySource: coveredSummarySource(),
+    })
+    await drive(runner.run(claim))
+
+    expect(calls.filter((call) => /\/complete$/.test(call.url))).toHaveLength(1)
+    expect(providerCalls.filter((call) => call.kind === 'title')).toHaveLength(0)
+    expect(providerCalls.filter((call) => call.kind === 'summary')).toHaveLength(0)
+    expect(calls.filter((call) => /\/title$/.test(call.url))).toHaveLength(0)
+    expect(calls.filter((call) => /\/summary$/.test(call.url))).toHaveLength(0)
+    expect(calls.filter((call) => /\/fail$/.test(call.url))).toHaveLength(0)
   })
 })

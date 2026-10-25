@@ -73,7 +73,7 @@ watch(
     }
     if (open) {
       await nextTick()
-      const firstTarget = navRoot.value?.querySelector<HTMLElement>('.module-nav__content a, .module-nav__content button')
+      const firstTarget = navRoot.value?.querySelector<HTMLElement>('.module-nav__header button')
       firstTarget?.focus()
       if (firstTarget) {
         focusTimer = window.setTimeout(() => {
@@ -88,6 +88,20 @@ watch(
 watch(() => route.fullPath, () => {
   if (compact.value && props.open) emit('close')
 })
+
+// 只在路由或搜索词变化时展开当前工具所在组；同路由、同查询下的手动折叠保持不变。
+watch(
+  [() => route.name, normalizedToolQuery],
+  async () => {
+    if (moduleName.value !== 'tools') return
+    await nextTick()
+    const currentGroup = navRoot.value
+      ?.querySelector('details nav a.active')
+      ?.closest('details') as HTMLDetailsElement | null
+    if (currentGroup) currentGroup.open = true
+  },
+  { immediate: true },
+)
 
 onMounted(() => {
   mediaQuery = window.matchMedia('(max-width: 1279px)')
@@ -180,7 +194,7 @@ function onWindowKeydown(event: KeyboardEvent) {
             <RouterLink to="/tools"><UiIcon name="wrench" /> 工具箱</RouterLink>
           </nav>
         </section>
-        <p class="module-nav__boundary">本地工具不保存正文；知识模块继续保持一期的数据与详情合同。</p>
+        <p class="module-nav__boundary">本地工具的输入与结果仅留在当前页面；知识记录可在资料库中保存与检索。</p>
       </template>
 
       <KnowledgeModuleNav v-else-if="moduleName === 'knowledge'" />
@@ -244,6 +258,7 @@ function onWindowKeydown(event: KeyboardEvent) {
         <h2 id="help-nav-heading">帮助主题</h2>
         <nav>
           <RouterLink to="/help#capture-search"><UiIcon name="search" /> 快速记录与搜索</RouterLink>
+          <RouterLink to="/help#knowledge-assistant"><UiIcon name="sparkles" /> 知识助手与引用</RouterLink>
           <RouterLink to="/help#local-tools"><UiIcon name="wrench" /> 本地工具与 JSON AI</RouterLink>
           <RouterLink to="/help#core-concepts"><UiIcon name="book-open" /> 原始记录与 AI 版本</RouterLink>
           <RouterLink to="/help#sensitive-provider"><UiIcon name="shield-alert" /> 敏感内容与 Provider</RouterLink>
@@ -252,6 +267,10 @@ function onWindowKeydown(event: KeyboardEvent) {
           <RouterLink to="/help#boundaries"><UiIcon name="shield-check" /> 产品边界</RouterLink>
         </nav>
       </section>
+
+      <nav v-if="compact" class="module-nav__help" aria-label="帮助与使用指引">
+        <RouterLink to="/help" :class="{ active: route.meta.module === 'help' }"><UiIcon name="circle-help" /> 帮助与使用指引</RouterLink>
+      </nav>
     </div>
   </aside>
 </template>
@@ -292,6 +311,7 @@ nav a span { display: -webkit-box; overflow: hidden; line-height: 1.35; -webkit-
 nav a:hover, nav a.active { border-color: var(--border-subtle); background: var(--accent-soft); color: var(--accent); }
 nav a.active { box-shadow: inset 2px 0 0 var(--accent); }
 .module-nav__boundary { margin-top: var(--space-5); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-muted); font-size: 11px; }
+.module-nav__help { margin-top: var(--space-5); }
 .module-nav__scrim { position: fixed; z-index: 38; inset: 0; background: var(--scrim); }
 
 @media (max-width: 1279px) {

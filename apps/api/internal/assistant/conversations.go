@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -301,12 +302,12 @@ func parseFolderFilter(raw string) (*uuid.UUID, error) {
 func itoa(value int) string { return strconv.Itoa(value) }
 
 type patchConversationInput struct {
-	Title     *string     `json:"title"`
-	FolderID  **uuid.UUID `json:"folderId"`
-	Pinned    *bool       `json:"pinned"`
-	Archived  *bool       `json:"archived"`
-	ModelID   *uuid.UUID  `json:"modelId"`
-	Reasoning *string     `json:"reasoning"`
+	Title     *string         `json:"title"`
+	FolderID  json.RawMessage `json:"folderId"`
+	Pinned    *bool           `json:"pinned"`
+	Archived  *bool           `json:"archived"`
+	ModelID   *uuid.UUID      `json:"modelId"`
+	Reasoning *string         `json:"reasoning"`
 }
 
 func (service *Service) patchConversation(response http.ResponseWriter, request *http.Request) {
@@ -321,7 +322,18 @@ func (service *Service) patchConversation(response http.ResponseWriter, request 
 		writeValidationError(response, request)
 		return
 	}
-	// folderId uses a double pointer: omitted (nil) vs explicit null vs value.
+	// folderId arrives as json.RawMessage: nil means the key was omitted; a
+	// present value is decoded once into folderID, where explicit null clears
+	// the folder and a UUID targets one. Decoding **uuid.UUID directly cannot
+	// tell explicit null from omission, which the UI's {"folderId": null}
+	// move-to-unfiled request depends on.
+	var folderID *uuid.UUID
+	if input.FolderID != nil {
+		if err := json.Unmarshal(input.FolderID, &folderID); err != nil {
+			writeValidationError(response, request)
+			return
+		}
+	}
 	modelOrReasoning := input.ModelID != nil || input.Reasoning != nil
 	if input.ModelID != nil != (input.Reasoning != nil) {
 		writeValidationError(response, request)
@@ -338,6 +350,23 @@ func (service *Service) patchConversation(response http.ResponseWriter, request 
 		return
 	}
 	defer tx.Rollback(ctx)
+	// A non-null target folder is checked with FOR KEY SHARE before the
+	// conversation lock, matching deleteFolder's folder→conversation order:
+	// when a concurrent delete locks the target folder first and commits, this
+	// observes the folder gone and returns 422 instead of failing the UPDATE
+	// on the foreign key after the conversation row is already locked.
+	// Explicit null takes no folder lock.
+	if folderID != nil {
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT true FROM assistant_folders WHERE id = $1 FOR KEY SHARE`, *folderID).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
+			writeValidationError(response, request)
+			return
+		} else if err != nil {
+			writeAssistantInternalFailure(response, request)
+			return
+		}
+	}
 	conversation, err := scanConversationRow(tx.QueryRow(ctx,
 		`SELECT `+conversationColumns+` FROM assistant_conversations WHERE id = $1 FOR UPDATE`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -364,20 +393,9 @@ func (service *Service) patchConversation(response http.ResponseWriter, request 
 		}
 	}
 	if input.FolderID != nil {
-		if *input.FolderID != nil {
-			var exists bool
-			if err := tx.QueryRow(ctx,
-				`SELECT true FROM assistant_folders WHERE id = $1`, **input.FolderID).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
-				writeValidationError(response, request)
-				return
-			} else if err != nil {
-				writeAssistantInternalFailure(response, request)
-				return
-			}
-		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE assistant_conversations SET folder_id = $2, updated_at = $3 WHERE id = $1`,
-			id, *input.FolderID, now); err != nil {
+			id, folderID, now); err != nil {
 			writeAssistantInternalFailure(response, request)
 			return
 		}

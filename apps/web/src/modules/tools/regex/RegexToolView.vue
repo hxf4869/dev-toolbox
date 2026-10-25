@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import UiButton from '../../../components/ui/UiButton.vue'
 import ProcessingBadge from '../shared/ui/ProcessingBadge.vue'
@@ -21,6 +21,12 @@ const textBytes = computed(() => new TextEncoder().encode(text.value).byteLength
 const visibleMatches = computed(() => result.value?.matches.slice(0, REGEX_MATCH_DISPLAY_LIMIT) ?? [])
 
 onBeforeUnmount(() => runner.dispose())
+
+watch([pattern, text, replacement, flagString], () => {
+  result.value = null
+  statusMessage.value = ''
+  errorMessage.value = ''
+})
 
 async function runRegex() {
   errorMessage.value = ''

@@ -60,21 +60,22 @@ const selectedScopes = ref<TokenScope[]>(['records:read'])
 const copied = ref(false)
 const dialogRoot = ref<HTMLElement | null>(null)
 const previousFocus = ref<HTMLElement | null>(null)
+let tokenReadSequence = 0
 
 const activeCount = computed(
   () => tokens.value.filter((token) => !token.revokedAt && (!token.expiresAt || new Date(token.expiresAt) > new Date())).length,
 )
 
 watch(
-  () => createOpen.value || Boolean(revokeTarget.value) || Boolean(issuedToken.value),
-  async (open, wasOpen) => {
-    if (open && !wasOpen) previousFocus.value = document.activeElement as HTMLElement | null
-    if (open) {
+  () => (createOpen.value ? 'create' : revokeTarget.value ? 'revoke' : issuedToken.value ? 'issued' : ''),
+  async (stage, previousStage) => {
+    if (stage && !previousStage) previousFocus.value = document.activeElement as HTMLElement | null
+    if (stage) {
       await nextTick()
       dialogRoot.value
         ?.querySelector<HTMLElement>('input:not([disabled]), button:not([disabled])')
         ?.focus()
-    } else if (wasOpen) {
+    } else if (previousStage) {
       await nextTick()
       previousFocus.value?.focus()
       previousFocus.value = null
@@ -85,14 +86,18 @@ watch(
 onMounted(() => void loadTokens())
 
 async function loadTokens() {
+  const readSequence = ++tokenReadSequence
   loading.value = true
   pageError.value = ''
   try {
-    tokens.value = (await apiRequest<{ items: TokenEntry[] }>('/api/v1/tokens')).items
+    const response = await apiRequest<{ items: TokenEntry[] }>('/api/v1/tokens')
+    if (readSequence !== tokenReadSequence) return
+    tokens.value = response.items
   } catch (error) {
+    if (readSequence !== tokenReadSequence) return
     pageError.value = messageFor(error)
   } finally {
-    loading.value = false
+    if (readSequence === tokenReadSequence) loading.value = false
   }
 }
 
@@ -127,6 +132,14 @@ async function createToken() {
     expiry = parsed.toISOString()
   }
   busy.value = true
+  void nextTick(() => {
+    if (!createOpen.value) return
+    const root = dialogRoot.value
+    if (!root) return
+    const active = document.activeElement
+    if (active instanceof HTMLElement && root.contains(active) && !active.matches(':disabled')) return
+    root.querySelector<HTMLElement>('input:not([disabled])')?.focus()
+  })
   try {
     const response = await apiRequest<IssuedToken>(
       '/api/v1/tokens',
@@ -161,6 +174,11 @@ function closeIssuedToken() {
   issuedToken.value = null
   copied.value = false
   actionError.value = ''
+}
+
+function openRevoke(token: TokenEntry) {
+  actionError.value = ''
+  revokeTarget.value = token
 }
 
 async function revokeToken() {
@@ -199,6 +217,7 @@ function scopeLabel(scope: TokenScope) {
 }
 
 function onDialogKeydown(event: KeyboardEvent, close: () => void) {
+  if (event.isComposing || event.keyCode === 229) return
   if (event.key === 'Escape' && !busy.value) {
     event.preventDefault()
     close()
@@ -233,7 +252,7 @@ function messageFor(error: unknown) {
     title-id="token-title"
     title="Personal Access Token"
     description="为脚本或外部工具创建和撤销访问令牌；明文只显示一次。"
-    :show-aside="!loading"
+    :show-aside="!loading && !pageError"
     :surface="false"
   >
     <template #actions>
@@ -250,25 +269,27 @@ function messageFor(error: unknown) {
       </div>
     </template>
 
-    <div class="settings-toolbar"><p>{{ activeCount }} 个有效 Token · {{ tokens.length }} 个历史记录</p></div>
+    <div v-if="!loading && !pageError" class="settings-toolbar"><p>{{ activeCount }} 个有效 Token · {{ tokens.length }} 个历史记录</p></div>
     <div v-if="loading" class="settings-loading" aria-live="polite"><span class="settings-spinner" aria-hidden="true" />正在读取 Token…</div>
-    <div v-else-if="tokens.length === 0" class="settings-card settings-empty">
-      <div><UiIcon name="key-round" :size="28" /><h3>尚无 Personal Access Token</h3><p>按外部 Agent 的实际操作选择 scope，不要共享同一 Token。</p></div>
-    </div>
+    <template v-else-if="!pageError">
+      <div v-if="tokens.length === 0" class="settings-card settings-empty">
+        <div><UiIcon name="key-round" :size="28" /><h3>尚无 Personal Access Token</h3><p>按外部 Agent 的实际操作选择 scope，不要共享同一 Token。</p></div>
+      </div>
 
-    <div v-else class="token-list">
-      <article v-for="token in tokens" :key="token.id" class="settings-card token-card">
-        <header class="settings-card__header">
-          <div><p class="settings-kicker">{{ token.tokenPrefix }}…</p><h3>{{ token.name }}</h3><p>创建于 {{ formatTime(token.createdAt) }}</p></div>
-          <span class="settings-status" :class="tokenStatus(token).className">{{ tokenStatus(token).label }}</span>
-        </header>
-        <div class="settings-card__body token-card__body">
-          <dl><div><dt>最后使用</dt><dd>{{ formatTime(token.lastUsedAt) }}</dd></div><div><dt>到期时间</dt><dd>{{ token.expiresAt ? formatTime(token.expiresAt) : '永不过期' }}</dd></div></dl>
-          <div class="scope-list" role="list" aria-label="Token scopes"><span v-for="scope in token.scopes" :key="scope" role="listitem" :class="{ sensitive: scope === 'sensitive:read' }">{{ scopeLabel(scope) }}<code>{{ scope }}</code></span></div>
-        </div>
-        <footer><UiButton variant="danger" :disabled="Boolean(token.revokedAt)" @click="revokeTarget = token">{{ token.revokedAt ? '已撤销' : '撤销 Token' }}</UiButton></footer>
-      </article>
-    </div>
+      <div v-else class="token-list">
+        <article v-for="token in tokens" :key="token.id" class="settings-card token-card">
+          <header class="settings-card__header">
+            <div><p class="settings-kicker">{{ token.tokenPrefix }}…</p><h3>{{ token.name }}</h3><p>创建于 {{ formatTime(token.createdAt) }}</p></div>
+            <span class="settings-status" :class="tokenStatus(token).className">{{ tokenStatus(token).label }}</span>
+          </header>
+          <div class="settings-card__body token-card__body">
+            <dl><div><dt>最后使用</dt><dd>{{ formatTime(token.lastUsedAt) }}</dd></div><div><dt>到期时间</dt><dd>{{ token.expiresAt ? formatTime(token.expiresAt) : '永不过期' }}</dd></div></dl>
+            <div class="scope-list" role="list" aria-label="Token scopes"><span v-for="scope in token.scopes" :key="scope" role="listitem" :class="{ sensitive: scope === 'sensitive:read' }">{{ scopeLabel(scope) }}<code>{{ scope }}</code></span></div>
+          </div>
+          <footer><UiButton variant="danger" :disabled="Boolean(token.revokedAt)" @click="openRevoke(token)">{{ token.revokedAt ? '已撤销' : '撤销 Token' }}</UiButton></footer>
+        </article>
+      </div>
+    </template>
 
     <template #aside>
       <section>
@@ -294,15 +315,15 @@ function messageFor(error: unknown) {
   <Teleport to="body">
     <div v-if="createOpen" class="settings-overlay" @click.self="closeCreate">
       <section ref="dialogRoot" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="token-create-title" @keydown="onDialogKeydown($event, closeCreate)">
-        <header><div><h2 id="token-create-title">创建 Personal Access Token</h2></div><button class="settings-icon-button" type="button" aria-label="关闭" @click="closeCreate"><UiIcon name="x" /></button></header>
+        <header><div><h2 id="token-create-title">创建 Personal Access Token</h2></div><button class="settings-icon-button" type="button" aria-label="关闭" :disabled="busy" @click="closeCreate"><UiIcon name="x" /></button></header>
         <div class="settings-drawer__body">
           <form id="token-form" class="settings-form" @submit.prevent="createToken">
-            <label class="settings-field"><span>Token 名称</span><input v-model="name" required maxlength="120" autocomplete="off" placeholder="例如：Notion 一次性迁移" /></label>
-            <label class="settings-field"><span>到期时间（可选）</span><input v-model="expiresAt" type="datetime-local" /><small>一次性迁移建议设置较短到期时间，并在完成后立即撤销。</small></label>
+            <label class="settings-field"><span>Token 名称</span><input v-model="name" required maxlength="120" autocomplete="off" placeholder="例如：Notion 一次性迁移" :readonly="busy" /></label>
+            <label class="settings-field"><span>到期时间（可选）</span><input v-model="expiresAt" type="datetime-local" :disabled="busy" /><small>一次性迁移建议设置较短到期时间，并在完成后立即撤销。</small></label>
             <fieldset class="settings-fieldset scope-fieldset">
               <legend>Scopes</legend>
               <label v-for="scope in scopeOptions" :key="scope.value" class="settings-check" :class="{ 'scope-sensitive': scope.sensitive }">
-                <input v-model="selectedScopes" type="checkbox" :value="scope.value" />
+                <input v-model="selectedScopes" type="checkbox" :value="scope.value" :disabled="busy" />
                 <span><strong>{{ scope.label }}</strong><code>{{ scope.value }}</code><small>{{ scope.detail }}</small></span>
               </label>
             </fieldset>
@@ -310,7 +331,7 @@ function messageFor(error: unknown) {
             <div v-if="actionError" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" />{{ actionError }}</div>
           </form>
         </div>
-        <footer><UiButton variant="ghost" @click="closeCreate">取消</UiButton><UiButton type="submit" form="token-form" variant="primary" :disabled="busy">{{ busy ? '正在创建…' : '创建并显示一次' }}</UiButton></footer>
+        <footer><UiButton variant="ghost" :disabled="busy" @click="closeCreate">取消</UiButton><UiButton type="submit" form="token-form" variant="primary" :disabled="busy">{{ busy ? '正在创建…' : '创建并显示一次' }}</UiButton></footer>
       </section>
     </div>
 

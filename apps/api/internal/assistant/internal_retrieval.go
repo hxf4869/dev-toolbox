@@ -213,24 +213,18 @@ func (service *Service) executeRetrieval(ctx context.Context, tx pgx.Tx, run run
 
 // trimSourcesToBudget drops the lowest-ranked sources first when the context
 // cannot hold every candidate (docs/16 §10.2). Returning nil signals a
-// context that cannot fit at all.
+// context that cannot fit at all. Sources do not compete with the claim
+// summary/history: both sides are bounded by the input budget minus the
+// question, so a long multi-turn history never starves the actual sources.
 func (service *Service) trimSourcesToBudget(ctx context.Context, tx pgx.Tx, run runRow, snapshots []retrievalCandidate) []retrievalCandidate {
+	// The claim context is consulted only for the too-large signal (a question
+	// even the minimal context cannot hold) and the question text.
 	claimContext, err := service.buildClaimContext(ctx, tx, run)
 	if err != nil || claimContext == nil {
 		return nil
 	}
 	remaining := inputContextBudgetTokens(run.ContextWindow, run.MaxOutputTokens)
 	remaining -= estimateTokens(claimContext.Question)
-	if claimContext.Summary != nil {
-		encoded, err := jsonMarshal(claimContext.Summary)
-		if err != nil {
-			return nil
-		}
-		remaining -= estimateTokens(string(encoded))
-	}
-	for _, message := range claimContext.Messages {
-		remaining -= estimateTokens(message.Content) + 4
-	}
 	if remaining < 0 {
 		return nil
 	}

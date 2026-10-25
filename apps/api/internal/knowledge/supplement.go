@@ -65,7 +65,13 @@ func (service *Service) createSupplementMultipart(response http.ResponseWriter, 
 	}
 	actor, _ := auth.ActorFromContext(request.Context())
 	key, ok := parseIdempotencyKey(response, request)
-	if !ok || service.writeExistingSupplement(response, request, actor, itemID, key) {
+	if !ok {
+		return
+	}
+	if !extendMultipartDeadlines(response, request) {
+		return
+	}
+	if service.writeExistingSupplement(response, request, actor, itemID, key) {
 		return
 	}
 	input, files, err := service.readSupplementMultipart(request)

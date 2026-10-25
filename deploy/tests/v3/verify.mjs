@@ -6,7 +6,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { api, control, docker, loadState, saveState, sql, until } from './stack.mjs'
+import { api, control, docker, loadState, saveState, sql, until, waitForNginx } from './stack.mjs'
 
 const state=await loadState(process.argv[2])
 const groups=new Set((process.argv[3]??'caddy,flows,lanes,nginx').split(','))
@@ -113,8 +113,10 @@ async function verify(){
     control(state,{holdAnswers:true})
     const stopping=await start('织云停止验收')
     await until(()=> (control(state).active.answer??0)>0,'stoppable provider started')
+    const stopAbortsBefore=control(state).aborted.answer??0
     await api(state,`/api/v1/assistant/runs/${stopping.run.id}/stop`,{})
     assert.equal((await finished(stopping.run.id)).status,'stopped')
+    await until(()=> (control(state).aborted.answer??0)>stopAbortsBefore,'persistent AbortSignal reached provider')
     control(state,{holdAnswers:false})
     pass('persistent stop reaches provider and terminal state')
 
@@ -173,7 +175,9 @@ async function verify(){
     try{
       docker(['exec',name,'nginx','-t'])
       const ca=await readFile(join(nginxDirectory,'localhost.pem'))
-      await proxyChecks('external Nginx → Caddy','https://localhost:18443',ca)
+      const endpoint='https://localhost:18443'
+      await waitForNginx(endpoint,ca)
+      await proxyChecks('external Nginx → Caddy',endpoint,ca)
     } finally { docker(['rm','-f',name]) }
   }
   await writeFile(join(state.directory,`checks-${[...groups].join('-')}.json`),JSON.stringify(checks,null,2),{mode:0o600})

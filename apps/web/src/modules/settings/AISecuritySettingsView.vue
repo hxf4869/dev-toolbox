@@ -78,7 +78,7 @@ const pendingChangeCount = computed(() => {
   ].filter(Boolean).length
 })
 
-watch(policy, (next) => {
+watch([policy, organizeModelID, reviewModelID, visionModelID], ([next]) => {
   saved.value = false
   if (next !== 'allow') allowConfirmed.value = false
 })
@@ -216,10 +216,10 @@ function messageFor(error: unknown) {
     title-id="ai-security-title"
     title="AI 与敏感数据"
     description="设置敏感内容的显示方式，以及它能否发送给 AI 服务。"
-    :show-aside="!loading"
+    :show-aside="!loading && settings !== null"
   >
     <template #actions>
-      <UiButton variant="primary" :disabled="loading || busy" @click="requestSave"><UiIcon name="save" />{{ busy ? '正在保存…' : '保存策略' }}</UiButton>
+      <UiButton variant="primary" :disabled="loading || busy || !settings" @click="requestSave"><UiIcon name="save" />{{ busy ? '正在保存…' : '保存策略' }}</UiButton>
     </template>
 
     <template #notices>
@@ -231,7 +231,7 @@ function messageFor(error: unknown) {
 
     <div v-if="loading" class="settings-loading" aria-live="polite"><span class="settings-spinner" aria-hidden="true" />正在读取 AI 安全设置…</div>
 
-    <template v-else>
+    <template v-else-if="settings">
         <section class="settings-card" aria-labelledby="display-mode-title">
         <header class="settings-card__header"><div><h3 id="display-mode-title">敏感内容展示</h3><p>默认遮挡，明确打开后再读取。</p></div><span class="settings-status settings-status--success">固定为遮挡</span></header>
         <div class="settings-card__body display-policy">
@@ -244,7 +244,7 @@ function messageFor(error: unknown) {
         <header class="settings-card__header"><div><h3 id="ai-policy-title">敏感内容 AI 策略</h3><p>设置所有任务都不能放宽的上限。</p></div></header>
         <div class="settings-card__body policy-grid">
           <label v-for="choice in policies" :key="choice.value" class="policy-choice" :class="[`policy-choice--${choice.value}`, { selected: policy === choice.value }]">
-            <input v-model="policy" type="radio" name="sensitive-policy" :value="choice.value" />
+            <input v-model="policy" type="radio" name="sensitive-policy" :value="choice.value" :disabled="busy" />
             <span><strong>{{ choice.label }}<em>{{ choice.badge }}</em></strong><small>{{ choice.detail }}</small></span>
           </label>
         </div>
@@ -254,9 +254,9 @@ function messageFor(error: unknown) {
         <section class="settings-card" aria-labelledby="default-models-title">
         <header class="settings-card__header"><div><h3 id="default-models-title">默认模型</h3><p>只显示可用且能力匹配的模型。</p></div></header>
         <div class="settings-card__body settings-form">
-          <label class="settings-field"><span>记录整理</span><select v-model="organizeModelID"><option value="">未设置</option><option v-for="model in taskModels" :key="model.id" :value="model.id">{{ model.label }} · {{ model.detail }}</option></select><small>需要工具调用；未设置时手动任务必须显式选择模型。</small></label>
-          <label class="settings-field"><span>正确性审查</span><select v-model="reviewModelID"><option value="">未设置</option><option v-for="model in taskModels" :key="model.id" :value="model.id">{{ model.label }} · {{ model.detail }}</option></select></label>
-          <label class="settings-field"><span>图片分析</span><select v-model="visionModelID"><option value="">未设置</option><option v-for="model in visionModels" :key="model.id" :value="model.id">{{ model.label }} · {{ model.detail }}</option></select><small>必须同时声明工具调用和视觉输入能力。</small></label>
+          <label class="settings-field"><span>记录整理</span><select v-model="organizeModelID" :disabled="busy"><option value="">未设置</option><option v-for="model in taskModels" :key="model.id" :value="model.id">{{ model.label }} · {{ model.detail }}</option></select><small>正文整理兼容工具调用与严格 JSON 输出；未设置时，可在发起任务时选择模型。</small></label>
+          <label class="settings-field"><span>正确性审查</span><select v-model="reviewModelID" :disabled="busy"><option value="">未设置</option><option v-for="model in taskModels" :key="model.id" :value="model.id">{{ model.label }} · {{ model.detail }}</option></select></label>
+          <label class="settings-field"><span>图片分析</span><select v-model="visionModelID" :disabled="busy"><option value="">未设置</option><option v-for="model in visionModels" :key="model.id" :value="model.id">{{ model.label }} · {{ model.detail }}</option></select><small>需要视觉输入能力，可通过工具调用或严格 JSON 输出生成候选。</small></label>
           <p v-if="taskModels.length === 0" class="model-guidance"><UiIcon name="circle-help" />还没有可用模型。先到 “Provider 与模型” 配置模型限制与工具能力；这不会影响录入、检索和附件。</p>
         </div>
         </section>

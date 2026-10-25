@@ -33,6 +33,11 @@ watch(
   },
 )
 
+function onRetry() {
+  closeButton.value?.focus()
+  emit('retry')
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -91,7 +96,7 @@ function onKeydown(event: KeyboardEvent) {
             <UiIcon name="wifi-off" :size="24" />
             <strong>来源暂时无法读取</strong>
             <p>{{ error }}</p>
-            <UiButton variant="secondary" @click="emit('retry')">重试</UiButton>
+            <UiButton variant="secondary" @click="onRetry">重试</UiButton>
           </div>
 
           <template v-else-if="source">

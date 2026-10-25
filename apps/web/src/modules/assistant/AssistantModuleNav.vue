@@ -103,9 +103,12 @@ function temporaryConversation() {
   emit('navigate')
 }
 
+// scope 意图一次同步确定：setFolderFilter 本身负责切回 active 视图并清理旧
+// scope 的列表/游标，避免“先 await 切视图、再补一次筛选”的两段请求在等待期
+// 间被另一次选择覆盖。
 async function selectScope(value: UUID | 'unfiled' | undefined) {
-  if (conversationView.value !== 'active') await store.setConversationView('active')
-  if (folderFilter.value !== value) await store.setFolderFilter(value)
+  if (conversationView.value === 'active' && folderFilter.value === value) return
+  await store.setFolderFilter(value)
 }
 
 async function showArchive() {

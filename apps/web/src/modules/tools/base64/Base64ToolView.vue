@@ -21,8 +21,15 @@ const copyMessage = ref('')
 const inputBytes = computed(() => utf8ByteLength(input.value))
 const resultBytes = computed(() => utf8ByteLength(result.value))
 
+function invalidateResult() {
+  result.value = ''
+  errorMessage.value = ''
+  copyMessage.value = ''
+}
+
 function run() {
   errorMessage.value = ''
+  copyMessage.value = ''
   try {
     result.value = transformBase64(input.value, operation.value, variant.value)
   } catch (error) {
@@ -36,6 +43,7 @@ async function pasteInput() {
   errorMessage.value = ''
   try {
     input.value = await navigator.clipboard.readText()
+    invalidateResult()
   } catch {
     errorMessage.value = '浏览器未允许读取剪贴板，请使用系统粘贴快捷键。'
   }
@@ -55,6 +63,7 @@ function clearAll() {
   input.value = ''
   result.value = ''
   errorMessage.value = ''
+  copyMessage.value = ''
 }
 
 function swapValues() {
@@ -62,6 +71,7 @@ function swapValues() {
   input.value = result.value
   result.value = previousInput
   errorMessage.value = ''
+  copyMessage.value = ''
 }
 </script>
 
@@ -79,12 +89,12 @@ function swapValues() {
     <p class="privacy-note">输入和结果只保留在当前页面内存，不上传、不保存。单次输入上限 5 MiB UTF-8。</p>
 
     <section class="mode-bar" aria-label="转换选项">
-      <fieldset>
+      <fieldset @change="invalidateResult">
         <legend>操作</legend>
         <label><input v-model="operation" type="radio" value="encode" /> 编码</label>
         <label><input v-model="operation" type="radio" value="decode" /> 解码</label>
       </fieldset>
-      <fieldset>
+      <fieldset @change="invalidateResult">
         <legend>变体</legend>
         <label><input v-model="variant" type="radio" value="standard" /> Base64</label>
         <label><input v-model="variant" type="radio" value="url" /> Base64URL</label>
@@ -107,6 +117,7 @@ function swapValues() {
           :aria-invalid="Boolean(errorMessage)"
           :aria-describedby="errorMessage ? 'base64-input-help' : undefined"
           placeholder="粘贴 UTF-8 文本或 Base64 内容"
+          @input="invalidateResult"
         />
         <span id="base64-input-help" class="sr-only">{{ errorMessage }}</span>
         <div class="actions">

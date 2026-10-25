@@ -46,7 +46,15 @@ describe('YAML 1.2 workbench', () => {
       expect(result.output).toContain('9007199254740993')
       expect(result.output).toContain('1.2300')
       expect(result.output).toContain('"2026-08-31"')
-      expect(result.output).toContain('-0')
+      expect(result.output).toContain('"negative": -0')
+    }
+  })
+
+  it('canonicalizes non-JSON integer lexemes to decimal', () => {
+    const result = runYamlOperation({ operation: 'to-json', text: 'hex: 0x1F\noctal: 0o17\n' })
+    if (result.operation === 'to-json') {
+      expect(result.output).toContain('"hex": 31')
+      expect(result.output).toContain('"octal": 15')
     }
   })
 

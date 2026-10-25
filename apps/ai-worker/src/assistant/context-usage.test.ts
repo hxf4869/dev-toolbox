@@ -36,7 +36,7 @@ describe('assistant complete context usage through the real SDK adapter', () => 
     const client = new AssistantClient('http://api.invalid', 'synthetic-service-token', 'test-worker')
     vi.spyOn(client, 'heartbeatRun').mockResolvedValue({ stopRequested: false })
     const events = vi.spyOn(client, 'events').mockResolvedValue({ stopRequested: false, lastSequence: 1 })
-    const complete = vi.spyOn(client, 'completeRun').mockResolvedValue()
+    const complete = vi.spyOn(client, 'completeRun').mockResolvedValue({ status: 'succeeded' })
     const fail = vi.spyOn(client, 'failRun').mockResolvedValue()
     await new AssistantRunner(client, false).run(claim)
 

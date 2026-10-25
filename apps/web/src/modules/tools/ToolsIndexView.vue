@@ -2,7 +2,6 @@
 import { RouterLink } from 'vue-router'
 
 import UiIcon from '../../components/ui/UiIcon.vue'
-import ProcessingBadge from './shared/ui/ProcessingBadge.vue'
 import { V2_TOOLS } from './toolLinks'
 
 const groups = [
@@ -17,10 +16,9 @@ const groups = [
     <header class="tools-index__header">
       <div>
         <p>工具箱</p>
-        <h1>选择一个本地工具</h1>
-        <span class="tools-index__subtitle">所有确定性处理默认只发生在当前浏览器标签页内。</span>
+        <h1>选择一个工具</h1>
+        <span class="tools-index__subtitle">本地工具在浏览器中处理；在线能力会在发送前说明接收方与内容。</span>
       </div>
-      <ProcessingBadge />
     </header>
 
     <section v-for="group in groups" :key="group.id" class="tool-group" :aria-labelledby="`${group.id}-heading`">

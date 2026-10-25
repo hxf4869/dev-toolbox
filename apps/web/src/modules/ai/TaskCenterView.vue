@@ -27,10 +27,12 @@ const router = useRouter()
 const tasks = ref<AITask[]>([])
 const selectedTask = ref<AITask | null>(null)
 const providers = ref<ProviderEntry[]>([])
+const providersLoaded = ref(false)
 const settings = ref<AISettings | null>(null)
 const libraryItems = ref<LibraryItem[]>([])
 const statusFilter = ref<'' | TaskStatus>(parseStatus(route.query.status))
 const loading = ref(true)
+const scopeLoading = ref(false)
 const detailLoading = ref(false)
 const busy = ref(false)
 const errorMessage = ref('')
@@ -40,13 +42,20 @@ const batchSelection = ref<string[]>([])
 const organizeModelID = ref('')
 const visionModelID = ref('')
 const batchPolicy = ref<SensitivePolicy>('block')
+const batchPanelEl = ref<HTMLElement | null>(null)
 const online = ref(navigator.onLine)
 let pollTimer: number | undefined
+let disposed = false
+let loadSeq = 0
+let detailSeq = 0
+let selectionIntent = ''
+let detailInFlightId = ''
 
 const itemFilter = computed(() =>
   typeof route.query.itemId === 'string' ? route.query.itemId : '',
 )
 const modelOptions = computed(() => availableModels(providers.value))
+const batchModelMissing = computed(() => providersLoaded.value && !modelOptions.value.length)
 const visionOptions = computed(() => availableModels(providers.value, true))
 const allowedPolicies = computed(() => policiesWithin(settings.value?.sensitiveAiPolicy ?? 'block'))
 const activeVisibleTasks = computed(() =>
@@ -69,6 +78,30 @@ watch(
     statusFilter.value = parseStatus(value)
   },
 )
+watch(itemFilter, () => {
+  detailSeq += 1
+  detailInFlightId = ''
+  detailLoading.value = false
+  tasks.value = []
+  selectedTask.value = null
+  errorMessage.value = ''
+  notice.value = ''
+  scopeLoading.value = true
+  void loadTasks(true, true)
+})
+watch(
+  () => route.query.taskId,
+  (value) => {
+    selectionIntent = typeof value === 'string' ? value : ''
+    if (typeof value !== 'string' || !value || detailInFlightId === value) return
+    if (displayedTasks.value.some((task) => task.id === value)) {
+      if (selectedTask.value?.id !== value) selectedTask.value = null
+      void selectTask(value, false)
+      return
+    }
+    void recoverRouteTask(value)
+  },
+)
 
 onMounted(() => {
   window.addEventListener('online', updateOnline)
@@ -76,6 +109,7 @@ onMounted(() => {
   void loadState()
 })
 onBeforeUnmount(() => {
+  disposed = true
   window.clearTimeout(pollTimer)
   window.removeEventListener('online', updateOnline)
   window.removeEventListener('offline', updateOnline)
@@ -83,12 +117,13 @@ onBeforeUnmount(() => {
 
 function updateOnline() {
   online.value = navigator.onLine
-  if (online.value) void loadTasks(false)
+  if (online.value) void loadTasks(false, true)
 }
 
 async function loadState() {
   loading.value = true
   errorMessage.value = ''
+  providersLoaded.value = false
   try {
     const [providerResponse, settingsResponse, itemResponse] = await Promise.all([
       apiRequest<{ items: ProviderEntry[] }>('/api/v1/ai/providers'),
@@ -96,6 +131,7 @@ async function loadState() {
       apiRequest<{ items: LibraryItem[] }>('/api/v1/items?view=recent&sort=effective_desc&limit=100'),
     ])
     providers.value = providerResponse.items
+    providersLoaded.value = true
     settings.value = settingsResponse
     libraryItems.value = itemResponse.items
     organizeModelID.value =
@@ -109,7 +145,7 @@ async function loadState() {
         ? settingsResponse.defaultVisionModelId
         : ''
     batchPolicy.value = settingsResponse.sensitiveAiPolicy
-    await loadTasks(true)
+    await loadTasks(true, true)
   } catch (error) {
     errorMessage.value = messageFor(error)
   } finally {
@@ -117,55 +153,122 @@ async function loadState() {
   }
 }
 
-async function loadTasks(selectFirst = false) {
+async function loadTasks(selectFirst = false, recoverRouteIntent = false) {
+  const seq = ++loadSeq
   window.clearTimeout(pollTimer)
-  if (!online.value) return
   try {
+    if (disposed || !online.value) return
     const query = new URLSearchParams({ limit: '100' })
     if (itemFilter.value) query.set('itemId', itemFilter.value)
     const response = await apiRequest<{ items: AITask[] }>(`/api/v1/ai/tasks?${query}`)
+    if (disposed || seq !== loadSeq) return
     tasks.value = response.items
     const queryTaskID = typeof route.query.taskId === 'string' ? route.query.taskId : ''
-    const desired = queryTaskID || selectedTask.value?.id || (selectFirst ? displayedTasks.value[0]?.id : '')
-    if (desired && displayedTasks.value.some((task) => task.id === desired)) await selectTask(desired, false)
+    const desired =
+      selectionIntent || queryTaskID || selectedTask.value?.id || (selectFirst ? displayedTasks.value[0]?.id : '')
+    if (desired && displayedTasks.value.some((task) => task.id === desired)) {
+      if (detailInFlightId !== desired) await selectTask(desired, false)
+    } else if (recoverRouteIntent && desired) await recoverRouteTask(desired)
     else if (selectFirst && displayedTasks.value[0]) await selectTask(displayedTasks.value[0].id, false)
     else if (!displayedTasks.value.length) selectedTask.value = null
-    if (activeVisibleTasks.value) pollTimer = window.setTimeout(() => void loadTasks(false), 2500)
+    if (disposed || seq !== loadSeq) return
+    schedulePoll()
   } catch (error) {
+    if (disposed || seq !== loadSeq) return
     errorMessage.value = messageFor(error)
+  } finally {
+    if (seq === loadSeq) scopeLoading.value = false
   }
 }
 
-async function selectTask(id: string, updateURL = true) {
+function schedulePoll() {
+  window.clearTimeout(pollTimer)
+  if (disposed || !online.value) return
+  const selected = selectedTask.value
+  const selectedActive = !!selected && (selected.status === 'queued' || selected.status === 'running')
+  if (!activeVisibleTasks.value && !selectedActive) return
+  pollTimer = window.setTimeout(() => void loadTasks(false, true), 2500)
+}
+
+async function selectTask(id: string, updateURL = true, requireItemId = '') {
+  if (disposed) return
+  const seq = ++detailSeq
+  selectionIntent = id
+  detailInFlightId = id
   detailLoading.value = true
   errorMessage.value = ''
   try {
-    selectedTask.value = await apiRequest<AITask>(`/api/v1/ai/tasks/${id}`)
+    const task = await apiRequest<AITask>(`/api/v1/ai/tasks/${id}`)
+    if (disposed || seq !== detailSeq) return
+    if (requireItemId && (task.itemId ?? '').toLowerCase() !== requireItemId.toLowerCase()) {
+      errorMessage.value = '链接指向的任务不属于当前记录，清除记录筛选后可查看。'
+      return
+    }
+    selectedTask.value = task
     if (updateURL) await router.replace({ query: { ...route.query, taskId: id } })
+    schedulePoll()
   } catch (error) {
+    if (disposed || seq !== detailSeq) return
     errorMessage.value = messageFor(error)
   } finally {
-    detailLoading.value = false
+    if (seq === detailSeq) {
+      detailInFlightId = ''
+      detailLoading.value = false
+    }
   }
+}
+
+async function recoverRouteTask(id: string) {
+  if (detailInFlightId === id) return
+  if (selectedTask.value?.id === id) {
+    if (detailInFlightId) {
+      detailSeq += 1
+      detailInFlightId = ''
+      detailLoading.value = false
+    } else if (selectedTask.value.status === 'queued' || selectedTask.value.status === 'running') {
+      await selectTask(id, false)
+    }
+    schedulePoll()
+    return
+  }
+  if (!isCanonicalTaskID(id)) {
+    detailSeq += 1
+    detailInFlightId = ''
+    detailLoading.value = false
+    selectedTask.value = null
+    errorMessage.value = '链接中的任务标识无效，请从任务列表重新打开。'
+    return
+  }
+  selectedTask.value = null
+  await selectTask(id, false, tasks.value.some((task) => task.id === id) ? '' : itemFilter.value)
+}
+
+function stillOwnsSelection(selection: string, filter: '' | TaskStatus, item: string) {
+  return !disposed && selectionIntent === selection && statusFilter.value === filter && itemFilter.value === item
 }
 
 async function cancelTask(task: AITask) {
   busy.value = true
   errorMessage.value = ''
   notice.value = ''
+  const intentSelection = task.id
+  const intentFilter: '' | TaskStatus = statusFilter.value
+  const intentItem = itemFilter.value
   try {
     const updated = await apiRequest<AITask>(
       `/api/v1/ai/tasks/${task.id}/cancel`,
       jsonRequest('POST', {}, auth.csrfToken),
     )
-    notice.value =
-      updated.status === 'running'
-        ? '取消请求已记录，将在下一个 Provider 或领域工具边界生效。'
-        : '任务已取消，未完成的候选不会保存为 Artifact。'
+    if (stillOwnsSelection(intentSelection, intentFilter, intentItem)) {
+      notice.value =
+        updated.status === 'running'
+          ? '取消请求已记录，将在下一个 Provider 或领域工具边界生效。'
+          : '任务已取消，未完成的候选不会保存为 Artifact。'
+    }
     await loadTasks(false)
-    await selectTask(task.id, false)
+    if (stillOwnsSelection(intentSelection, intentFilter, intentItem)) await selectTask(task.id, false)
   } catch (error) {
-    errorMessage.value = messageFor(error)
+    if (stillOwnsSelection(intentSelection, intentFilter, intentItem)) errorMessage.value = messageFor(error)
   } finally {
     busy.value = false
   }
@@ -175,17 +278,25 @@ async function retryTask(task: AITask) {
   busy.value = true
   errorMessage.value = ''
   notice.value = ''
+  const intentSelection = task.id
+  let intentFilter: '' | TaskStatus = statusFilter.value
+  const intentItem = itemFilter.value
   try {
     const retry = await apiRequest<AITask>(
       `/api/v1/ai/tasks/${task.id}/retry`,
       jsonRequest('POST', {}, auth.csrfToken),
     )
-    notice.value = '已创建新的重试任务；旧任务历史保持不变。'
-    statusFilter.value = ''
+    if (stillOwnsSelection(intentSelection, intentFilter, intentItem)) {
+      notice.value = '已创建新的重试任务；旧任务历史保持不变。'
+      statusFilter.value = ''
+      intentFilter = ''
+      await router.replace({ query: { ...route.query, status: undefined } })
+    }
     await loadTasks(false)
+    if (!stillOwnsSelection(intentSelection, intentFilter, intentItem)) return
     await selectTask(retry.id)
   } catch (error) {
-    errorMessage.value = messageFor(error)
+    if (stillOwnsSelection(intentSelection, intentFilter, intentItem)) errorMessage.value = messageFor(error)
   } finally {
     busy.value = false
   }
@@ -196,6 +307,22 @@ async function createBatch() {
   busy.value = true
   errorMessage.value = ''
   notice.value = ''
+  const intentPanel = batchPanelEl.value
+  const intentItemIds = [...batchSelection.value]
+  const intentOrganize = organizeModelID.value
+  const intentVision = visionModelID.value
+  const intentPolicy = batchPolicy.value
+  let intentFilter: '' | TaskStatus = statusFilter.value
+  const intentItem = itemFilter.value
+  const intentDetail = selectionIntent
+  const ownsDraft = () =>
+    batchOpen.value &&
+    batchPanelEl.value === intentPanel &&
+    batchSelection.value.length === intentItemIds.length &&
+    intentItemIds.every((id, index) => batchSelection.value[index] === id) &&
+    organizeModelID.value === intentOrganize &&
+    visionModelID.value === intentVision &&
+    batchPolicy.value === intentPolicy
   try {
     const task = await apiRequest<AITask>(
       '/api/v1/ai/tasks',
@@ -203,22 +330,29 @@ async function createBatch() {
         'POST',
         {
           taskType: 'batch_organize',
-          itemIds: batchSelection.value,
-          organizeModelId: organizeModelID.value,
-          visionModelId: visionModelID.value,
-          sensitivePolicy: batchPolicy.value,
+          itemIds: intentItemIds,
+          organizeModelId: intentOrganize,
+          visionModelId: intentVision,
+          sensitivePolicy: intentPolicy,
         },
         auth.csrfToken,
       ),
     )
-    batchOpen.value = false
-    batchSelection.value = []
-    statusFilter.value = ''
-    notice.value = '批量任务已建立。每条记录独立处理，跳过项会保留明确原因。'
+    let ownedOutcome = false
+    if (ownsDraft() && stillOwnsSelection(intentDetail, intentFilter, intentItem)) {
+      ownedOutcome = true
+      batchOpen.value = false
+      batchSelection.value = []
+      statusFilter.value = ''
+      intentFilter = ''
+      await router.replace({ query: { ...route.query, status: undefined } })
+      notice.value = '批量任务已建立。每条记录独立处理，跳过项会保留明确原因。'
+    }
     await loadTasks(false)
+    if (!ownedOutcome || !stillOwnsSelection(intentDetail, intentFilter, intentItem)) return
     await selectTask(task.id)
   } catch (error) {
-    errorMessage.value = messageFor(error)
+    if (ownsDraft() && stillOwnsSelection(intentDetail, intentFilter, intentItem)) errorMessage.value = messageFor(error)
   } finally {
     busy.value = false
   }
@@ -260,7 +394,7 @@ function clearItemFilter() {
       ...(typeof route.query.taskId === 'string' ? { taskId: route.query.taskId } : {}),
       ...(statusFilter.value ? { status: statusFilter.value } : {}),
     },
-  }).then(() => loadTasks(true))
+  })
 }
 
 function chooseStatus(status: '' | TaskStatus) {
@@ -272,6 +406,10 @@ function parseStatus(value: unknown): '' | TaskStatus {
   return typeof value === 'string' && ['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(value)
     ? (value as TaskStatus)
     : ''
+}
+
+function isCanonicalTaskID(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 }
 
 function messageFor(error: unknown) {
@@ -286,12 +424,13 @@ function messageFor(error: unknown) {
       <div><UiButton variant="secondary" @click="batchOpen = !batchOpen"><UiIcon name="boxes" />批量整理</UiButton><RouterLink class="schedule-link" to="/settings/ai-schedule"><UiIcon name="settings" />自动整理设置</RouterLink></div>
     </header>
 
-    <p v-if="!online" class="center-notice center-notice--warning" role="status"><UiIcon name="wifi-off" />当前离线。已显示最后一次读取的任务状态；重新联网后自动刷新。</p>
+    <p v-if="!online" class="center-notice center-notice--warning" role="status"><UiIcon name="wifi-off" />当前离线，任务状态暂时无法更新；重新联网后自动刷新。</p>
     <p v-if="errorMessage" class="center-notice center-notice--error" role="alert"><UiIcon name="triangle-alert" />{{ errorMessage }}<button type="button" @click="loadState">重新读取</button></p>
     <p v-if="notice" class="center-notice" role="status"><UiIcon name="check" />{{ notice }}</p>
 
-    <section v-if="batchOpen" class="batch-panel" aria-labelledby="batch-title">
+    <section v-if="batchOpen" ref="batchPanelEl" class="batch-panel" aria-labelledby="batch-title">
       <header><div><h2 id="batch-title">选择要整理的记录</h2><span>最多选择 100 条；单条失败不会影响其他记录。</span></div><button type="button" aria-label="关闭批量整理" @click="batchOpen = false"><UiIcon name="x" /></button></header>
+      <p v-if="batchModelMissing" class="center-notice center-notice--warning" role="status"><UiIcon name="triangle-alert" /><span>当前没有可用模型。请前往 Provider 与模型设置完成配置或启用。</span><RouterLink class="batch-model-link" to="/settings/providers">配置 Provider 与模型</RouterLink></p>
       <div class="batch-config">
         <label><span>正文整理模型</span><select v-model="organizeModelID"><option value="">选择模型</option><option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select></label>
         <label><span>视觉模型（可选）</span><select v-model="visionModelID"><option value="">未配置，图片将跳过</option><option v-for="model in visionOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select></label>
@@ -311,7 +450,7 @@ function messageFor(error: unknown) {
 
     <aside v-if="itemFilter" class="filter-chip"><span>仅显示记录 {{ itemByID.get(itemFilter)?.title || itemFilter.slice(0, 8) }}</span><button type="button" @click="clearItemFilter"><UiIcon name="x" :size="14" />清除</button></aside>
 
-    <div v-if="loading" class="center-loading"><span class="center-spinner" />正在读取任务队列…</div>
+    <div v-if="loading || scopeLoading" class="center-loading"><span class="center-spinner" />正在读取任务队列…</div>
     <div v-else class="task-layout">
       <section class="task-list" aria-label="任务列表">
         <button v-for="task in displayedTasks" :key="task.id" type="button" :class="{ active: selectedTask?.id === task.id }" @click="selectTask(task.id)">
@@ -319,7 +458,7 @@ function messageFor(error: unknown) {
           <span class="task-list__body"><strong>{{ taskTitle(task) }}</strong><small>{{ taskSubtitle(task) }}</small><em>{{ phase(task) }}</em></span>
           <span class="task-list__meta"><strong>{{ taskStatusLabels[task.status] }}</strong><small>{{ formatDateTime(task.queuedAt) }}</small></span>
         </button>
-        <div v-if="!displayedTasks.length" class="center-empty"><UiIcon name="sparkles" :size="28" /><h2>没有符合条件的任务</h2><p>可从记录详情创建单条任务，或在本页开始批量整理。</p></div>
+        <div v-if="!displayedTasks.length && !errorMessage" class="center-empty"><UiIcon name="sparkles" :size="28" /><h2>{{ online ? '没有符合条件的任务' : '离线中，暂时无法读取当前范围的任务' }}</h2><p>{{ online ? '可从记录详情创建单条任务，或在本页开始批量整理。' : '重新联网后会自动刷新列表。' }}</p></div>
       </section>
 
       <aside class="task-detail" aria-live="polite">
@@ -360,6 +499,7 @@ function messageFor(error: unknown) {
 .center-notice--warning { border-color: var(--warning); color: var(--warning); }
 .center-notice--error { border-color: var(--danger); color: var(--danger); }
 .center-notice button { margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; text-decoration: underline; }
+.batch-model-link { display: inline-flex; min-height: 40px; flex: none; align-items: center; margin-left: auto; padding: 0 var(--space-3); border-radius: var(--radius-control); text-decoration: underline; }
 .batch-panel { width: 100%; max-height: min(460px, 55dvh); flex: none; margin: 0 0 var(--space-4); overflow-y: auto; padding: var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-card); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); overscroll-behavior: contain; }
 .batch-panel > header { display: flex; align-items: flex-start; justify-content: space-between; }
 .batch-panel header p, .batch-panel header h2, .batch-panel header span { margin: 0; }

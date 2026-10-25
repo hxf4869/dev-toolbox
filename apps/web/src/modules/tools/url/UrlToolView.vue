@@ -19,19 +19,25 @@ const activeMode = ref<'transform' | 'inspect'>('transform')
 const operation = ref<UrlOperation>('encode')
 const scope = ref<UrlScope>('url')
 const input = ref('')
-const result = ref('')
+const transformResult = ref('')
+const rebuildResult = ref('')
 const parsed = ref<ParsedUrl | null>(null)
 const queryRows = ref<QueryRow[]>([])
 const errorMessage = ref('')
 const liveMessage = ref('')
 const inputBytes = computed(() => urlUtf8ByteLength(input.value))
 
+function switchMode(mode: 'transform' | 'inspect') {
+  activeMode.value = mode
+  resetError()
+}
+
 function runTransform() {
   resetError()
   try {
-    result.value = transformUrlText(input.value, operation.value, scope.value)
+    transformResult.value = transformUrlText(input.value, operation.value, scope.value)
   } catch (error) {
-    result.value = ''
+    transformResult.value = ''
     showError(error)
   }
 }
@@ -41,7 +47,7 @@ function inspectUrl() {
   try {
     parsed.value = parseUrlPreserving(input.value)
     queryRows.value = parsed.value.queryRows.map((row) => ({ ...row }))
-    result.value = ''
+    rebuildResult.value = ''
   } catch (error) {
     parsed.value = null
     queryRows.value = []
@@ -51,7 +57,7 @@ function inspectUrl() {
 
 function rebuild() {
   if (!parsed.value) return
-  result.value = rebuildUrl(parsed.value, queryRows.value)
+  rebuildResult.value = rebuildUrl(parsed.value, queryRows.value)
   liveMessage.value = '已按当前行顺序重新构建；地址不会被打开。'
 }
 
@@ -73,8 +79,9 @@ async function pasteInput() {
 }
 
 async function copyResult() {
+  const text = activeMode.value === 'transform' ? transformResult.value : rebuildResult.value
   try {
-    await navigator.clipboard.writeText(result.value)
+    await navigator.clipboard.writeText(text)
     liveMessage.value = '结果已复制'
   } catch {
     errorMessage.value = '复制未成功，请选中结果后手动复制。'
@@ -83,7 +90,8 @@ async function copyResult() {
 
 function clearAll() {
   input.value = ''
-  result.value = ''
+  transformResult.value = ''
+  rebuildResult.value = ''
   parsed.value = null
   queryRows.value = []
   resetError()
@@ -113,8 +121,8 @@ function showError(error: unknown) {
     <p class="privacy-note">输入只保留在当前页面内存，不发起网络请求，也不会自动打开解析出的地址。上限 1 MiB UTF-8。</p>
 
     <div class="tabs" role="tablist" aria-label="URL 工具模式">
-      <button :aria-selected="activeMode === 'transform'" role="tab" @click="activeMode = 'transform'">百分号编解码</button>
-      <button :aria-selected="activeMode === 'inspect'" role="tab" @click="activeMode = 'inspect'">解析与 Query</button>
+      <button :aria-selected="activeMode === 'transform'" role="tab" @click="switchMode('transform')">百分号编解码</button>
+      <button :aria-selected="activeMode === 'inspect'" role="tab" @click="switchMode('inspect')">解析与 Query</button>
     </div>
 
     <section v-if="activeMode === 'transform'" class="mode-bar" aria-label="转换选项">
@@ -149,8 +157,8 @@ function showError(error: unknown) {
     </section>
 
     <section v-if="activeMode === 'transform'" class="result-panel">
-      <div class="panel-header"><strong>结果</strong><UiButton :disabled="!result" @click="copyResult">复制结果</UiButton></div>
-      <textarea :value="result" rows="7" readonly aria-label="URL 转换结果" placeholder="执行后在此显示" />
+      <div class="panel-header"><strong>结果</strong><UiButton :disabled="!transformResult" @click="copyResult">复制结果</UiButton></div>
+      <textarea :value="transformResult" rows="7" readonly aria-label="URL 转换结果" placeholder="执行后在此显示" />
     </section>
 
     <template v-else-if="parsed">
@@ -185,8 +193,8 @@ function showError(error: unknown) {
       </section>
 
       <section class="result-panel">
-        <div class="panel-header"><strong>重新构建结果</strong><UiButton :disabled="!result" @click="copyResult">复制结果</UiButton></div>
-        <textarea :value="result" rows="5" readonly aria-label="重新构建的 URL" placeholder="重新构建后在此显示" />
+        <div class="panel-header"><strong>重新构建结果</strong><UiButton :disabled="!rebuildResult" @click="copyResult">复制结果</UiButton></div>
+        <textarea :value="rebuildResult" rows="5" readonly aria-label="重新构建的 URL" placeholder="重新构建后在此显示" />
       </section>
     </template>
     <span class="live-status" aria-live="polite">{{ liveMessage }}</span>

@@ -447,14 +447,6 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 		return nil, nil
 	}
 	context := claimRunContext{Messages: []claimRunMessage{}, Question: question}
-	// Sources outrank history. Reserve as much of the frozen maximum source
-	// headroom as this model can hold, but never reject a question merely
-	// because the model cannot fit eight maximum-sized sources.
-	sourceHeadroom := MaximumRunSources * 8192 / 3
-	if sourceHeadroom > budget {
-		sourceHeadroom = budget
-	}
-	budget -= sourceHeadroom
 	if hasSummary {
 		encoded, _ := json.Marshal(summary)
 		if summaryBytes := estimateTokens(string(encoded)); summaryBytes < budget {
@@ -491,17 +483,28 @@ func (service *Service) buildClaimContext(ctx context.Context, tx pgx.Tx, run ru
 		prior = &claimSummaryPrior{ThroughMessageSequence: summarizedThrough, Summary: summary}
 	}
 	summarySource := service.summarySourceFor(history, summarizedThrough, prior)
-	for _, entry := range history {
-		stripped := entry.content
-		if entry.role == "assistant" {
-			stripped = stripCitationTokens(stripped)
+	// History loads newest-first as whole user+assistant turns (mirroring
+	// fillTemporaryContext): an assistant answer whose user question was
+	// dropped never enters the context alone. A failed run leaves its user
+	// question without a successful answer; it is not a complete turn and is
+	// skipped, keeping older real turns loadable.
+	for index := 0; index < len(history); index++ {
+		entry := history[index]
+		if entry.role != "assistant" {
+			continue
 		}
-		cost := estimateTokens(stripped) + 4
-		if cost > budget {
+		if index+1 >= len(history) || history[index+1].role != "user" {
+			continue
+		}
+		answer := stripCitationTokens(entry.content)
+		pairCost := estimateTokens(answer) + 4 + estimateTokens(history[index+1].content) + 4
+		if pairCost > budget {
 			break
 		}
-		budget -= cost
-		context.Messages = append(context.Messages, claimRunMessage{Role: entry.role, Content: stripped})
+		budget -= pairCost
+		context.Messages = append(context.Messages,
+			claimRunMessage{Role: "assistant", Content: answer},
+			claimRunMessage{Role: "user", Content: history[index+1].content})
 	}
 	// Oldest-first order for the model.
 	for left, right := 0, len(context.Messages)-1; left < right; left, right = left+1, right-1 {

@@ -175,11 +175,11 @@ export class AssistantClient {
     usage: Record<string, number | null>,
     timings: Record<string, number | null>,
     signal?: AbortSignal,
-  ): Promise<void> {
-    await this.jsonRequest(`/internal/assistant/runs/${runId}/complete`, {
+  ): Promise<{ readonly status: 'succeeded' | 'stopped' }> {
+    return this.jsonRequest(`/internal/assistant/runs/${runId}/complete`, {
       method: 'POST',
       body: JSON.stringify({ workerId: this.workerId, leaseVersion, usage, timings }),
-    }, 64 * 1024, signal)
+    }, 64 * 1024, signal) as Promise<{ readonly status: 'succeeded' | 'stopped' }>
   }
 
   async failRun(

@@ -1,4 +1,29 @@
-import Ajv2020 from 'ajv/dist/2020'
+import {
+  removeUriSchemePlugin,
+  RetrievalError,
+  UnsupportedUriSchemeError,
+  value as browserValue,
+  type Browser,
+} from '@hyperjump/browser'
+import { Reference } from '@hyperjump/browser/jref'
+import {
+  getAllRegisteredSchemaUris,
+  InvalidSchemaError,
+  registerSchema,
+  setMetaSchemaOutputFormat,
+  unregisterSchema,
+} from '@hyperjump/json-schema/draft-2020-12'
+import type { SchemaObject } from '@hyperjump/json-schema/draft-2020-12'
+import {
+  BASIC,
+  compile,
+  getKeywordId,
+  getSchema,
+  interpret,
+  type CompiledSchema,
+  type SchemaDocument,
+} from '@hyperjump/json-schema/experimental'
+import { fromJs } from '@hyperjump/json-schema/instance/experimental'
 import { JSONPath } from 'jsonpath-plus'
 
 import type {
@@ -21,6 +46,13 @@ import {
 } from './lossless'
 import { createLimitedRepair } from './repair'
 import { generateLocalTypes } from './typeGeneration'
+
+// InvalidSchemaError.output 默认 FLAG；设为 BASIC 以在 SCHEMA_INVALID 消息中带出首个元错误位置。
+setMetaSchemaOutputFormat(BASIC)
+
+// 此模块只由 JSON Worker 加载。移除默认取数插件，让编译期间的文档外取数在 SDK 边界失败；
+// 浏览器只注册 http/https，file 在浏览器为 no-op，在 Node 测试中同样禁止读取文件。
+for (const scheme of ['http', 'https', 'file']) removeUriSchemePlugin(scheme)
 
 export async function runJsonOperation(request: JsonWorkerRequest): Promise<JsonWorkerResult> {
   switch (request.operation) {
@@ -305,7 +337,31 @@ function canonicalChildPath(parent: string, key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? `${parent}.${key}` : `${parent}[${JSON.stringify(key)}]`
 }
 
-export function validateSchema(instanceText: string, schemaText: string): JsonWorkerResult {
+const JSON_SCHEMA_DIALECT = 'https://json-schema.org/draft/2020-12/schema'
+const LOCAL_SCHEMA_URI_PREFIX = 'urn:dev-toolbox:json-tool:local-'
+let localSchemaUriSequence = 0
+
+function keywordName(keyword: string): string {
+  const match = /[#/]([^/#]+)$/.exec(keyword)
+  return match?.[1] ?? keyword
+}
+
+function instancePathOf(instanceLocation: string): string {
+  const pointer = instanceLocation.startsWith('#') ? instanceLocation.slice(1) : instanceLocation
+  try {
+    return decodeURIComponent(pointer) || '$'
+  } catch {
+    return pointer
+  }
+}
+
+function schemaInvalidMessage(error: InvalidSchemaError): string {
+  const first = error.output?.errors?.[0]
+  if (!first) return 'Schema 无法通过 Draft 2020-12 校验。'
+  return `Schema 无法通过 Draft 2020-12 校验：${first.absoluteKeywordLocation ?? first.instanceLocation} ${keywordName(first.keyword)}。`
+}
+
+export async function validateSchema(instanceText: string, schemaText: string): Promise<JsonWorkerResult> {
   const instance = parseLosslessJson(instanceText)
   const schemaLossless = parseLosslessJson(schemaText)
   if (containsUnsafeNumber(schemaLossless)) {
@@ -314,43 +370,140 @@ export function validateSchema(instanceText: string, schemaText: string): JsonWo
       message: 'Schema 自身包含无法安全映射的数值关键字，已拒绝编译。',
     })
   }
-  rejectRemoteReferences(schemaLossless)
-  const schema = toSafeShadow(schemaLossless) as object
-  const ajv = new Ajv2020({ allErrors: true, strict: true, validateSchema: true })
-  let validate: ReturnType<typeof ajv.compile>
-  try {
-    validate = ajv.compile(schema)
-  } catch (error) {
+  if (!isObject(schemaLossless) && typeof schemaLossless !== 'boolean') {
     throw new StructuredToolError({
       code: 'SCHEMA_INVALID',
-      message: error instanceof Error ? error.message : 'Schema 无法通过 Draft 2020-12 编译。',
+      message: 'Schema 必须是 JSON 对象或布尔值 true/false。',
     })
   }
-  if (containsUnsafeNumber(instance)) {
-    return { operation: 'schema-validate', schemaValid: true, status: 'not_run_precision_guard', issues: [] }
+  // data 中的 ref 字面量参与普通值比较；被本地引用提升为 Schema 后的非 # 引用，
+  // 由编译结果检查拒绝。Schema 位置的非 # 声明与资源安全限制仍在此处检查。
+  rejectUnsupportedSchemaFeatures(schemaLossless, true, 'schema')
+  const schema = toSafeShadow(schemaLossless) as SchemaObject | boolean
+  // 解释式校验器使用进程级注册表，且 worker 长驻：按次注册新 URI 并在 finally 差异清理，
+  // 避免用户 Schema 的 $id 或方言条目跨请求残留（含 R208 实测的 loadDialect 窗口）。
+  const registryBaseline = new Set(getAllRegisteredSchemaUris())
+  localSchemaUriSequence += 1
+  const retrievalUri = `${LOCAL_SCHEMA_URI_PREFIX}${localSchemaUriSequence}`
+  try {
+    registerSchema(schema, retrievalUri, JSON_SCHEMA_DIALECT)
+    // 编译即完成元校验：即使实例不安全，Schema 本身也先被证明有效（docs/09 Schema 节）。
+    const root = await getSchema(retrievalUri)
+    const compiled = await compile(root)
+    await rejectCompiledRemoteReferences(compiled, root, registryBaseline)
+    if (containsUnsafeNumber(instance)) {
+      return { operation: 'schema-validate', schemaValid: true, status: 'not_run_precision_guard', issues: [] }
+    }
+    const output = interpret(compiled, fromJs(toSafeShadow(instance) as Parameters<typeof fromJs>[0]), BASIC)
+    const issues: PositionedIssue[] = output.valid ? [] : (output.errors ?? []).map((issue) => ({
+      code: keywordName(issue.keyword),
+      message: `${instancePathOf(issue.instanceLocation)} 不符合 ${keywordName(issue.keyword)} 约束`,
+    }))
+    return { operation: 'schema-validate', schemaValid: true, status: output.valid ? 'valid' : 'invalid', issues }
+  } catch (error) {
+    if (error instanceof InvalidSchemaError) {
+      throw new StructuredToolError({ code: 'SCHEMA_INVALID', message: schemaInvalidMessage(error) })
+    }
+    if (error instanceof RetrievalError && error.cause instanceof UnsupportedUriSchemeError) {
+      throw new StructuredToolError({
+        code: 'SCHEMA_REMOTE_REF_DISABLED',
+        message: '文档外引用取数已禁用；只支持当前文档内 # 引用。',
+      })
+    }
+    throw error
+  } finally {
+    for (const uri of getAllRegisteredSchemaUris()) {
+      if (!registryBaseline.has(uri)) unregisterSchema(uri)
+    }
   }
-  const valid = validate(toSafeShadow(instance))
-  const issues: PositionedIssue[] = (validate.errors ?? []).map((issue) => ({
-    code: issue.keyword,
-    message: `${issue.instancePath || '$'} ${issue.message ?? '不符合 Schema'}`,
-  }))
-  return { operation: 'schema-validate', schemaValid: true, status: valid ? 'valid' : 'invalid', issues }
 }
 
-function rejectRemoteReferences(value: LosslessJsonValue): void {
+// SDK 可将 data 中的 ref 提升为 Schema，并在取数插件之前命中注册缓存。
+// 只检查公开 AST 中实际编译的引用原字面值；内置元 Schema 继续由 SDK 自身维护。
+async function rejectCompiledRemoteReferences(
+  compiled: CompiledSchema,
+  root: Browser<SchemaDocument>,
+  registryBaseline: ReadonlySet<string>,
+): Promise<void> {
+  const referenceKeywords = new Map([
+    [getKeywordId('$ref', JSON_SCHEMA_DIALECT), '$ref'],
+    [getKeywordId('$dynamicRef', JSON_SCHEMA_DIALECT), '$dynamicRef'],
+  ])
+  for (const nodes of Object.values(compiled.ast)) {
+    if (!Array.isArray(nodes)) continue
+    for (const [keywordId, keywordUri] of nodes) {
+      const field = referenceKeywords.get(keywordId)
+      if (!field) continue
+      const parentUri = keywordUri.slice(0, keywordUri.lastIndexOf('/'))
+      const parent = await getSchema(parentUri, root)
+      if (registryBaseline.has(parent.document.baseUri)) continue
+      const raw = browserValue<Record<string, unknown>>(parent)[field]
+      const literal = raw instanceof Reference ? raw.href : raw
+      if (typeof literal === 'string' && !literal.startsWith('#')) {
+        throw new StructuredToolError({
+          code: 'SCHEMA_REMOTE_REF_DISABLED',
+          message: '远程 ' + field + ' ' + JSON.stringify(literal) + ' 已禁用；只支持当前文档内 # 引用。',
+        })
+      }
+    }
+  }
+}
+
+type SchemaFeaturePosition = 'schema' | 'schemaMap' | 'data'
+
+// 纯位置分类：schema 节点的 const/enum/default/examples 值是惰性数据；五类映射关键字的值是
+// "名称 → Schema"映射，其中任意 key 都是属性名而非关键字（properties.const 是真 Schema）。
+function childSchemaPosition(position: SchemaFeaturePosition, key: string): SchemaFeaturePosition {
+  if (position === 'data') return 'data'
+  if (position === 'schemaMap') return 'schema'
+  if (key === 'const' || key === 'enum' || key === 'default' || key === 'examples') return 'data'
+  if (key === 'properties' || key === 'patternProperties' || key === 'dependentSchemas' || key === '$defs' || key === 'definitions') return 'schemaMap'
+  return 'schema'
+}
+
+function rejectUnsupportedSchemaFeatures(
+  value: LosslessJsonValue,
+  isResource: boolean,
+  position: SchemaFeaturePosition,
+): void {
   if (Array.isArray(value)) {
-    value.forEach(rejectRemoteReferences)
+    value.forEach((child) => rejectUnsupportedSchemaFeatures(
+      child,
+      isObject(child) && typeof child.$id === 'string',
+      position,
+    ))
     return
   }
   if (!isObject(value)) return
+  const dialect = value.$schema
+  if (typeof dialect === 'string' && dialect !== JSON_SCHEMA_DIALECT) {
+    throw new StructuredToolError({
+      code: 'SCHEMA_DIALECT_UNSUPPORTED',
+      message: `仅支持 JSON Schema Draft 2020-12，已拒绝 $schema ${JSON.stringify(dialect)}。`,
+    })
+  }
+  // $vocabulary 只会被资源级节点（根或带字符串 $id 的子 Schema；lib/schema.js 的 processSchema
+  // 对后者同样执行 buildSchemaDocument）处理并触发 loadDialect，R208 实测该路径可在查重前
+  // 重建内置方言，因此资源级自定义 $vocabulary 一律拒绝。
+  if (isResource && isObject(value.$vocabulary)) {
+    throw new StructuredToolError({
+      code: 'SCHEMA_VOCABULARY_UNSUPPORTED',
+      message: '仅支持内置 Draft 2020-12 词汇表，已拒绝自定义 $vocabulary。',
+    })
+  }
+  // 资源限制仍遍历全部子树（含 data）。非 # 引用声明只在 Schema 位置拒绝；
+  // data 中的普通字面值放行，提升为 Schema 后的引用另按公开编译结果检查。
   for (const [key, child] of Object.entries(value)) {
-    if (key === '$ref' && typeof child === 'string' && !child.startsWith('#')) {
+    if (
+      (key === '$ref' || key === '$dynamicRef') && typeof child === 'string' && !child.startsWith('#')
+      && position !== 'data'
+    ) {
       throw new StructuredToolError({
         code: 'SCHEMA_REMOTE_REF_DISABLED',
-        message: `远程 $ref ${JSON.stringify(child)} 已禁用；只支持当前文档内 # 引用。`,
+        message: `远程 ${key} ${JSON.stringify(child)} 已禁用；只支持当前文档内 # 引用。`,
       })
     }
-    rejectRemoteReferences(child)
+    rejectUnsupportedSchemaFeatures(child, isObject(child) && typeof child.$id === 'string', childSchemaPosition(position, key))
   }
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { useAuthStore } from '../../app/auth'
 import UiButton from '../../components/ui/UiButton.vue'
@@ -86,6 +86,8 @@ interface EmbeddingDraft {
 }
 
 type TestState = {
+  version: number
+  modelId: string
   kind: 'testing' | 'success' | 'credentials' | 'unavailable'
   message: string
 }
@@ -113,6 +115,7 @@ const providerDraft = ref<ProviderDraft>(emptyProvider())
 const modelDraft = ref<ModelDraft>(emptyModel())
 const selectedModels = ref<Record<string, string>>({})
 const testStates = ref<Record<string, TestState>>({})
+const providerTestVersions = ref<Record<string, number>>({})
 const pendingDelete = ref<{ kind: 'provider' | 'model'; id: string; label: string } | null>(null)
 const embeddingSettings = ref<EmbeddingSettingsDTO | null>(null)
 const indexStatus = ref<KnowledgeIndexStatusDTO | null>(null)
@@ -128,10 +131,20 @@ const embeddingTestResult = ref<TestEmbeddingSettingsResponseDTO | null>(null)
 const embeddingTestError = ref('')
 const failureLoading = ref(false)
 const retryingFailures = ref<Record<string, boolean>>({})
+const indexPollError = ref('')
+const indexFailuresStale = ref(false)
 const pendingReindex = ref<PutEmbeddingSettingsRequestDTO | null>(null)
 const embeddingDeleteOpen = ref(false)
 const dialogRoot = ref<HTMLElement | null>(null)
 const previousFocus = ref<HTMLElement | null>(null)
+
+const INDEX_POLL_INTERVAL_MS = 2000
+const FAILURE_PAGE_SIZE = 50
+let indexPollTimer = 0
+let providerReadSeq = 0
+let indexRefreshSeq = 0
+let indexFailureListSeq = 0
+let embeddingConnectionVersion = 0
 
 const editingProvider = computed(() => Boolean(providerDraft.value.id))
 const editingModel = computed(() => Boolean(modelDraft.value.id))
@@ -181,14 +194,22 @@ watch(
     embeddingDraft.value.dimensions,
   ],
   () => {
+    embeddingConnectionVersion += 1
     embeddingTestResult.value = null
     embeddingTestError.value = ''
   },
+  { flush: 'sync' },
 )
 
 onMounted(() => {
   void loadProviders()
   void loadEmbeddingSection()
+})
+
+onBeforeUnmount(() => {
+  window.clearTimeout(indexPollTimer)
+  indexPollTimer = 0
+  indexRefreshSeq += 1
 })
 
 function emptyProvider(): ProviderDraft {
@@ -229,26 +250,29 @@ function emptyEmbedding(): EmbeddingDraft {
 }
 
 async function loadProviders() {
+  const readSeq = ++providerReadSeq
   loading.value = true
   pageError.value = ''
   try {
     const response = await apiRequest<{ items: ProviderEntry[]; allowInsecureHttp: boolean }>(
       '/api/v1/ai/providers',
     )
+    if (readSeq !== providerReadSeq) return
     providers.value = response.items
     allowInsecureHttp.value = response.allowInsecureHttp
     const nextSelections: Record<string, string> = {}
     for (const provider of response.items) {
       const current = selectedModels.value[provider.id]
-      nextSelections[provider.id] = provider.models.some((model) => model.id === current)
+      nextSelections[provider.id] = provider.models.some((model) => model.id === current && model.enabled)
         ? current
         : provider.models.find((model) => model.enabled)?.id ?? ''
     }
     selectedModels.value = nextSelections
   } catch (error) {
+    if (readSeq !== providerReadSeq) return
     pageError.value = messageFor(error)
   } finally {
-    loading.value = false
+    if (readSeq === providerReadSeq) loading.value = false
   }
 }
 
@@ -278,14 +302,35 @@ function closeProviderEditor() {
   actionError.value = ''
 }
 
+function refocusDrawerIfFocusLost() {
+  void nextTick(() => {
+    const root = dialogRoot.value
+    if (!root) return
+    const active = document.activeElement
+    if (active instanceof HTMLElement && root.contains(active) && !active.matches(':disabled')) return
+    root.querySelector<HTMLElement>('input:not([disabled])')?.focus()
+  })
+}
+
+function refocusEditTriggerIfFocusLost(kind: 'provider' | 'model', id: string) {
+  void nextTick(() => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active !== document.body && active.isConnected && !active.matches(':disabled')) return
+    document.querySelector<HTMLElement>(`[data-edit-${kind}="${id}"]`)?.focus()
+  })
+}
+
 async function saveProvider() {
   actionError.value = ''
   const draft = providerDraft.value
+  // 提交时的目标 id；保存成功后草稿会被重置，await 之后不能再依赖 draft/editingProvider。
+  const editingId = draft.id
   if (!draft.displayName.trim() || !draft.baseUrl.trim() || (!editingProvider.value && !draft.apiKey)) {
     actionError.value = '请填写显示名、Base URL 和创建所需的 API Key。'
     return
   }
   busy.value = true
+  refocusDrawerIfFocusLost()
   try {
     if (editingProvider.value) {
       const payload: Record<string, unknown> = {
@@ -317,9 +362,11 @@ async function saveProvider() {
         ),
       )
     }
+    if (editingId) invalidateProviderTest(editingId)
     providerEditorOpen.value = false
     providerDraft.value = emptyProvider()
     await loadProviders()
+    if (editingId) refocusEditTriggerIfFocusLost('provider', editingId)
   } catch (error) {
     actionError.value = messageFor(error)
   } finally {
@@ -366,6 +413,7 @@ function closeModelEditor() {
 async function saveModel() {
   actionError.value = ''
   const draft = modelDraft.value
+  const editingId = draft.id
   if (!draft.modelId.trim() || !draft.displayName.trim()) {
     actionError.value = '模型 ID 和显示名不能为空。'
     return
@@ -383,6 +431,7 @@ async function saveModel() {
   const reasoningOptions = normalizedReasoningOptions()
   if (!reasoningOptions) return
   busy.value = true
+  refocusDrawerIfFocusLost()
   try {
     const payload = {
       modelId: draft.modelId.trim(),
@@ -405,8 +454,10 @@ async function saveModel() {
         jsonRequest('POST', payload, auth.csrfToken),
       )
     }
+    if (editingId) invalidateProviderTest(modelOwnerID.value, editingId)
     modelEditorOpen.value = false
     await loadProviders()
+    if (editingId) refocusEditTriggerIfFocusLost('model', editingId)
   } catch (error) {
     actionError.value = messageFor(error)
   } finally {
@@ -423,22 +474,66 @@ function addReasoningOption() {
   const configured = new Set(modelDraft.value.reasoningOptions.map((option) => option.reasoning))
   const next = reasoningValues.find((option) => !configured.has(option.value))
   if (!next) return
+  const rowKey = ++reasoningRowKey
   modelDraft.value.reasoningOptions.push({
-    key: ++reasoningRowKey,
+    key: rowKey,
     displayName: next.label,
     reasoning: next.value,
   })
+  focusReasoningRowInput(rowKey)
 }
 
 function moveReasoningOption(index: number, offset: -1 | 1) {
   const target = index + offset
   if (target < 0 || target >= modelDraft.value.reasoningOptions.length) return
   const [option] = modelDraft.value.reasoningOptions.splice(index, 1)
-  if (option) modelDraft.value.reasoningOptions.splice(target, 0, option)
+  if (!option) return
+  modelDraft.value.reasoningOptions.splice(target, 0, option)
+  focusReasoningRowAfterMove(option.key, offset)
 }
 
 function removeReasoningOption(index: number) {
-  modelDraft.value.reasoningOptions.splice(index, 1)
+  const options = modelDraft.value.reasoningOptions
+  const [removed] = options.splice(index, 1)
+  if (!removed) return
+  const neighbor = options[Math.min(index, options.length - 1)]
+  if (neighbor) focusReasoningRowInput(neighbor.key)
+  else focusReasoningAddButton()
+}
+
+// 档位行的增删改会禁用或卸载触发按钮本身，浏览器会把焦点抛回 body，
+// Escape 因此不再经过 dialog keydown；这里在渲染后主动把焦点归还给行内有效控件。
+function reasoningRowElement(key: number): HTMLElement | null {
+  return (
+    dialogRoot.value?.querySelector<HTMLElement>(`.reasoning-editor__row[data-reasoning-key="${key}"]`) ?? null
+  )
+}
+
+function focusReasoningRowInput(key: number) {
+  void nextTick(() => {
+    reasoningRowElement(key)?.querySelector<HTMLElement>('input:not([disabled])')?.focus()
+  })
+}
+
+function focusReasoningRowAfterMove(key: number, offset: -1 | 1) {
+  void nextTick(() => {
+    const row = reasoningRowElement(key)
+    if (!row) return
+    const directionButton = row.querySelectorAll<HTMLButtonElement>('.reasoning-editor__actions button')[
+      offset === -1 ? 0 : 1
+    ]
+    if (directionButton && !directionButton.disabled) {
+      directionButton.focus()
+      return
+    }
+    row.querySelector<HTMLElement>('input:not([disabled])')?.focus()
+  })
+}
+
+function focusReasoningAddButton() {
+  void nextTick(() => {
+    dialogRoot.value?.querySelector<HTMLElement>('.reasoning-editor > button:not([disabled])')?.focus()
+  })
 }
 
 function normalizedReasoningOptions(): ConfiguredReasoningOptionDTO[] | null {
@@ -477,6 +572,7 @@ function normalizedReasoningOptions(): ConfiguredReasoningOptionDTO[] | null {
 }
 
 async function loadEmbeddingSection() {
+  const seq = ++indexRefreshSeq
   embeddingLoading.value = true
   embeddingError.value = ''
   try {
@@ -485,12 +581,16 @@ async function loadEmbeddingSection() {
       apiRequest<KnowledgeIndexStatusDTO>('/api/v1/assistant/index-status'),
       apiRequest<IndexFailureListDTO>('/api/v1/assistant/index-failures?limit=50'),
     ])
+    if (seq !== indexRefreshSeq) return
     setEmbeddingSettings(settings)
     indexStatus.value = status
     indexFailures.value = failures.items
     indexFailureNextCursor.value = failures.nextCursor
+    indexFailureListSeq += 1
+    indexFailuresStale.value = false
+    scheduleIndexPolling()
   } catch (error) {
-    embeddingError.value = messageFor(error)
+    if (seq === indexRefreshSeq) embeddingError.value = messageFor(error)
   } finally {
     embeddingLoading.value = false
   }
@@ -540,9 +640,10 @@ async function testEmbedding() {
   embeddingTestResult.value = null
   const payload = embeddingConnectionPayload()
   if (!payload) return
+  const connectionVersion = embeddingConnectionVersion
   embeddingTesting.value = true
   try {
-    embeddingTestResult.value = await apiRequest<TestEmbeddingSettingsResponseDTO>(
+    const result = await apiRequest<TestEmbeddingSettingsResponseDTO>(
       '/api/v1/assistant/embedding-settings/test',
       jsonRequest(
         'POST',
@@ -555,8 +656,9 @@ async function testEmbedding() {
         auth.csrfToken,
       ),
     )
+    if (connectionVersion === embeddingConnectionVersion) embeddingTestResult.value = result
   } catch (error) {
-    embeddingTestError.value = messageFor(error)
+    if (connectionVersion === embeddingConnectionVersion) embeddingTestError.value = messageFor(error)
   } finally {
     embeddingTesting.value = false
   }
@@ -599,12 +701,7 @@ async function saveEmbedding() {
     await refreshIndexData()
   } catch (error) {
     if (error instanceof ApiError && error.code === 'EMBEDDING_REINDEX_CONFIRMATION_REQUIRED') {
-      try {
-        indexStatus.value = await apiRequest<KnowledgeIndexStatusDTO>('/api/v1/assistant/index-status')
-        pendingReindex.value = payload
-      } catch (refreshError) {
-        embeddingActionError.value = messageFor(refreshError)
-      }
+      if (await refreshIndexData()) pendingReindex.value = payload
     } else {
       embeddingActionError.value = messageFor(error)
     }
@@ -654,18 +751,75 @@ function openEmbeddingDelete() {
   embeddingDeleteOpen.value = true
 }
 
-async function refreshIndexData() {
-  const [status, failures] = await Promise.all([
-    apiRequest<KnowledgeIndexStatusDTO>('/api/v1/assistant/index-status'),
-    apiRequest<IndexFailureListDTO>('/api/v1/assistant/index-failures?limit=50'),
-  ])
-  indexStatus.value = status
-  indexFailures.value = failures.items
-  indexFailureNextCursor.value = failures.nextCursor
+async function refreshIndexData(preserveExpandedFailures = false): Promise<boolean> {
+  const seq = ++indexRefreshSeq
+  try {
+    let status: KnowledgeIndexStatusDTO
+    let failures: IndexFailureListDTO | null = null
+    if (preserveExpandedFailures) {
+      status = await apiRequest<KnowledgeIndexStatusDTO>('/api/v1/assistant/index-status')
+      if (seq !== indexRefreshSeq) return false
+      const listResetNeeded =
+        indexStatus.value?.generation !== status.generation || indexFailures.value.length <= FAILURE_PAGE_SIZE
+      if (listResetNeeded) {
+        failures = await apiRequest<IndexFailureListDTO>('/api/v1/assistant/index-failures?limit=50')
+      } else if (status.counts.failed > (indexStatus.value?.counts.failed ?? 0)) {
+        // indexStatus 此时仍是上次成功应用的状态；中间页的 counts.failed 本就大于已加载长度，只能按计数增长判断新失败。
+        indexFailuresStale.value = true
+      }
+    } else {
+      ;[status, failures] = await Promise.all([
+        apiRequest<KnowledgeIndexStatusDTO>('/api/v1/assistant/index-status'),
+        apiRequest<IndexFailureListDTO>('/api/v1/assistant/index-failures?limit=50'),
+      ])
+    }
+    if (seq !== indexRefreshSeq) return false
+    indexStatus.value = status
+    if (failures) {
+      indexFailures.value = failures.items
+      indexFailureNextCursor.value = failures.nextCursor
+      indexFailureListSeq += 1
+      indexFailuresStale.value = false
+    }
+    indexPollError.value = ''
+    scheduleIndexPolling()
+    return true
+  } catch (error) {
+    if (seq === indexRefreshSeq) indexPollError.value = messageFor(error)
+    return false
+  }
+}
+
+function scheduleIndexPolling() {
+  window.clearTimeout(indexPollTimer)
+  indexPollTimer = 0
+  if (!indexStatus.value || !indexHasPendingWork(indexStatus.value)) return
+  const seq = indexRefreshSeq
+  indexPollTimer = window.setTimeout(() => {
+    indexPollTimer = 0
+    if (seq !== indexRefreshSeq) return
+    void refreshIndexData(true)
+  }, INDEX_POLL_INTERVAL_MS)
+}
+
+function indexHasPendingWork(status: KnowledgeIndexStatusDTO) {
+  if (status.status === 'disabled' || status.status === 'unconfigured') return false
+  return status.status === 'indexing' || status.counts.pending > 0 || status.counts.running > 0
+}
+
+async function refreshIndexAfterError() {
+  indexPollError.value = ''
+  await refreshIndexData()
+}
+
+async function refreshIndexFailures() {
+  indexFailuresStale.value = false
+  await refreshIndexData()
 }
 
 async function loadMoreIndexFailures() {
   if (!indexFailureNextCursor.value || failureLoading.value) return
+  const listSeq = indexFailureListSeq
   failureLoading.value = true
   embeddingActionError.value = ''
   try {
@@ -673,11 +827,12 @@ async function loadMoreIndexFailures() {
     const response = await apiRequest<IndexFailureListDTO>(
       `/api/v1/assistant/index-failures?${query.toString()}`,
     )
+    if (listSeq !== indexFailureListSeq) return
     const existing = new Set(indexFailures.value.map((failure) => failure.fragmentId))
     indexFailures.value.push(...response.items.filter((failure) => !existing.has(failure.fragmentId)))
     indexFailureNextCursor.value = response.nextCursor
   } catch (error) {
-    embeddingActionError.value = messageFor(error)
+    if (listSeq === indexFailureListSeq) embeddingActionError.value = messageFor(error)
   } finally {
     failureLoading.value = false
   }
@@ -730,12 +885,18 @@ function normalizeOptionalLimit(value: number | null | ''): number | null {
   return Number.isSafeInteger(value) && value > 0 ? value : Number.NaN
 }
 
+function invalidateProviderTest(providerID: string, modelID?: string) {
+  if (modelID && testStates.value[providerID]?.modelId !== modelID) return
+  providerTestVersions.value[providerID] = (providerTestVersions.value[providerID] ?? 0) + 1
+}
+
 async function testProvider(provider: ProviderEntry) {
   const modelID = selectedModels.value[provider.id]
   if (!modelID) return
+  const version = providerTestVersions.value[provider.id] ?? 0
   testStates.value = {
     ...testStates.value,
-    [provider.id]: { kind: 'testing', message: '正在执行一次最小 Provider 请求…' },
+    [provider.id]: { version, modelId: modelID, kind: 'testing', message: '正在执行一次最小 Provider 请求…' },
   }
   try {
     const result = await apiRequest<{
@@ -752,6 +913,8 @@ async function testProvider(provider: ProviderEntry) {
     testStates.value = {
       ...testStates.value,
       [provider.id]: {
+        version,
+        modelId: modelID,
         kind: 'success',
         message: `连接成功 · ${result.latencyMs} ms${usage}`,
       },
@@ -761,6 +924,8 @@ async function testProvider(provider: ProviderEntry) {
     testStates.value = {
       ...testStates.value,
       [provider.id]: {
+        version,
+        modelId: modelID,
         kind: credentials ? 'credentials' : 'unavailable',
         message: credentials ? '凭据被 Provider 拒绝，请替换 API Key。' : 'Provider 暂时不可用，请检查地址或稍后重试。',
       },
@@ -791,6 +956,7 @@ async function confirmDelete() {
 }
 
 function onDialogKeydown(event: KeyboardEvent, close: () => void) {
+  if (event.isComposing || event.keyCode === 229) return
   if (event.key === 'Escape' && !busy.value && !embeddingBusy.value) {
     event.preventDefault()
     close()
@@ -890,13 +1056,13 @@ function messageFor(error: unknown) {
                 <td><strong>{{ model.displayName }}</strong><code>{{ model.modelId }}</code></td>
                 <td>{{ formatLimit(model.contextWindow) }} / {{ formatLimit(model.maxOutputTokens) }}</td>
                 <td>
-                  <span :class="{ muted: !model.supportsTools }">工具</span>
-                  <span :class="{ muted: !model.supportsVision }">视觉</span>
+                  <span :class="{ muted: !model.supportsTools }">工具：{{ model.supportsTools ? '支持' : '不支持' }}</span>
+                  <span :class="{ muted: !model.supportsVision }">视觉：{{ model.supportsVision ? '支持' : '不支持' }}</span>
                   <span v-if="model.reasoningOptions?.length">思考 {{ model.reasoningOptions.length }}</span>
                   <span v-if="!model.enabled" class="muted">停用</span>
                 </td>
                 <td class="model-actions">
-                  <button type="button" aria-label="编辑模型" @click="openEditModel(provider, model)"><UiIcon name="pencil" :size="16" /></button>
+                  <button type="button" aria-label="编辑模型" :data-edit-model="model.id" @click="openEditModel(provider, model)"><UiIcon name="pencil" :size="16" /></button>
                   <button type="button" aria-label="删除模型" @click="pendingDelete = { kind: 'model', id: model.id, label: model.displayName }"><UiIcon name="trash-2" :size="16" /></button>
                 </td>
               </tr>
@@ -914,11 +1080,11 @@ function messageFor(error: unknown) {
             <option value="">选择模型</option>
             <option v-for="model in provider.models.filter((item) => item.enabled)" :key="model.id" :value="model.id">{{ model.displayName }}</option>
           </select>
-          <UiButton :disabled="!selectedModels[provider.id] || testStates[provider.id]?.kind === 'testing'" @click="testProvider(provider)">
+          <UiButton :disabled="!provider.enabled || !selectedModels[provider.id] || testStates[provider.id]?.kind === 'testing'" @click="testProvider(provider)">
             {{ testStates[provider.id]?.kind === 'testing' ? '测试中…' : '测试连接' }}
           </UiButton>
           <p
-            v-if="testStates[provider.id]"
+            v-if="testStates[provider.id] && testStates[provider.id]?.modelId === selectedModels[provider.id] && testStates[provider.id]?.version === (providerTestVersions[provider.id] ?? 0)"
             class="connection-result"
             :class="`connection-result--${testStates[provider.id]?.kind}`"
             role="status"
@@ -930,7 +1096,7 @@ function messageFor(error: unknown) {
       </div>
 
       <footer class="provider-card__footer">
-        <UiButton variant="secondary" @click="openEditProvider(provider)"><UiIcon name="pencil" /> 编辑与替换密钥</UiButton>
+        <UiButton variant="secondary" :data-edit-provider="provider.id" @click="openEditProvider(provider)"><UiIcon name="pencil" /> 编辑与替换密钥</UiButton>
         <UiButton variant="danger" @click="pendingDelete = { kind: 'provider', id: provider.id, label: provider.displayName }">删除 Provider</UiButton>
       </footer>
     </article>
@@ -962,33 +1128,33 @@ function messageFor(error: unknown) {
           <div class="settings-field-row">
             <label class="settings-field">
               <span>显示名</span>
-              <input v-model="embeddingDraft.displayName" required maxlength="120" placeholder="团队知识向量" />
+              <input v-model="embeddingDraft.displayName" required maxlength="120" placeholder="团队知识向量" :readonly="embeddingBusy" />
             </label>
             <label class="settings-field">
               <span>上游 Embedding 模型 ID</span>
-              <input v-model="embeddingDraft.modelId" required maxlength="200" autocomplete="off" placeholder="text-embedding-3-small" />
+              <input v-model="embeddingDraft.modelId" required maxlength="200" autocomplete="off" placeholder="text-embedding-3-small" :readonly="embeddingBusy" />
             </label>
           </div>
           <label class="settings-field">
             <span>OpenAI-compatible Base URL</span>
-            <input v-model="embeddingDraft.baseUrl" required maxlength="2048" inputmode="url" placeholder="https://provider.example/v1" />
+            <input v-model="embeddingDraft.baseUrl" required maxlength="2048" inputmode="url" placeholder="https://provider.example/v1" :readonly="embeddingBusy" />
             <small>系统固定调用 /embeddings，不跟随重定向。</small>
           </label>
           <div class="settings-field-row">
             <label class="settings-field">
               <span>{{ embeddingSettings?.apiKeyConfigured ? '替换独立 API Key（留空则保持）' : '独立 API Key' }}</span>
-              <input v-model="embeddingDraft.apiKey" type="password" :required="!embeddingSettings?.apiKeyConfigured" maxlength="8192" autocomplete="new-password" />
+              <input v-model="embeddingDraft.apiKey" type="password" :required="!embeddingSettings?.apiKeyConfigured" maxlength="8192" autocomplete="new-password" :readonly="embeddingBusy" />
               <small v-if="embeddingSettings?.apiKeyConfigured">已保存密钥末尾：••••{{ embeddingSettings.apiKeyTail || '未知' }}；页面不会回显明文。</small>
               <small v-else>与聊天 Provider 密钥分开保存，保存后不可再次读取明文。</small>
             </label>
             <label class="settings-field">
               <span>向量维度</span>
-              <input v-model.number="embeddingDraft.dimensions" required type="number" min="1" max="16000" step="1" inputmode="numeric" />
+              <input v-model.number="embeddingDraft.dimensions" required type="number" min="1" max="16000" step="1" inputmode="numeric" :readonly="embeddingBusy" />
               <small>请求维度与 Provider 实际返回必须完全一致。</small>
             </label>
           </div>
           <label class="settings-check embedding-form__enabled">
-            <input v-model="embeddingDraft.enabled" type="checkbox" />
+            <input v-model="embeddingDraft.enabled" type="checkbox" :disabled="embeddingBusy" />
             <span>启用知识库 Embedding 和持续索引</span>
           </label>
           <div v-if="embeddingDraft.enabled" class="embedding-consent" role="note">
@@ -1041,11 +1207,21 @@ function messageFor(error: unknown) {
             <div><dt>已排除</dt><dd>{{ indexStatus.counts.excluded }}</dd></div>
           </dl>
           <p v-if="indexStatus.lastErrorCode" class="index-status__error">最近错误：<code>{{ indexStatus.lastErrorCode }}</code></p>
+          <div v-if="indexPollError" class="settings-notice settings-notice--danger index-status__poll-error" role="alert">
+            <UiIcon name="triangle-alert" />
+            <span>自动刷新索引状态失败：{{ indexPollError }}</span>
+            <UiButton variant="secondary" @click="refreshIndexAfterError">刷新索引状态</UiButton>
+          </div>
           <p v-if="indexStatus.status !== 'ready'" class="index-status__boundary">知识库当前不可用；知识助手仍可进行一般交流，但不会把零来源描述为“没有相关资料”。</p>
         </section>
 
         <section v-if="indexFailures.length" class="index-failures" aria-labelledby="index-failures-heading">
-          <header><div><h4 id="index-failures-heading">失败片段</h4><p>只重试明确失败的片段，不提供手动全库重建。</p></div></header>
+          <header>
+            <div><h4 id="index-failures-heading">失败片段</h4><p>只重试明确失败的片段，不提供手动全库重建。</p></div>
+            <UiButton v-if="indexFailuresStale" variant="ghost" title="存在未展示的新失败片段，刷新后显示最新列表" @click="refreshIndexFailures">
+              有新失败 · 刷新列表
+            </UiButton>
+          </header>
           <ul>
             <li v-for="failure in indexFailures" :key="failure.fragmentId">
               <div>
@@ -1099,20 +1275,20 @@ function messageFor(error: unknown) {
       <section ref="dialogRoot" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="provider-editor-title" @keydown="onDialogKeydown($event, closeProviderEditor)">
         <header>
           <div><h2 id="provider-editor-title">{{ editingProvider ? '编辑 Provider' : '新增 Provider' }}</h2></div>
-          <button class="settings-icon-button" type="button" aria-label="关闭" @click="closeProviderEditor"><UiIcon name="x" /></button>
+          <button class="settings-icon-button" type="button" aria-label="关闭" :disabled="busy" @click="closeProviderEditor"><UiIcon name="x" /></button>
         </header>
         <div class="settings-drawer__body">
           <form id="provider-form" class="settings-form" @submit.prevent="saveProvider">
-            <label class="settings-field"><span>稳定 Provider Key</span><input v-model="providerDraft.providerKey" required maxlength="64" pattern="[a-z0-9][a-z0-9_-]*" :disabled="editingProvider" autocomplete="off" /><small>创建后不可修改，用于稳定标识历史配置。</small></label>
-            <label class="settings-field"><span>显示名</span><input v-model="providerDraft.displayName" required maxlength="120" /></label>
-            <label class="settings-field"><span>协议</span><select v-model="providerDraft.protocol"><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label>
-            <label class="settings-field"><span>Base URL</span><input v-model="providerDraft.baseUrl" required maxlength="2048" inputmode="url" placeholder="https://provider.example/v1" /><small>填写协议根地址；系统只拼接固定 endpoint，且不跟随重定向。</small></label>
-            <label class="settings-field"><span>{{ editingProvider ? '替换 API Key（留空则保持）' : 'API Key' }}</span><input v-model="providerDraft.apiKey" type="password" :required="!editingProvider" maxlength="8192" autocomplete="new-password" /><small>保存后不可再次读取明文。</small></label>
-            <label class="settings-check"><input v-model="providerDraft.enabled" type="checkbox" /><span>允许该 Provider 接受连接测试与新任务</span></label>
+            <label class="settings-field"><span>稳定 Provider Key</span><input v-model="providerDraft.providerKey" required maxlength="64" pattern="[a-z0-9][a-z0-9_-]*" :disabled="editingProvider" :readonly="busy" autocomplete="off" /><small>创建后不可修改，用于稳定标识历史配置。</small></label>
+            <label class="settings-field"><span>显示名</span><input v-model="providerDraft.displayName" required maxlength="120" :readonly="busy" /></label>
+            <label class="settings-field"><span>协议</span><select v-model="providerDraft.protocol" :disabled="busy"><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label>
+            <label class="settings-field"><span>Base URL</span><input v-model="providerDraft.baseUrl" required maxlength="2048" inputmode="url" placeholder="https://provider.example/v1" :readonly="busy" /><small>填写协议根地址；系统只拼接固定 endpoint，且不跟随重定向。</small></label>
+            <label class="settings-field"><span>{{ editingProvider ? '替换 API Key（留空则保持）' : 'API Key' }}</span><input v-model="providerDraft.apiKey" type="password" :required="!editingProvider" maxlength="8192" autocomplete="new-password" :readonly="busy" /><small>保存后不可再次读取明文。</small></label>
+            <label class="settings-check"><input v-model="providerDraft.enabled" type="checkbox" :disabled="busy" /><span>允许该 Provider 接受连接测试与新任务</span></label>
             <div v-if="actionError" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" />{{ actionError }}</div>
           </form>
         </div>
-        <footer><UiButton variant="ghost" @click="closeProviderEditor">取消</UiButton><UiButton type="submit" form="provider-form" variant="primary" :disabled="busy">{{ busy ? '正在保存…' : '保存 Provider' }}</UiButton></footer>
+        <footer><UiButton variant="ghost" :disabled="busy" @click="closeProviderEditor">取消</UiButton><UiButton type="submit" form="provider-form" variant="primary" :disabled="busy">{{ busy ? '正在保存…' : '保存 Provider' }}</UiButton></footer>
       </section>
     </div>
 
@@ -1120,46 +1296,46 @@ function messageFor(error: unknown) {
       <section ref="dialogRoot" class="settings-drawer settings-drawer--model" role="dialog" aria-modal="true" aria-labelledby="model-editor-title" @keydown="onDialogKeydown($event, closeModelEditor)">
         <header>
           <div><p class="settings-kicker">{{ modelOwner?.displayName }}</p><h2 id="model-editor-title">{{ editingModel ? '编辑模型' : '添加模型' }}</h2></div>
-          <button class="settings-icon-button" type="button" aria-label="关闭" @click="closeModelEditor"><UiIcon name="x" /></button>
+          <button class="settings-icon-button" type="button" aria-label="关闭" :disabled="busy" @click="closeModelEditor"><UiIcon name="x" /></button>
         </header>
         <div class="settings-drawer__body">
           <form id="model-form" class="settings-form" @submit.prevent="saveModel">
-            <label class="settings-field"><span>上游模型 ID</span><input v-model="modelDraft.modelId" required maxlength="200" autocomplete="off" /></label>
-            <label class="settings-field"><span>显示名</span><input v-model="modelDraft.displayName" required maxlength="120" /></label>
+            <label class="settings-field"><span>上游模型 ID</span><input v-model="modelDraft.modelId" required maxlength="200" autocomplete="off" :readonly="busy" /></label>
+            <label class="settings-field"><span>显示名</span><input v-model="modelDraft.displayName" required maxlength="120" :readonly="busy" /></label>
             <div class="settings-field-row">
-              <label class="settings-field"><span>上下文窗口</span><input v-model.number="modelDraft.contextWindow" type="number" min="1" placeholder="待配置" /></label>
-              <label class="settings-field"><span>最大输出 Token</span><input v-model.number="modelDraft.maxOutputTokens" type="number" min="1" placeholder="待配置" /></label>
+              <label class="settings-field"><span>上下文窗口</span><input v-model.number="modelDraft.contextWindow" type="number" min="1" placeholder="待配置" :readonly="busy" /></label>
+              <label class="settings-field"><span>最大输出 Token</span><input v-model.number="modelDraft.maxOutputTokens" type="number" min="1" placeholder="待配置" :readonly="busy" /></label>
             </div>
             <fieldset class="settings-fieldset reasoning-editor">
               <legend>知识助手思考档位</legend>
               <p>“不思考”由系统固定提供；这里只配置模型实际支持的附加档位，顺序会用于选择器。</p>
               <div v-if="modelDraft.reasoningOptions.length" class="reasoning-editor__rows">
-                <div v-for="(option, index) in modelDraft.reasoningOptions" :key="option.key" class="reasoning-editor__row">
+                <div v-for="(option, index) in modelDraft.reasoningOptions" :key="option.key" :data-reasoning-key="option.key" class="reasoning-editor__row">
                   <label class="settings-field">
                     <span>显示名称</span>
-                    <input v-model="option.displayName" maxlength="40" autocomplete="off" />
+                    <input v-model="option.displayName" maxlength="40" autocomplete="off" :readonly="busy" />
                   </label>
                   <label class="settings-field">
                     <span>档位值</span>
-                    <select v-model="option.reasoning">
+                    <select v-model="option.reasoning" :disabled="busy">
                       <option v-for="entry in reasoningValues" :key="entry.value" :value="entry.value">{{ entry.label }}</option>
                     </select>
                   </label>
                   <div class="reasoning-editor__actions" aria-label="调整档位顺序">
-                    <button type="button" :disabled="index === 0" :aria-label="`上移${option.displayName || '思考档位'}`" title="上移" @click="moveReasoningOption(index, -1)"><UiIcon name="chevron-left" :size="16" /></button>
-                    <button type="button" :disabled="index === modelDraft.reasoningOptions.length - 1" :aria-label="`下移${option.displayName || '思考档位'}`" title="下移" @click="moveReasoningOption(index, 1)"><UiIcon name="chevron-right" :size="16" /></button>
-                    <button type="button" :aria-label="`删除${option.displayName || '思考档位'}`" title="删除档位" @click="removeReasoningOption(index)"><UiIcon name="trash-2" :size="16" /></button>
+                    <button type="button" :disabled="busy || index === 0" :aria-label="`上移${option.displayName || '思考档位'}`" title="上移" @click="moveReasoningOption(index, -1)"><UiIcon name="chevron-left" :size="16" /></button>
+                    <button type="button" :disabled="busy || index === modelDraft.reasoningOptions.length - 1" :aria-label="`下移${option.displayName || '思考档位'}`" title="下移" @click="moveReasoningOption(index, 1)"><UiIcon name="chevron-right" :size="16" /></button>
+                    <button type="button" :disabled="busy" :aria-label="`删除${option.displayName || '思考档位'}`" title="删除档位" @click="removeReasoningOption(index)"><UiIcon name="trash-2" :size="16" /></button>
                   </div>
                 </div>
               </div>
               <p v-else class="reasoning-editor__empty">未配置附加思考档位；知识助手只显示“不思考”。</p>
-              <UiButton variant="secondary" :disabled="modelDraft.reasoningOptions.length >= 6" @click="addReasoningOption"><UiIcon name="plus" :size="16" />添加思考档位</UiButton>
+              <UiButton variant="secondary" :disabled="busy || modelDraft.reasoningOptions.length >= 6" @click="addReasoningOption"><UiIcon name="plus" :size="16" />添加思考档位</UiButton>
             </fieldset>
-            <fieldset class="settings-fieldset"><legend>模型能力</legend><label class="settings-check"><input v-model="modelDraft.supportsTools" type="checkbox" /><span>支持工具调用（可选；不可用时改用 JSON）</span></label><label class="settings-check"><input v-model="modelDraft.supportsVision" type="checkbox" /><span>支持图片输入</span></label><label class="settings-check"><input v-model="modelDraft.enabled" type="checkbox" /><span>启用模型</span></label></fieldset>
+            <fieldset class="settings-fieldset"><legend>模型能力</legend><label class="settings-check"><input v-model="modelDraft.supportsTools" type="checkbox" :disabled="busy" /><span>支持工具调用（可选；不可用时改用 JSON）</span></label><label class="settings-check"><input v-model="modelDraft.supportsVision" type="checkbox" :disabled="busy" /><span>支持图片输入</span></label><label class="settings-check"><input v-model="modelDraft.enabled" type="checkbox" :disabled="busy" /><span>启用模型</span></label></fieldset>
             <div v-if="actionError" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" />{{ actionError }}</div>
           </form>
         </div>
-        <footer><UiButton variant="ghost" @click="closeModelEditor">取消</UiButton><UiButton type="submit" form="model-form" variant="primary" :disabled="busy">{{ busy ? '正在保存…' : '保存模型' }}</UiButton></footer>
+        <footer><UiButton variant="ghost" :disabled="busy" @click="closeModelEditor">取消</UiButton><UiButton type="submit" form="model-form" variant="primary" :disabled="busy">{{ busy ? '正在保存…' : '保存模型' }}</UiButton></footer>
       </section>
     </div>
 
@@ -1225,7 +1401,7 @@ function messageFor(error: unknown) {
 .model-table td:first-child code { margin-top: 2px; color: var(--text-muted); font-size: 11px; }
 .model-table td:nth-child(2) { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; }
 .model-table td:nth-child(3) span { display: inline-block; margin-right: var(--space-1); padding: 2px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 10px; }
-.model-table td:nth-child(3) .muted { background: var(--bg-code); color: var(--text-muted); text-decoration: line-through; }
+.model-table td:nth-child(3) .muted { background: var(--bg-code); color: var(--text-muted); }
 .model-actions { white-space: nowrap; }
 .model-actions button { border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; }
 .model-actions button:last-child:hover { color: var(--danger); }
@@ -1288,6 +1464,7 @@ function messageFor(error: unknown) {
 .index-counts dt { color: var(--text-muted); font-size: 10px; }
 .index-counts dd { margin: var(--space-1) 0 0; color: var(--text-primary); font-family: var(--font-mono); font-size: 18px; }
 .index-status__error { margin-top: var(--space-3) !important; color: var(--danger); font-size: 12px; }
+.index-status__poll-error { flex-wrap: wrap; margin-top: var(--space-3); }
 .index-status__boundary { margin-top: var(--space-3) !important; padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border-subtle)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--warning) 8%, transparent); color: var(--text-secondary); line-height: 1.55; }
 .index-failures ul { display: grid; gap: var(--space-2); margin: var(--space-4) 0 var(--space-3); padding: 0; list-style: none; }
 .index-failures li { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-code); }
@@ -1322,6 +1499,8 @@ function messageFor(error: unknown) {
   .embedding-actions { grid-template-columns: 1fr; }
   .embedding-actions .button { width: 100%; }
   .index-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .index-status__poll-error { align-items: stretch; flex-direction: column; }
+  .index-status__poll-error .button { width: 100%; margin-left: 0; }
   .index-status > header,
   .index-failures > header,
   .index-failures li,

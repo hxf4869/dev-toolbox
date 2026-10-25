@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, onBeforeUnmount, ref } from 'vue'
 
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
@@ -15,6 +15,7 @@ const props = defineProps<{ content: ArtifactContent; attachments: AttachmentEnt
 const emit = defineEmits<{ source: [fragmentId: string] }>()
 const copiedKey = ref('')
 const copyErrorKey = ref('')
+let feedbackTimer: number | undefined
 const revealedValues = ref(new Set<string>())
 
 // Placeholder tokens the user should fill before copying. `${var}` stays out on
@@ -24,9 +25,20 @@ const revealedValues = ref(new Set<string>())
 // (brace expansion like `{a,b}`; placeholders never carry commas).
 const PLACEHOLDER_PATTERN = /<[^<>\n{} ]{1,80}>|\{[^<>\n{}$,]{1,80}\}/g
 
-const fillState = ref<{ key: string; command: string; tokens: string[] } | null>(null)
+type FillState = { key: string; command: string; tokens: string[] }
+
+const fillState = ref<FillState | null>(null)
 const fillValues = ref<Record<string, string>>({})
 const fillError = ref(false)
+const fillDialog = ref<HTMLElement | null>(null)
+let dialogTrigger: HTMLElement | null = null
+
+onBeforeUnmount(() => {
+  window.clearTimeout(feedbackTimer)
+  // 晚到的复制结果和焦点交接都按 fillState 归属判断；卸载后不再属于任何弹窗。
+  fillState.value = null
+  dialogTrigger = null
+})
 
 function isBlock<T extends KnownArtifactBlock['type']>(
   block: ArtifactBlock,
@@ -43,29 +55,46 @@ function commandPlaceholders(command: string): string[] {
   return Array.from(new Set(command.match(PLACEHOLDER_PATTERN) ?? []))
 }
 
+// 单一反馈 timer：再次成功重新计满 1600ms，不被上一次的到期提前清掉；成功同时清掉旧失败，避免到期后复现。
+function showCopied(key: string) {
+  copyErrorKey.value = ''
+  copiedKey.value = key
+  window.clearTimeout(feedbackTimer)
+  feedbackTimer = window.setTimeout(() => {
+    if (copiedKey.value === key) copiedKey.value = ''
+  }, 1600)
+}
+
 async function copyExact(key: string, value: string) {
   copyErrorKey.value = ''
   try {
     await navigator.clipboard.writeText(value)
-    copiedKey.value = key
-    window.setTimeout(() => {
-      if (copiedKey.value === key) copiedKey.value = ''
-    }, 1600)
+    showCopied(key)
   } catch {
     copiedKey.value = ''
     copyErrorKey.value = key
   }
 }
 
-function requestCommandCopy(key: string, command: string) {
+function requestCommandCopy(key: string, command: string, event: Event) {
   const tokens = commandPlaceholders(command)
   if (!tokens.length) {
     void copyExact(key, command)
     return
   }
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
   fillError.value = false
   fillValues.value = Object.fromEntries(tokens.map((token) => [token, '']))
   fillState.value = { key, command, tokens }
+  // ref 读回的是响应式代理；归属比较必须用同一个代理，不能用刚赋值的原始对象。
+  void focusFillDialog(fillState.value)
+}
+
+async function focusFillDialog(state: FillState) {
+  await nextTick()
+  // 渲染期间已关闭或换成别的弹窗时，不再替它聚焦。
+  if (fillState.value !== state) return
+  fillDialog.value?.querySelector<HTMLElement>('input')?.focus()
 }
 
 function substitutedCommand(): string {
@@ -81,29 +110,68 @@ function substitutedCommand(): string {
 async function copyFilledCommand() {
   const state = fillState.value
   if (!state) return
+  const text = substitutedCommand()
   fillError.value = false
+  let failed = false
   try {
-    await navigator.clipboard.writeText(substitutedCommand())
-    copiedKey.value = state.key
-    fillState.value = null
-    window.setTimeout(() => {
-      if (copiedKey.value === state.key) copiedKey.value = ''
-    }, 1600)
+    await navigator.clipboard.writeText(text)
   } catch {
-    fillError.value = true
+    failed = true
   }
+  // 结果只属于发起时的弹窗和预览文本：期间取消、重开或改了参数，就不再关弹窗、不报旧错。
+  if (fillState.value !== state || substitutedCommand() !== text) return
+  if (failed) {
+    fillError.value = true
+    return
+  }
+  showCopied(state.key)
+  closeFillDialog()
 }
 
 async function copyRawCommand() {
   if (!fillState.value) return
   const { key, command } = fillState.value
-  fillState.value = null
+  closeFillDialog()
   await copyExact(key, command)
 }
 
 function closeFillDialog() {
   fillState.value = null
   fillError.value = false
+  void returnFocusToTrigger()
+}
+
+async function returnFocusToTrigger() {
+  const trigger = dialogTrigger
+  dialogTrigger = null
+  await nextTick()
+  // 关闭后又开了新弹窗时不抢它的焦点；触发按钮已不在文档中则无处可回。
+  if (fillState.value || !trigger?.isConnected) return
+  trigger.focus()
+}
+
+function onFillDialogKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    // 输入法组合中的 Escape（isComposing，或 Safari 的 keyCode 229）留给输入法。
+    if (event.isComposing || event.keyCode === 229) return
+    event.preventDefault()
+    closeFillDialog()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const dialog = event.currentTarget as HTMLElement
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+  )
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 function copyLabel(key: string) {
@@ -161,7 +229,7 @@ function unknownType(block: ArtifactBlock) {
         </template>
 
         <template v-else-if="isBlock(block, 'command')">
-          <header class="code-header"><span>{{ block.shell }} · 命令</span><button type="button" @click="requestCommandCopy(block.id, block.command)"><UiIcon name="copy" :size="14" /> {{ copyLabel(block.id) }}</button></header>
+          <header class="code-header"><span>{{ block.shell }} · 命令</span><button type="button" @click="requestCommandCopy(block.id, block.command, $event)"><UiIcon name="copy" :size="14" /> {{ copyLabel(block.id) }}</button></header>
           <p v-if="block.description" class="block-description">{{ block.description }}</p>
           <pre class="code-content" tabindex="0"><code>{{ block.command }}</code></pre>
           <p class="model-caution">模型整理，执行前请核对原文。</p>
@@ -174,7 +242,7 @@ function unknownType(block: ArtifactBlock) {
               <h5>{{ step.title }}</h5>
               <p v-if="step.instruction">{{ step.instruction }}</p>
               <section v-for="(command, commandIndex) in step.commands" :key="`${block.id}-${stepIndex}-${commandIndex}`" class="nested-command">
-                <header class="code-header"><span>{{ command.shell }}</span><button type="button" @click="requestCommandCopy(`${block.id}-${stepIndex}-${commandIndex}`, command.command)"><UiIcon name="copy" :size="14" /> {{ copyLabel(`${block.id}-${stepIndex}-${commandIndex}`) }}</button></header>
+                <header class="code-header"><span>{{ command.shell }}</span><button type="button" @click="requestCommandCopy(`${block.id}-${stepIndex}-${commandIndex}`, command.command, $event)"><UiIcon name="copy" :size="14" /> {{ copyLabel(`${block.id}-${stepIndex}-${commandIndex}`) }}</button></header>
                 <p v-if="command.description" class="block-description">{{ command.description }}</p>
                 <pre class="code-content" tabindex="0"><code>{{ command.command }}</code></pre>
               </section>
@@ -236,7 +304,7 @@ function unknownType(block: ArtifactBlock) {
 
     <Teleport to="body">
       <div v-if="fillState" class="fill-overlay" @click.self="closeFillDialog">
-        <section class="fill-dialog" role="dialog" aria-modal="true" aria-labelledby="fill-command-title" @keydown.escape="closeFillDialog">
+        <section ref="fillDialog" class="fill-dialog" role="dialog" aria-modal="true" aria-labelledby="fill-command-title" @keydown="onFillDialogKeydown">
           <UiIcon name="circle-help" :size="26" />
           <h2 id="fill-command-title">命令包含参数占位符</h2>
           <p>先填写参数再复制。这里只复制命令，不会执行；留空的占位符会按原样保留。</p>

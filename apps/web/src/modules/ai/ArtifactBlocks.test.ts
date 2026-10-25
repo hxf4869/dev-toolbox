@@ -1,6 +1,8 @@
 import { mount } from '@vue/test-utils'
 import { flushPromises } from '@vue/test-utils'
+import type { VueWrapper } from '@vue/test-utils'
 import { vi } from 'vitest'
+import { nextTick } from 'vue'
 
 import ArtifactBlocks from './ArtifactBlocks.vue'
 import type { ArtifactContent } from './contracts'
@@ -14,6 +16,10 @@ describe('ArtifactBlocks', () => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
     Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('renders every v1 block with safe fixed components and preserves an unknown-version fallback', async () => {
@@ -183,7 +189,289 @@ describe('ArtifactBlocks', () => {
     expect(dialog?.textContent).toContain('<output_path>')
     wrapper.unmount()
   })
+
+  it('traps focus in the fill dialog, ignores IME escapes, and returns focus to the triggering button', async () => {
+    const wrapper = mount(ArtifactBlocks, {
+      props: { content: artifactContent(), attachments: [] },
+      attachTo: document.body,
+    })
+    const trigger = blockCopyButton(wrapper, '带占位符')
+    trigger.element.focus()
+    await trigger.trigger('click')
+    await flushPromises()
+
+    // 打开后焦点落在首个参数输入上。
+    const input = dialogInput()
+    expect(document.activeElement).toBe(input)
+
+    // Tab 双向环绕：末尾按钮 Tab 回首输入，首输入 Shift+Tab 到末尾按钮。
+    const last = dialogButton('复制已填写命令')
+    last.focus()
+    pressKey(last, { key: 'Tab' })
+    expect(document.activeElement).toBe(input)
+    pressKey(input, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+
+    // 输入法组合中的 Escape（isComposing，或 Safari 的 keyCode 229）不关闭弹窗、不丢输入。
+    input.focus()
+    await typeInto(input, 'ime-draft')
+    pressKey(input, { key: 'Escape', isComposing: true })
+    await flushPromises()
+    expect(fillDialog()).not.toBeNull()
+    expect(dialogInput().value).toBe('ime-draft')
+    pressKey(input, { key: 'Escape', isComposing: false, keyCode: 229 })
+    await flushPromises()
+    expect(fillDialog()).not.toBeNull()
+    expect(dialogInput().value).toBe('ime-draft')
+
+    // 普通 Escape 关闭并把焦点交还原按钮，且没有任何剪贴板写入。
+    pressKey(input, { key: 'Escape' })
+    await flushPromises()
+    expect(fillDialog()).toBeNull()
+    expect(document.activeElement).toBe(trigger.element)
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
+
+    // 取消按钮同样回焦原按钮。
+    await trigger.trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(dialogInput())
+    const cancel = dialogButton('取消')
+    cancel.focus()
+    cancel.click()
+    await flushPromises()
+    expect(fillDialog()).toBeNull()
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+
+    // 嵌套 command_steps 的复制按钮作为触发器时同样回焦。
+    const nested = mount(ArtifactBlocks, {
+      props: { content: nestedPlaceholderContent(), attachments: [] },
+      attachTo: document.body,
+    })
+    const nestedTrigger = nested.find<HTMLButtonElement>('.nested-command button')
+    nestedTrigger.element.focus()
+    await nestedTrigger.trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(dialogInput())
+    pressKey(dialogInput(), { key: 'Escape' })
+    await flushPromises()
+    expect(fillDialog()).toBeNull()
+    expect(document.activeElement).toBe(nestedTrigger.element)
+    nested.unmount()
+  })
+
+  it('binds deferred fill-copy results to the dialog and preview they were started from', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const wrapper = mount(ArtifactBlocks, {
+      props: { content: artifactContent(), attachments: [] },
+      attachTo: document.body,
+    })
+    const trigger = blockCopyButton(wrapper, '带占位符')
+
+    // 旧成功：挂起期间取消并重开、输入新值后才到达，不得关闭新弹窗。
+    const first = deferred()
+    writeText.mockImplementationOnce(() => first.promise)
+    trigger.element.focus()
+    await trigger.trigger('click')
+    await flushPromises()
+    await typeInto(dialogInput(), 'v1')
+    await clickButton(dialogButton('复制已填写命令'))
+    expect(writeText).toHaveBeenLastCalledWith('psql "v1" -c "select 1"')
+    await clickButton(dialogButton('取消'))
+    await flushPromises()
+    expect(fillDialog()).toBeNull()
+    await trigger.trigger('click')
+    await flushPromises()
+    await typeInto(dialogInput(), 'v2')
+    first.resolve()
+    await flushPromises()
+    expect(fillDialog()).not.toBeNull()
+    expect(dialogInput().value).toBe('v2')
+    expect(document.querySelector('.fill-error')).toBeNull()
+
+    // 旧失败：同样不得进入重开后的新弹窗。
+    const second = deferred()
+    writeText.mockImplementationOnce(() => second.promise)
+    await clickButton(dialogButton('复制已填写命令'))
+    expect(writeText).toHaveBeenLastCalledWith('psql "v2" -c "select 1"')
+    await clickButton(dialogButton('取消'))
+    await flushPromises()
+    await trigger.trigger('click')
+    await flushPromises()
+    await typeInto(dialogInput(), 'v3')
+    second.reject(new Error('denied'))
+    await flushPromises()
+    expect(fillDialog()).not.toBeNull()
+    expect(document.querySelector('.fill-error')).toBeNull()
+    expect(dialogInput().value).toBe('v3')
+
+    // 等待期间改了参数：旧成功既不关闭弹窗，也不丢弃新值。
+    const third = deferred()
+    writeText.mockImplementationOnce(() => third.promise)
+    await clickButton(dialogButton('复制已填写命令'))
+    expect(writeText).toHaveBeenLastCalledWith('psql "v3" -c "select 1"')
+    await typeInto(dialogInput(), 'v4')
+    third.resolve()
+    await flushPromises()
+    expect(fillDialog()).not.toBeNull()
+    expect(dialogInput().value).toBe('v4')
+    expect(document.querySelector('.fill-preview')?.textContent).toBe('psql "v4" -c "select 1"')
+
+    // 当前弹窗的失败可显式重试；成功后关闭并回焦原按钮。
+    writeText.mockRejectedValueOnce(new Error('denied'))
+    await clickButton(dialogButton('复制已填写命令'))
+    await flushPromises()
+    expect(document.querySelector('.fill-error')?.textContent).toBe('复制失败，请重试。')
+    expect(dialogInput().value).toBe('v4')
+    await clickButton(dialogButton('复制已填写命令'))
+    await flushPromises()
+    expect(writeText).toHaveBeenLastCalledWith('psql "v4" -c "select 1"')
+    expect(fillDialog()).toBeNull()
+    expect(document.activeElement).toBe(trigger.element)
+    expect(trigger.text()).toBe('已复制')
+    wrapper.unmount()
+  })
+
+  it('does not resurface an as-is copy failure after a later filled copy of the same command succeeds', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const wrapper = mount(ArtifactBlocks, {
+      props: { content: artifactContent(), attachments: [] },
+      attachTo: document.body,
+    })
+    const trigger = blockCopyButton(wrapper, '带占位符')
+    // SafeMarkdown 自带同名 status；只读 ArtifactBlocks 直接子级的那一个。
+    const status = () => wrapper.get('.artifact-document > [role="status"]').text()
+
+    writeText.mockRejectedValueOnce(new Error('denied'))
+    trigger.element.focus()
+    await trigger.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    await clickButton(dialogButton('按原样复制'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writeText).toHaveBeenLastCalledWith('psql "<database-url>" -c "select 1"')
+    expect(fillDialog()).toBeNull()
+    expect(trigger.text()).toBe('复制失败，重试')
+    expect(status()).toBe('复制失败，请重试')
+
+    await trigger.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    await typeInto(dialogInput(), 'postgres://db')
+    await clickButton(dialogButton('复制已填写命令'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writeText).toHaveBeenLastCalledWith('psql "postgres://db" -c "select 1"')
+    expect(fillDialog()).toBeNull()
+    expect(trigger.text()).toBe('已复制')
+    expect(status()).toBe('内容已精确复制')
+
+    // 成功反馈到期后回到普通“复制”，旧的失败不得重新出现。
+    await vi.advanceTimersByTimeAsync(1600)
+    expect(trigger.text()).toBe('复制')
+    expect(status()).toBe('')
+    wrapper.unmount()
+  })
+
+  it('gives a repeated copy of the same code block a full fresh feedback window', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const wrapper = mount(ArtifactBlocks, {
+      props: { content: artifactContent(), attachments: [] },
+      attachTo: document.body,
+    })
+    const copyButton = blockCopyButton(wrapper, 'ts · 示例')
+
+    copyButton.element.focus()
+    await copyButton.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writeText).toHaveBeenLastCalledWith('const ok = true')
+    expect(copyButton.text()).toBe('已复制')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await copyButton.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writeText).toHaveBeenCalledTimes(2)
+    expect(copyButton.text()).toBe('已复制')
+
+    // 第一次反馈的 1600ms 到期点不得清掉第二次反馈。
+    await vi.advanceTimersByTimeAsync(600)
+    expect(copyButton.text()).toBe('已复制')
+    // 第二次反馈自身满 1600ms 后才复位。
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(copyButton.text()).toBe('复制')
+    wrapper.unmount()
+  })
 })
+
+// keyCode 直接放进 init 在本仓库 jsdom 下可用（同 SupplementDrawer.saving-keyboard.test.ts）。
+function pressKey(target: Element, init: KeyboardEventInit & { keyCode?: number }) {
+  target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }))
+}
+
+// 浏览器点击会先把焦点交给按钮；原生 click 前显式聚焦以模拟这一步。
+async function clickButton(button: HTMLElement) {
+  button.focus()
+  button.click()
+  await nextTick()
+}
+
+async function typeInto(input: HTMLInputElement, value: string) {
+  input.value = value
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  await nextTick()
+}
+
+function deferred() {
+  let resolve!: () => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function blockCopyButton(wrapper: VueWrapper, description: string) {
+  const section = wrapper.findAll('.artifact-block').find((entry) => entry.text().includes(description))
+  if (!section) throw new Error(`missing artifact block: ${description}`)
+  return section.find<HTMLButtonElement>('button')
+}
+
+function fillDialog() {
+  return document.querySelector<HTMLElement>('.fill-dialog')
+}
+
+function dialogInput() {
+  const input = document.querySelector<HTMLInputElement>('.fill-dialog input')
+  if (!input) throw new Error('fill dialog input missing')
+  return input
+}
+
+function dialogButton(label: string) {
+  const button = Array.from(document.querySelectorAll<HTMLButtonElement>('.fill-dialog button')).find(
+    (entry) => entry.textContent?.trim() === label,
+  )
+  if (!button) throw new Error(`missing fill dialog button: ${label}`)
+  return button
+}
+
+function nestedPlaceholderContent(): ArtifactContent {
+  return {
+    ...artifactContent(),
+    warnings: [],
+    blocks: [
+      {
+        id: 'nested',
+        type: 'command_steps',
+        title: '嵌套占位符',
+        steps: [{ title: '连接主机', commands: [{ shell: 'bash', command: 'ssh <host>' }], sourceFragmentIds: [] }],
+        sourceFragmentIds: [],
+      },
+    ],
+  }
+}
 
 function shellSyntaxContent(): ArtifactContent {
   return {

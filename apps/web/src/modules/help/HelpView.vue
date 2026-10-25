@@ -23,9 +23,19 @@ const version = import.meta.env.VITE_APP_VERSION || 'v3.0.0-rc.1'
     <section id="capture-search" class="help-section" aria-labelledby="capture-title">
       <header><UiIcon name="search" /><div><p>CAPTURE & SEARCH</p><h2 id="capture-title">快速记录与搜索</h2></div></header>
       <div class="help-list">
-        <p><strong>可见入口优先。</strong>工作台始终显示搜索框和“快速记录”按钮，不依赖快捷键才能完成操作。</p>
+        <p><strong>可见入口优先。</strong>进入“知识与记录”，可直接使用搜索框和“快速记录”按钮，无需记住快捷键。</p>
         <p><strong>当前快捷键。</strong><kbd>/</kbd> 聚焦搜索；<kbd>⌘/Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd> 打开快速记录；编辑器中 <kbd>⌘/Ctrl</kbd> + <kbd>Enter</kbd> 保存。</p>
         <p><strong>字面搜索。</strong>引号、路径、百分号和下划线都按普通字符处理；查询词只进入请求正文，不写入 URL 或浏览器持久化存储。</p>
+      </div>
+    </section>
+
+    <section id="knowledge-assistant" class="help-section" aria-labelledby="assistant-title">
+      <header><UiIcon name="sparkles" /><div><h2 id="assistant-title">知识助手与引用</h2></div></header>
+      <div class="help-list">
+        <p><strong>先配置再提问。</strong>在“设置 → Provider 与模型”中启用 Provider、配置 API Key，并启用至少一个聊天模型，随后即可开始一般对话。需要基于笔记回答时，在同一页配置“知识库 Embedding”并等待索引就绪。Embedding 未配置、重建中或存在失败片段时仍可继续一般聊天，页面会明确提示“知识库当前不可用”，而不是“知识库没有相关内容”。</p>
+        <p><strong>核对外发范围。</strong>启用知识库 Embedding 前请核对接收方与全局敏感策略；确认启用后，新增和更新的合格笔记会自动发送给该 Embedding Provider。提问、实际进入上下文的历史消息与检索片段会按当前策略发送给聊天 Provider。</p>
+        <p><strong>回答要回到原文。</strong>从“新对话”开始，确认模型与思考档位后发问；点击行内引用可打开来源抽屉，并从抽屉打开对应笔记核对原文。AI 派生来源会标记“未人工验证”，不要把无引用的一般补充当作笔记事实。</p>
+        <p><strong>临时对话不保存。</strong>临时会话只存在于当前标签页内存，刷新、关闭标签页或离开页面即销毁，应用不保存该会话；消息和检索片段仍会发送给你选择的 Provider，并受其数据保留政策约束。</p>
       </div>
     </section>
 
@@ -80,7 +90,9 @@ const version = import.meta.env.VITE_APP_VERSION || 'v3.0.0-rc.1'
       <ul>
         <li>不执行 Shell、SSH、SQL、任意 HTTP、任意文件系统或其他高权限工具。</li>
         <li>不自动联网核验外部数据真实性；AI 候选必须由用户判断。</li>
-        <li>不提供向量语义搜索、OCR/PDF 正文解析、通用导入向导、插件市场或多用户协作。</li>
+        <li>普通资料库搜索基于关键词、子串与模糊匹配，不提供向量语义搜索；知识助手在完成 Embedding 配置且索引就绪后，可在其检索范围内提供混合召回。</li>
+        <li>知识录入与检索不做自动 OCR 或 PDF 正文解析；工具箱 OCR 由用户主动执行。</li>
+        <li>不提供通用导入向导、插件市场或多用户协作。</li>
         <li>不提供在线 `.env` 编辑、Web 备份控制台或自动部署；运维脚本由宿主机所有者显式调用。</li>
         <li>机器翻译与云 OCR 只通过用户明确操作进入额度受控的阿里云路径；不提供翻译/OCR 历史、后台任务、Agent loop、代码执行或代码编译。</li>
       </ul>

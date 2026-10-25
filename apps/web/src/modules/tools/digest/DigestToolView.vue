@@ -100,9 +100,15 @@ function cancelDigest() {
 
 async function copyDigest() {
   if (!digest.value) return
-  await navigator.clipboard.writeText(digest.value)
-  copyStatus.value = '摘要已复制'
-  window.setTimeout(() => { copyStatus.value = '' }, 1600)
+  copyStatus.value = ''
+  errorMessage.value = ''
+  try {
+    await navigator.clipboard.writeText(digest.value)
+    copyStatus.value = '摘要已复制'
+    window.setTimeout(() => { copyStatus.value = '' }, 1600)
+  } catch {
+    errorMessage.value = '复制未成功，请选中结果后手动复制。'
+  }
 }
 
 function formatBytes(value: number): string {
@@ -135,7 +141,7 @@ function formatBytes(value: number): string {
         <p v-if="insecureAlgorithm" class="unsafe-warning" role="note">{{ digestLabels[algorithm] }} 仅用于旧校验和兼容，不安全；不要用于密码、签名或安全决策。</p>
 
         <template v-if="mode === 'text'">
-          <label for="digest-text">文本内容</label><textarea id="digest-text" v-model="textInput" rows="13" :disabled="running" placeholder="输入或粘贴待计算文本" />
+          <label for="digest-text">文本内容</label><textarea id="digest-text" v-model="textInput" rows="13" :disabled="running" placeholder="输入或粘贴待计算文本" @input="resetResult" />
           <p class="hint">UTF-8 · {{ formatBytes(textBytes) }}</p>
         </template>
         <template v-else>

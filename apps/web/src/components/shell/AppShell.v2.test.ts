@@ -44,7 +44,7 @@ describe('responsive application shell', () => {
 
     const dialog = wrapper.get('aside[role="dialog"]')
     expect(dialog.classes()).toContain('module-nav--open')
-    expect(document.activeElement).toBe(dialog.element.querySelector('.module-nav__content a'))
+    expect(document.activeElement).toBe(dialog.element.querySelector('.module-nav__header button'))
 
     await dialog.trigger('keydown', { key: 'Escape' })
     await nextTick()

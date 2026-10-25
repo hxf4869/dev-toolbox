@@ -41,7 +41,19 @@ const timeZones = availableTimeZones()
 const nowSnapshot = ref<TimeSnapshot | null>(null)
 const copyStatus = ref('')
 const errorMessage = ref('')
+const zoneStaleMessage = ref('')
 let clockTimer: number | undefined
+// 时区切换后旧结果不再作为当前结论展示；捕获该计数使切换前启动的在途异步晚到结果作废。
+let zoneGeneration = 0
+// 转换的局部代数：输入值/类型变化或新一次转换开始时推进，只归属时间转换的在途结果，不影响其他页签。
+let conversionGeneration = 0
+// 当前结果与待决夏令时状态所基于的已提交时区；combobox 未提交的草稿输入不触发失效。
+let resultsTimeZone = timeZone.value
+// 其余表单各自的局部代数：输入变化或新请求开始时推进，只归属本表单的在途结果；工作日与时区无关，不参与换区失效。
+let calculationGeneration = 0
+let differenceGeneration = 0
+let workdayGeneration = 0
+let naturalGeneration = 0
 
 const conversionKind = ref<'unix_seconds' | 'unix_milliseconds' | 'iso' | 'local'>('iso')
 const conversionInput = ref(new Date().toISOString())
@@ -82,6 +94,54 @@ watch([differenceFrom, differenceTo, timeZone], () => {
   differenceToResolution.value = undefined
 })
 
+// 转换输入值或类型变化后，旧结果、待决夏令时选择与旧错误立即失效且不自动重算；
+// 同步推进转换局部代数，使变化前启动的在途转换晚到时不再写回。
+watch([conversionInput, conversionKind], () => {
+  conversionGeneration += 1
+  conversionResult.value = null
+  conversionResolution.value = null
+  errorMessage.value = ''
+})
+
+// 日期加减输入变化后，旧结果、待决夏令时选择与旧错误立即失效且不自动重算；
+// 同步推进局部代数作废在途结果。calculationValues 为嵌套对象，需深度侦听真实字段输入而非仅对象替换。
+watch([calculationStart, calculationDirection, calculationValues], () => {
+  calculationGeneration += 1
+  calculationResult.value = null
+  calculationResolution.value = null
+  errorMessage.value = ''
+}, { deep: true })
+
+// 时间差任一端变化后清除自己的旧结果与待决夏令时提示；已选 resolution 沿用上方含时区的既有 watch 清理。
+// 结果清理不得并入含 timeZone 草稿值的 watch：combobox 未提交草稿不作废结果，时区相关失效仅在 commit 时发生。
+watch([differenceFrom, differenceTo], () => {
+  differenceGeneration += 1
+  differenceResult.value = null
+  differenceResolution.value = null
+  errorMessage.value = ''
+})
+
+// 工作日计算与时区无关：仅本表单输入变化清除旧结果、复制入口与旧错误并作废在途，换区 commit 不影响。
+watch([workdayStart, workdayAmount, holidayInput, workdayInput], () => {
+  workdayGeneration += 1
+  workdayResult.value = null
+  errorMessage.value = ''
+})
+
+// Cron 预览为同步计算，无在途结果；表达式/基准/方言变化清除旧预览与旧错误。方言切换同时替换表达式，同一批触发一次。
+watch([cronDialect, cronExpression, cronBase], () => {
+  cronResult.value = null
+  errorMessage.value = ''
+})
+
+// 自然语言表达式变化后清除旧结果、待决夏令时提示与旧错误，并推进局部代数作废在途。
+watch(naturalInput, () => {
+  naturalGeneration += 1
+  naturalResult.value = null
+  naturalResolution.value = null
+  errorMessage.value = ''
+})
+
 onMounted(() => {
   void refreshClock()
   document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -117,15 +177,44 @@ function handleVisibilityChange() {
 }
 
 async function refreshClock() {
+  const generation = zoneGeneration
   try {
-    nowSnapshot.value = await currentTime(timeZone.value)
+    const snapshot = await currentTime(timeZone.value)
+    if (generation !== zoneGeneration) return
+    nowSnapshot.value = snapshot
   } catch {
+    if (generation !== zoneGeneration) return
     nowSnapshot.value = null
   }
 }
 
+function handleTimeZoneCommit() {
+  if (timeZone.value !== resultsTimeZone) {
+    const previousZone = resultsTimeZone
+    resultsTimeZone = timeZone.value
+    // 只失效受影响的结果与待决夏令时状态，不自动重新执行任何计算；工作日计算与时区无关，保持不变。
+    zoneGeneration += 1
+    conversionResult.value = null
+    conversionResolution.value = null
+    calculationResult.value = null
+    calculationResolution.value = null
+    differenceResult.value = null
+    differenceResolution.value = null
+    differenceFromResolution.value = undefined
+    differenceToResolution.value = undefined
+    cronResult.value = null
+    naturalResult.value = null
+    naturalResolution.value = null
+    errorMessage.value = ''
+    zoneStaleMessage.value = `时区已切换（${previousZone} → ${timeZone.value}），旧时区的结果与待决的夏令时选择已失效，请重新执行。`
+  }
+  // 在时区代数推进之后刷新，使本次时钟刷新以新代数写入新时区，而不是被在途守卫丢弃。
+  void refreshClock()
+}
+
 function clearError() {
   errorMessage.value = ''
+  zoneStaleMessage.value = ''
 }
 
 function showError(error: unknown) {
@@ -142,6 +231,8 @@ async function runConversion(resolution?: LocalTimeResolution) {
   clearError()
   conversionResolution.value = null
   conversionResult.value = null
+  const generation = zoneGeneration
+  const conversion = ++conversionGeneration
   try {
     const result = await convertTime({
       kind: conversionKind.value,
@@ -149,8 +240,10 @@ async function runConversion(resolution?: LocalTimeResolution) {
       timeZone: timeZone.value,
       resolution,
     })
+    if (generation !== zoneGeneration || conversion !== conversionGeneration) return
     applyTimeResult(result, conversionResult, conversionResolution)
   } catch (error) {
+    if (generation !== zoneGeneration || conversion !== conversionGeneration) return
     showError(error)
   }
 }
@@ -159,6 +252,8 @@ async function runCalculation(resolution?: LocalTimeResolution) {
   clearError()
   calculationResolution.value = null
   calculationResult.value = null
+  const generation = zoneGeneration
+  const calculation = ++calculationGeneration
   try {
     const result = await calculateDate({
       localDateTime: calculationStart.value,
@@ -167,8 +262,10 @@ async function runCalculation(resolution?: LocalTimeResolution) {
       values: calculationValues.value,
       resolution,
     })
+    if (generation !== zoneGeneration || calculation !== calculationGeneration) return
     applyTimeResult(result, calculationResult, calculationResolution)
   } catch (error) {
+    if (generation !== zoneGeneration || calculation !== calculationGeneration) return
     showError(error)
   }
 }
@@ -188,6 +285,8 @@ async function runDifference(side?: 'from' | 'to', resolution?: LocalTimeResolut
   if (side === 'from') differenceFromResolution.value = resolution
   if (side === 'to') differenceToResolution.value = resolution
   differenceResolution.value = null
+  const generation = zoneGeneration
+  const difference = ++differenceGeneration
   try {
     const result = await differenceBetweenDates({
       from: differenceFrom.value,
@@ -196,9 +295,11 @@ async function runDifference(side?: 'from' | 'to', resolution?: LocalTimeResolut
       fromResolution: differenceFromResolution.value,
       toResolution: differenceToResolution.value,
     })
+    if (generation !== zoneGeneration || difference !== differenceGeneration) return
     if ('resolution' in result) differenceResolution.value = { side: result.side, value: result.resolution }
     else differenceResult.value = { duration: result.duration, totalSeconds: result.totalSeconds }
   } catch (error) {
+    if (generation !== zoneGeneration || difference !== differenceGeneration) return
     showError(error)
   }
 }
@@ -210,16 +311,20 @@ function splitDates(value: string): string[] {
 async function runWorkday() {
   clearError()
   workdayResult.value = null
+  const workday = ++workdayGeneration
   try {
     assertTimeText(holidayInput.value, '节假日输入')
     assertTimeText(workdayInput.value, '补班日输入')
-    workdayResult.value = await addWorkdays({
+    const result = await addWorkdays({
       startDate: workdayStart.value,
       amount: workdayAmount.value,
       holidays: splitDates(holidayInput.value),
       workdays: splitDates(workdayInput.value),
     })
+    if (workday !== workdayGeneration) return
+    workdayResult.value = result
   } catch (error) {
+    if (workday !== workdayGeneration) return
     showError(error)
   }
 }
@@ -248,15 +353,19 @@ async function runNatural(resolution?: LocalTimeResolution) {
   clearError()
   naturalResolution.value = null
   naturalResult.value = null
+  const generation = zoneGeneration
+  const natural = ++naturalGeneration
   try {
     const result = await parseNaturalLanguage({
       expression: naturalInput.value,
       timeZone: timeZone.value,
       resolution,
     })
+    if (generation !== zoneGeneration || natural !== naturalGeneration) return
     if (result.status === 'resolution_required') naturalResolution.value = result
     else naturalResult.value = result
   } catch (error) {
+    if (generation !== zoneGeneration || natural !== naturalGeneration) return
     showError(error)
   }
 }
@@ -282,9 +391,10 @@ async function runNatural(resolution?: LocalTimeResolution) {
 
     <div class="zone-row">
       <label for="time-zone">IANA 时区</label>
-      <TimeZoneCombobox id="time-zone" v-model="timeZone" :options="timeZones" label="IANA 时区" @commit="refreshClock" />
+      <TimeZoneCombobox id="time-zone" v-model="timeZone" :options="timeZones" label="IANA 时区" @commit="handleTimeZoneCommit" />
       <span>所有结果均显示此时区、基准时间和 UTC offset。</span>
     </div>
+    <p v-if="zoneStaleMessage" class="warning-note zone-stale-note" role="status">{{ zoneStaleMessage }}</p>
 
     <nav class="tool-tabs" aria-label="时间工具功能">
       <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" :aria-current="activeTab === tab.id ? 'page' : undefined" @click="activeTab = tab.id; clearError()">{{ tab.label }}</button>
@@ -436,6 +546,7 @@ textarea { resize: vertical; }
 .cron-meta span { min-height: 40px; color: var(--text-muted); font-size: 11px; }
 .cron-meta strong { color: var(--text-primary); font-family: var(--font-mono); }
 .warning-note { margin: var(--space-3) 0 0; padding: var(--space-2); border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border-subtle)); color: var(--warning); font-size: 12px; }
+.zone-stale-note { margin: var(--space-2) 0 0; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { padding: 9px 8px; border-bottom: 1px solid var(--border-subtle); text-align: left; }
 th { color: var(--text-muted); font-weight: 600; }

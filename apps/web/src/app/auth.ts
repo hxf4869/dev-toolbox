@@ -179,10 +179,18 @@ export const useAuthStore = defineStore('auth', () => {
       clearAuthentication()
       return
     }
-    await apiRequest<void>(
-      all ? '/api/v1/auth/logout-all' : '/api/v1/auth/logout',
-      jsonRequest('POST', {}, csrfToken.value),
-    )
+    const sessionId = session.value?.id
+    try {
+      await apiRequest<void>(
+        all ? '/api/v1/auth/logout-all' : '/api/v1/auth/logout',
+        jsonRequest('POST', {}, csrfToken.value),
+      )
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401 || error.code !== 'AUTH_REQUIRED') {
+        throw error
+      }
+      if (session.value?.id !== sessionId) return
+    }
     clearAuthentication()
   }
 

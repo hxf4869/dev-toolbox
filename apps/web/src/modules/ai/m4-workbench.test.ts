@@ -115,6 +115,141 @@ describe('M4 task workbench', () => {
       sensitivePolicy: 'block',
     })
     expect(document.body.textContent).toContain('自动整理设置已保存')
+    const putCount = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT').length
+    expect(putCount()).toBe(1)
+    const timeInput = document.querySelector<HTMLInputElement>('.schedule-form input[type="time"]')
+    expect(timeInput).not.toBeNull()
+    timeInput!.value = '03:30'
+    timeInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(document.body.textContent).not.toContain('自动整理设置已保存')
+    expect(timeInput!.value).toBe('03:30')
+    expect(document.querySelector('.settings-context__list')?.textContent).toContain('03:30')
+    expect(putCount()).toBe(1)
+    wrapper.unmount()
+  })
+
+  it('locks the whole schedule form while a save is pending and restores the draft after a 503', async () => {
+    let resolvePut!: (response: Response) => void
+    const putDeferred = new Promise<Response>((resolve) => {
+      resolvePut = resolve
+    })
+    let putBody: Record<string, unknown> | undefined
+    const weeklySchedule = { frequency: 'weekly', timezone: 'Asia/Shanghai', localTime: '04:25', weekday: 3, organizeModelId: modelID, visionModelId: modelID, sensitivePolicy: 'redact' }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/ai/providers') return jsonResponse({ items: [provider()] })
+      if (path === '/api/v1/ai/settings') return jsonResponse(settings())
+      if (path === '/api/v1/ai/schedule' && init?.method === 'PUT') {
+        putBody = JSON.parse(String(init.body))
+        return putDeferred
+      }
+      if (path === '/api/v1/ai/schedule') return jsonResponse(weeklySchedule)
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountWithRouter(AIScheduleView, '/settings/ai-schedule')
+    await flushPromises()
+    const putCount = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT').length
+
+    try {
+      buttonByText('保存设置').click()
+      await flushPromises()
+
+      const radios = Array.from(document.querySelectorAll<HTMLInputElement>('.frequency-grid input[type="radio"]'))
+      const timezoneInput = document.querySelector<HTMLInputElement>('.schedule-form input[list="timezone-suggestions"]')
+      const timeInput = document.querySelector<HTMLInputElement>('.schedule-form input[type="time"]')
+      const selects = Array.from(document.querySelectorAll<HTMLSelectElement>('.schedule-form select'))
+      expect(putBody).toMatchObject({ frequency: 'weekly', localTime: '04:25', weekday: 3, organizeModelId: modelID, sensitivePolicy: 'redact' })
+      expect(radios).toHaveLength(3)
+      expect(timezoneInput).not.toBeNull()
+      expect(timeInput).not.toBeNull()
+      expect(selects).toHaveLength(4)
+      const controls = [...radios, timezoneInput!, timeInput!, ...selects]
+      for (const control of controls) expect(control.disabled).toBe(true)
+      const saveButton = buttonByText('正在保存')
+      expect(saveButton.disabled).toBe(true)
+      saveButton.click()
+      await flushPromises()
+      expect(putCount()).toBe(1)
+      radios.find((radio) => radio.value === 'daily')!.click()
+      await flushPromises()
+      expect(radios.find((radio) => radio.value === 'daily')!.checked).toBe(false)
+      expect(radios.find((radio) => radio.value === 'weekly')!.checked).toBe(true)
+
+      resolvePut(jsonResponse({ error: { code: 'AI_SCHEDULE_SAVE_FAILED', message: '调度设置保存失败' } }, 503))
+      await flushPromises()
+
+      for (const control of controls) expect(control.disabled).toBe(false)
+      expect(radios.find((radio) => radio.value === 'weekly')!.checked).toBe(true)
+      expect(timezoneInput!.value).toBe('Asia/Shanghai')
+      expect(timeInput!.value).toBe('04:25')
+      expect(selects[0]!.value).toBe('3')
+      expect(selects[1]!.value).toBe(modelID)
+      expect(selects[2]!.value).toBe(modelID)
+      expect(selects[3]!.value).toBe('redact')
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain('调度设置保存失败')
+      timeInput!.value = '03:30'
+      timeInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushPromises()
+      expect(timeInput!.value).toBe('03:30')
+      expect(putCount()).toBe(1)
+    } finally {
+      resolvePut(jsonResponse({ error: { code: 'AI_SCHEDULE_SAVE_FAILED', message: '调度设置保存失败' } }, 503))
+      await flushPromises()
+      wrapper.unmount()
+    }
+  })
+
+  it('withholds default editing until the first schedule read succeeds and recovers after retry', async () => {
+    let scheduleUnavailable = true
+    let savedBody: Record<string, unknown> | undefined
+    const storedSchedule = { frequency: 'daily', timezone: 'Asia/Tokyo', localTime: '05:30', weekday: 3, organizeModelId: modelID, visionModelId: modelID, sensitivePolicy: 'redact' }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/ai/providers') return jsonResponse({ items: [provider()] })
+      if (path === '/api/v1/ai/settings') return jsonResponse(settings())
+      if (path === '/api/v1/ai/schedule' && init?.method === 'PUT') {
+        savedBody = JSON.parse(String(init.body))
+        return jsonResponse(savedBody)
+      }
+      if (path === '/api/v1/ai/schedule') {
+        if (scheduleUnavailable) return jsonResponse({ error: { code: 'INTERNAL_ERROR', message: '调度设置暂时无法读取' } }, 500)
+        return jsonResponse(storedSchedule)
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountWithRouter(AIScheduleView, '/settings/ai-schedule')
+    await flushPromises()
+
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('调度设置暂时无法读取')
+    expect(buttonByText('重新读取').disabled).toBe(false)
+    expect(document.querySelector('.schedule-form')).toBeNull()
+    expect(document.querySelector('.settings-context__list')).toBeNull()
+    expect(document.body.textContent).not.toContain('已关闭')
+    const saveButton = buttonByText('保存设置')
+    expect(saveButton.disabled).toBe(true)
+    saveButton.click()
+    await flushPromises()
+    expect(savedBody).toBeUndefined()
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0)
+
+    scheduleUnavailable = false
+    buttonByText('重新读取').click()
+    await flushPromises()
+
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect(document.querySelector<HTMLInputElement>('input[value="daily"]')?.checked).toBe(true)
+    expect(document.querySelector<HTMLInputElement>('.schedule-form input[type="time"]')?.value).toBe('05:30')
+    expect(document.querySelector('.settings-context__list')?.textContent).toContain('05:30')
+    expect(buttonByText('保存设置').disabled).toBe(false)
+    buttonByText('保存设置').click()
+    await flushPromises()
+
+    expect(savedBody).toEqual(storedSchedule)
+    expect(document.body.textContent).toContain('自动整理设置已保存')
     wrapper.unmount()
   })
 

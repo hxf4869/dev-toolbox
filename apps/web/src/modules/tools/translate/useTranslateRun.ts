@@ -89,6 +89,7 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
   let inFlightAbort: AbortController | null = null
   let startInput: TranslateRunStartInput | null = null
   let generation = 0
+  let disposed = false
   let pendingTicketRelease: Promise<void> = Promise.resolve()
 
   const completedCount = computed(() =>
@@ -152,11 +153,15 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
 
   /** preflight 计划就绪后调用；PREFLIGHT_CHANGED 取得新计划后也走这里。 */
   async function start(input: TranslateRunStartInput, csrf: () => string): Promise<void> {
-    if (isBusy.value) return
+    if (disposed || isBusy.value) return
+    // 先预留本次启动的代次：等待旧清理期间新输入会递增代次作废该启动，
+    // 晚到的续体不得再接管状态并创建新队列。
+    const pendingGeneration = generation + 1
+    generation = pendingGeneration
     await supersedeActiveRun()
+    if (disposed || generation !== pendingGeneration) return
     csrfTokenSource = csrf
     startInput = input
-    generation += 1
     cancelRequested = false
     runError.value = null
     cancelBreakdown.value = null
@@ -164,7 +169,7 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
       const item = input.plan.items[position]
       upsertRuntime(seed, item?.engine ?? 'general')
     }
-    await acquirePermitAndRun({ input, generation })
+    await acquirePermitAndRun({ input, generation: pendingGeneration })
   }
 
   async function acquirePermitAndRun(run: RunContext): Promise<void> {
@@ -265,7 +270,7 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
           return
         }
         if (isStale(run)) return
-        const handled = await handleChunkError(chunk, error, input)
+        const handled = await handleChunkError(run, chunk, error, input)
         if (handled === 'stop') return
         continue
       }
@@ -307,6 +312,7 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
   }
 
   async function handleChunkError(
+    run: RunContext,
     chunk: TranslateChunkRuntime,
     error: unknown,
     input: TranslateRunStartInput,
@@ -325,6 +331,8 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
       chunk.status = 'pending'
       chunk.requestKey = undefined
       await releaseActiveTicket()
+      // DELETE 在途期间用户取消或离页：晚到的续程不得再触发重新规划回调。
+      if (isStale(run)) return 'stop'
       phase.value = 'replan'
       const remainingSeeds = input.chunks
         .filter((seed) => {
@@ -360,7 +368,7 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
 
   /** 从失败/结果不确定片段继续：使用新的幂等键，不重跑已成功片段。 */
   async function continueFromFailure(): Promise<void> {
-    if (phase.value !== 'paused' || !startInput) return
+    if (disposed || phase.value !== 'paused' || !startInput) return
     const resumeSeeds = startInput.chunks.filter((seed) => {
       const runtime = chunks.value.find((entry) => entry.index === seed.index)
       return (
@@ -438,8 +446,13 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
     await releaseActiveTicket()
   }
 
-  /** 页面卸载：停止轮询、中止在途请求并尽力释放 ticket。 */
+  /**
+   * 页面卸载：停止轮询、中止在途请求并尽力释放 ticket。dispose 是本实例终态，
+   * 同时作废等待旧清理的启动与之后（如晚到 preflight 回包触发的）一切新准入；
+   * resetForNewRun 的输入代次只作废等待中的启动，同一活实例仍可显式新发。
+   */
   function dispose(): void {
+    disposed = true
     cancelRequested = true
     interruptSleep()
     inFlightAbort?.abort()
@@ -447,8 +460,9 @@ export function useTranslateRun(options: TranslateRunOptions = {}) {
     void releaseActiveTicket({ keepalive: true })
   }
 
-  /** 新的预览/新输入开始前清空片段与状态。 */
+  /** 新的预览/新输入开始前清空片段与状态；作废等待旧清理的启动。 */
   function resetForNewRun(): void {
+    generation += 1
     void supersedeActiveRun()
     chunks.value = []
     detectedLanguage.value = null

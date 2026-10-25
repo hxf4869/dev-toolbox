@@ -2,8 +2,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ApiError } from '../../lib/api'
 import type { AssistantApi } from './assistantApi'
-import type { TemporarySourceDTO } from './assistantContracts'
+import type { AssistantConversationDTO, TemporarySourceDTO } from './assistantContracts'
 import {
   assistantModelFixture,
   bootstrapFixtures,
@@ -229,7 +230,207 @@ describe('assistant store', () => {
     const resolved = await store.getSource(message('unused', secondSource).citations[0]!, 'temporary-2')
     expect(resolved.title).toBe('第二条回答的来源')
   })
+
+  it('re-confirms a persistent source on every open so the current title is shown', async () => {
+    const store = useAssistantStore()
+    const getSource = vi
+      .fn()
+      .mockResolvedValueOnce(structuredClone(sourceFixtures.available))
+      .mockResolvedValueOnce({
+        ...structuredClone(sourceFixtures.available),
+        currentTitle: '已重命名的数据目录',
+        titleChanged: true,
+      })
+    store.setApi(createApi({ getSource }))
+
+    const first = await store.getSource(sourceFixtures.available)
+    const second = await store.getSource(sourceFixtures.available)
+
+    expect(first.currentTitle).toBe('Docker 数据迁移与校验')
+    expect(second.currentTitle).toBe('已重命名的数据目录')
+    expect(second.title).toBe('Docker 数据目录迁移记录')
+  })
+
+  it('re-checks deletion on reopen instead of replaying the first cached source', async () => {
+    const store = useAssistantStore()
+    const getSource = vi
+      .fn()
+      .mockResolvedValueOnce(structuredClone(sourceFixtures.available))
+      .mockResolvedValueOnce(structuredClone(sourceFixtures.deleted))
+    store.setApi(createApi({ getSource }))
+
+    const first = await store.getSource(sourceFixtures.available)
+    const second = await store.getSource(sourceFixtures.available)
+
+    expect(first.availability).toBe('available')
+    expect(second.availability).toBe('unavailable')
+    expect(second.excerpt).toBeNull()
+    expect(second.locator).toBeNull()
+    expect(second.currentTitle).toBeNull()
+  })
+
+  it('propagates the old-run NOT_FOUND error instead of returning the cached source', async () => {
+    const store = useAssistantStore()
+    const superseded = new ApiError(404, {
+      error: { code: 'NOT_FOUND', message: '资源不存在', requestId: 'req-1' },
+    })
+    const getSource = vi
+      .fn()
+      .mockResolvedValueOnce(structuredClone(sourceFixtures.available))
+      .mockRejectedValueOnce(superseded)
+    store.setApi(createApi({ getSource }))
+
+    const first = await store.getSource(sourceFixtures.available)
+    await expect(store.getSource(sourceFixtures.available)).rejects.toBe(superseded)
+    expect(first.title).toBe('Docker 数据目录迁移记录')
+  })
+
+  describe('navigation scope ownership', () => {
+    const OTHER_FOLDER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+
+    function conversationVariant(id: string, title: string, folderId: string) {
+      return {
+        ...structuredClone(conversationFixture),
+        id,
+        title,
+        folderId,
+      }
+    }
+
+    it('supersedes a pending scope load and drops its late response and busy unlock', async () => {
+      const convA = conversationVariant('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'A 会话', folderFixture.id)
+      const convB = conversationVariant('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'B 会话', OTHER_FOLDER_ID)
+      const loadA = deferred<ConversationPage>()
+      const loadB = deferred<ConversationPage>()
+      const getConversations = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [structuredClone(conversationFixture)], nextCursor: null })
+        .mockImplementationOnce(() => loadA.promise)
+        .mockImplementationOnce(() => loadB.promise)
+      const store = useAssistantStore()
+      store.setApi(createApi({ getConversations }))
+      await store.initialize()
+      expect(getConversations).toHaveBeenCalledTimes(1)
+
+      void store.setFolderFilter(folderFixture.id)
+      expect(store.conversations).toEqual([])
+      expect(store.conversationNextCursor).toBeNull()
+      void store.setFolderFilter(OTHER_FOLDER_ID)
+      expect(store.navigationLoading).toBe(true)
+
+      loadA.resolve({ items: [convA], nextCursor: 'a1' })
+      await flushPromises()
+      expect(store.conversations).toEqual([])
+      expect(store.navigationLoading).toBe(true)
+
+      loadB.resolve({ items: [convB], nextCursor: 'b1' })
+      await flushPromises()
+      expect(store.conversations.map((entry) => entry.id)).toEqual([convB.id])
+      expect(store.conversationNextCursor).toBe('b1')
+      expect(store.navigationLoading).toBe(false)
+    })
+
+    it('keeps the newest scope result when the superseded load rejects late', async () => {
+      const convB = conversationVariant('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'B 会话', OTHER_FOLDER_ID)
+      const loadA = deferred<ConversationPage>()
+      const loadB = deferred<ConversationPage>()
+      const getConversations = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [structuredClone(conversationFixture)], nextCursor: null })
+        .mockImplementationOnce(() => loadA.promise)
+        .mockImplementationOnce(() => loadB.promise)
+      const store = useAssistantStore()
+      store.setApi(createApi({ getConversations }))
+      await store.initialize()
+
+      void store.setFolderFilter(folderFixture.id)
+      void store.setFolderFilter(OTHER_FOLDER_ID)
+
+      loadB.resolve({ items: [convB], nextCursor: null })
+      await flushPromises()
+      expect(store.conversations.map((entry) => entry.id)).toEqual([convB.id])
+
+      loadA.reject(new Error('旧请求失败'))
+      await flushPromises()
+      expect(store.actionError).toBe('')
+      expect(store.conversations.map((entry) => entry.id)).toEqual([convB.id])
+      expect(store.navigationLoading).toBe(false)
+    })
+
+    it('does not merge a stale append response into a newer scope', async () => {
+      const convA = conversationVariant('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'A 追加会话', folderFixture.id)
+      const convB = conversationVariant('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'B 会话', OTHER_FOLDER_ID)
+      const appendLoad = deferred<ConversationPage>()
+      const scopeLoad = deferred<ConversationPage>()
+      const getConversations = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [structuredClone(conversationFixture)], nextCursor: 'page-1' })
+        .mockImplementationOnce(() => appendLoad.promise)
+        .mockImplementationOnce(() => scopeLoad.promise)
+      const store = useAssistantStore()
+      store.setApi(createApi({ getConversations }))
+      await store.initialize()
+      expect(store.conversationNextCursor).toBe('page-1')
+
+      void store.loadNavigation(true)
+      expect(getConversations.mock.calls[1]?.[0]).toMatchObject({ cursor: 'page-1' })
+      void store.setFolderFilter(OTHER_FOLDER_ID)
+
+      scopeLoad.resolve({ items: [convB], nextCursor: null })
+      await flushPromises()
+      appendLoad.resolve({ items: [convA], nextCursor: null })
+      await flushPromises()
+
+      expect(store.conversations.map((entry) => entry.id)).toEqual([convB.id])
+      expect(store.conversationNextCursor).toBeNull()
+    })
+
+    it('invalidates pending navigation on dispose and allows navigation on the next mount', async () => {
+      const convA = conversationVariant('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'A 会话', folderFixture.id)
+      const convB = conversationVariant('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'B 会话', OTHER_FOLDER_ID)
+      const staleLoad = deferred<ConversationPage>()
+      const nextLoad = deferred<ConversationPage>()
+      const getConversations = vi
+        .fn()
+        .mockResolvedValueOnce({ items: [structuredClone(conversationFixture)], nextCursor: null })
+        .mockImplementationOnce(() => staleLoad.promise)
+        .mockImplementationOnce(() => nextLoad.promise)
+      const store = useAssistantStore()
+      store.setApi(createApi({ getConversations }))
+      await store.initialize()
+
+      void store.setFolderFilter(folderFixture.id)
+      store.disposeView()
+      expect(store.navigationLoading).toBe(false)
+
+      staleLoad.resolve({ items: [convA], nextCursor: 'a1' })
+      await flushPromises()
+      expect(store.conversations).toEqual([])
+      expect(store.conversationNextCursor).toBeNull()
+
+      void store.setFolderFilter(OTHER_FOLDER_ID)
+      nextLoad.resolve({ items: [convB], nextCursor: null })
+      await flushPromises()
+      expect(store.conversations.map((entry) => entry.id)).toEqual([convB.id])
+      expect(store.navigationLoading).toBe(false)
+    })
+  })
 })
+
+interface ConversationPage {
+  items: AssistantConversationDTO[]
+  nextCursor: string | null
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 function createApi(overrides: Partial<AssistantApi> = {}): AssistantApi {
   const defaults: AssistantApi = {

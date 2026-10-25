@@ -3,8 +3,10 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AssistantApi } from './assistantApi'
+import type { AssistantConversationDTO } from './assistantContracts'
 import AssistantModuleNav from './AssistantModuleNav.vue'
 import {
+  archivedConversationFixture,
   bootstrapFixtures,
   conversationFixture,
   folderFixture,
@@ -72,6 +74,68 @@ describe('AssistantModuleNav', () => {
     expect(patchConversation).toHaveBeenCalledWith(conversationFixture.id, { pinned: false })
     wrapper.unmount()
   })
+
+  it('keeps the newest folder scope when a pending switch away from archived is superseded', async () => {
+    const folderB = {
+      ...structuredClone(folderFixture),
+      id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      name: '数据库巡检',
+      conversationCount: 1,
+    }
+    const convA: AssistantConversationDTO = {
+      ...structuredClone(conversationFixture),
+      id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      title: 'A 会话',
+      pinned: false,
+    }
+    const convB: AssistantConversationDTO = {
+      ...structuredClone(conversationFixture),
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      title: 'B 会话',
+      pinned: false,
+      folderId: folderB.id,
+    }
+    const archivedLoad = deferred<ConversationPage>()
+    const folderALoad = deferred<ConversationPage>()
+    const folderBLoad = deferred<ConversationPage>()
+    const getConversations = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [structuredClone(conversationFixture)], nextCursor: null })
+      .mockImplementationOnce(() => archivedLoad.promise)
+      .mockImplementationOnce(() => folderALoad.promise)
+      .mockImplementationOnce(() => folderBLoad.promise)
+    const getFolders = vi.fn().mockResolvedValue({ items: [structuredClone(folderFixture), folderB] })
+    const store = useAssistantStore()
+    store.setApi(createApi({ getConversations, getFolders }))
+    const wrapper = mount(AssistantModuleNav, { attachTo: document.body })
+    await flushPromises()
+    expect(getConversations).toHaveBeenCalledTimes(1)
+
+    clickButton('已归档')
+    await flushPromises()
+    expect(store.conversationView).toBe('archived')
+
+    clickScope(folderFixture.name)
+    await flushPromises()
+    expect(store.conversationView).toBe('active')
+    expect(store.folderFilter).toBe(folderFixture.id)
+    expect(store.conversations).toEqual([])
+
+    clickScope(folderB.name)
+    await flushPromises()
+    expect(store.folderFilter).toBe(folderB.id)
+
+    folderBLoad.resolve({ items: [convB], nextCursor: null })
+    await flushPromises()
+    expect(document.body.textContent).toContain('B 会话')
+
+    folderALoad.resolve({ items: [convA], nextCursor: null })
+    archivedLoad.resolve({ items: [structuredClone(archivedConversationFixture)], nextCursor: null })
+    await flushPromises()
+    expect(document.body.textContent).not.toContain('A 会话')
+    expect(document.body.textContent).toContain('B 会话')
+    wrapper.unmount()
+  })
 })
 
 async function openFolderDelete() {
@@ -89,6 +153,29 @@ function clickButton(text: string) {
   )
   if (!button) throw new Error(`button not found: ${text}`)
   button.click()
+}
+
+function clickScope(name: string) {
+  const button = Array.from(document.querySelectorAll<HTMLButtonElement>('.assistant-nav__scope')).find(
+    (entry) => entry.textContent?.includes(name),
+  )
+  if (!button) throw new Error(`scope button not found: ${name}`)
+  button.click()
+}
+
+interface ConversationPage {
+  items: AssistantConversationDTO[]
+  nextCursor: string | null
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 function createApi(overrides: Partial<AssistantApi> = {}): AssistantApi {

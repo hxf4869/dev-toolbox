@@ -31,6 +31,7 @@ const {
   selectionRequired,
   temporaryMode,
   streamMessage,
+  knowledgePollError,
 } = storeToRefs(store)
 
 const scrollRoot = ref<HTMLElement | null>(null)
@@ -135,6 +136,7 @@ function useExample(value: string) {
 function emptyStateTitle() {
   if (temporaryMode.value) return '这段对话只存在于当前标签页'
   if (knowledge.value?.status === 'unconfigured') return '可以先进行一般交流'
+  if (knowledge.value?.status === 'disabled') return '知识库已禁用，可以先进行一般交流'
   if (knowledge.value?.status === 'indexing') return '知识库正在建立索引'
   if (knowledge.value?.status === 'failed') return '知识库当前不可用'
   if (knowledge.value?.status === 'ready' && knowledge.value.counts.active === 0) return '知识库已就绪，暂时没有可检索内容'
@@ -144,6 +146,7 @@ function emptyStateTitle() {
 function emptyStateDescription() {
   if (temporaryMode.value) return '刷新、关闭标签页或离开本页面后，消息、摘要和草稿都会消失。'
   if (knowledge.value?.status === 'unconfigured') return '未配置 Embedding 时仍可使用模型；回答会明确标记知识库不可用。'
+  if (knowledge.value?.status === 'disabled') return '当前知识库不可用；你可以继续使用模型，或前往设置重新启用 Embedding。'
   if (knowledge.value?.status === 'indexing') {
     return `已完成 ${knowledge.value.counts.ready}，待处理 ${knowledge.value.counts.pending}，运行中 ${knowledge.value.counts.running}。索引完成前仍可进行一般交流。`
   }
@@ -163,10 +166,17 @@ function emptyStateDescription() {
         <p v-if="temporaryMode"><UiIcon name="history" :size="15" />不保存本会话</p>
         <p v-else-if="activeConversation?.archived"><UiIcon name="history" :size="15" />已归档</p>
       </div>
-      <span class="assistant-thread__knowledge" :data-status="knowledge?.status">
-        <UiIcon :name="knowledge?.available ? 'check-circle-2' : knowledge?.status === 'failed' ? 'x-circle' : 'info'" :size="15" />
-        {{ knowledgeLabel }}
-      </span>
+      <div class="assistant-thread__status">
+        <span class="assistant-thread__knowledge" :data-status="knowledge?.status">
+          <UiIcon :name="knowledge?.available ? 'check-circle-2' : knowledge?.status === 'failed' ? 'x-circle' : 'info'" :size="15" />
+          {{ knowledgeLabel }}
+        </span>
+        <p v-if="knowledgePollError" class="assistant-thread__knowledge-alert" role="alert">
+          <UiIcon name="triangle-alert" :size="15" />
+          <span>索引状态自动刷新失败：{{ knowledgePollError }}</span>
+          <button type="button" @click="store.retryKnowledgeRefresh">重试</button>
+        </p>
+      </div>
     </header>
 
     <div ref="scrollRoot" class="assistant-thread__scroll" role="log" aria-live="polite" aria-relevant="additions text" @scroll.passive="onScroll">
@@ -275,6 +285,8 @@ function emptyStateDescription() {
 .assistant-thread__header h1 { margin: 0; overflow: hidden; font-size: clamp(18px, 1rem + .35vw, 23px); line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .assistant-thread__header p { display: flex; align-items: center; gap: var(--space-1); margin: 2px 0 0; color: var(--warning); font-size: 11px; }
 
+.assistant-thread__status { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: var(--space-2); }
+
 .assistant-thread__knowledge {
   display: inline-flex;
   min-height: 32px;
@@ -286,6 +298,29 @@ function emptyStateDescription() {
   border-radius: var(--radius-control);
   color: var(--text-secondary);
   font-size: 11px;
+}
+
+.assistant-thread__knowledge-alert {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border-subtle));
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.assistant-thread__knowledge-alert button {
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--bg-code);
+  color: var(--text-primary);
+  cursor: pointer;
 }
 .assistant-thread__knowledge[data-status='ready'] { border-color: color-mix(in srgb, var(--success) 45%, var(--border-subtle)); color: var(--success); }
 .assistant-thread__knowledge[data-status='failed'] { border-color: color-mix(in srgb, var(--danger) 48%, var(--border-subtle)); color: var(--danger); }
@@ -385,7 +420,10 @@ function emptyStateDescription() {
 @media (max-width: 599px) {
   .assistant-thread__header { min-height: 60px; padding-inline: var(--space-3); }
   .assistant-thread__header h1 { font-size: 18px; }
-  .assistant-thread__knowledge { max-width: 44%; min-height: 36px; line-height: 1.3; }
+  .assistant-thread__status { max-width: 44%; }
+  .assistant-thread__knowledge { max-width: 100%; min-height: 36px; line-height: 1.3; }
+  .assistant-thread__knowledge-alert { flex-wrap: wrap; justify-content: flex-end; max-width: 100%; }
+  .assistant-thread__knowledge-alert button { min-height: 44px; }
   .assistant-thread__messages { gap: var(--space-8); padding-top: var(--space-6); }
   .assistant-thread__empty > p { font-size: 16px; }
   .assistant-thread__examples { grid-template-columns: 1fr; }

@@ -18,3 +18,7 @@ deploy/backup-staging/
 # Go build/test artifacts
 apps/api/bin/
 apps/api/coverage.out
+
+# Local browser captures and standalone API build
+.playwright-mcp/
+apps/api/server

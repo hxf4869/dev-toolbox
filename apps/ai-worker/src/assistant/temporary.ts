@@ -13,13 +13,24 @@ import {
   type AssistantReasoningLevel,
 } from '../model-gateway.js'
 import type { AssistantRunnerOptions } from './index.js'
-import { assistantSystemPrompt } from './prompts.js'
+import { assistantSystemPrompt, summaryPrompt } from './prompts.js'
+import {
+  estimateTokens,
+  parseSummary,
+  summaryGenerationReserveTokens,
+  summaryMaintenanceShare,
+} from './runner.js'
 import { StreamRedactor } from './stream-redactor.js'
 import { CitationParser } from './citation-parser.js'
 import { historyMessage } from './history-message.js'
 import type { SourceSnapshotInput } from './lane-types.js'
 
 const maximumRewriteTokens = 256
+// The rolling summary maintenance runs after the answer already succeeded, so
+// its wall-clock budget and output limits never affect the answer itself.
+const temporarySummaryBudgetMs = 60_000
+const maximumTemporarySummaryEntries = 64
+const maximumTemporarySummaryBytes = 64 * 1024
 
 interface TemporaryModelSnapshot {
   readonly id: string
@@ -52,6 +63,18 @@ interface TemporaryPrepareBody {
   question: string
 }
 
+interface TemporarySummary {
+  readonly confirmedFacts: string[]
+  readonly corrections: string[]
+  readonly rejectedHypotheses: string[]
+  readonly unresolvedQuestions: string[]
+}
+
+interface TemporarySummarySource {
+  readonly prior: TemporarySummary | null
+  readonly messages: { role: 'user' | 'assistant'; content: string }[]
+}
+
 interface TemporaryStreamBody {
   model: TemporaryModelSnapshot
   reasoning: AssistantReasoningLevel
@@ -63,6 +86,7 @@ interface TemporaryStreamBody {
   knowledgeState: string
   evidenceState: string
   sources: SourceSnapshotInput[]
+  summarySource?: TemporarySummarySource | null
 }
 
 export async function handleTemporaryRequest(
@@ -295,6 +319,9 @@ async function handleStream(
     if (usage === null) throw new ProviderGatewayError('protocol_error')
     const answerDurationMs = answerStarted === null ? null : Math.round(performance.now() - answerStarted)
     const totalDurationMs = Math.round(performance.now() - streamStarted)
+    // Rolling summary upkeep runs after the answer stream succeeded and
+    // before the terminal events; its failure never fails the answer.
+    const temporarySummary = await maintainTemporarySummary(body, options, lifecycle.signal)
     emit('usage.updated', {
       usage: {
         rewriteInputTokens: null, rewriteOutputTokens: null,
@@ -314,7 +341,7 @@ async function handleStream(
         reasoningMs: reasoningDurationMs, answerMs: answerDurationMs, totalMs: totalDurationMs,
       },
       error: null,
-      temporarySummary: null,
+      temporarySummary,
     })
     flush()
   } catch (error) {
@@ -372,6 +399,123 @@ function temporaryHistoryMessages(
 function redactTemporaryInput(redactor: StreamRedactor | null, value: string): string {
   if (redactor === null) return value
   return redactor.push(value) + redactor.flush()
+}
+
+// Assembles the cumulative summary model input: the redacted stored baseline
+// plus the complete uncovered prefix from summarySource (never the answer-side
+// trimmed messages). All-or-nothing: unless prior summary, full prefix and
+// scaffolding together fit the maintenance budget, nothing is sent.
+function buildTemporarySummaryInput(
+  contextWindow: number,
+  redactor: StreamRedactor | null,
+  summarySource: TemporarySummarySource,
+): string | null {
+  const budget = Math.floor(contextWindow * summaryMaintenanceShare) - summaryGenerationReserveTokens
+  if (budget <= 0) return null
+  const sections: string[] = []
+  if (summarySource.prior !== null) {
+    // The stored baseline is Provider input like any other content and goes
+    // through the same redactor.
+    sections.push(
+      '以下是当前会话已有的结构化摘要（维护基准）：\n' +
+      redactTemporaryInput(redactor, JSON.stringify(summarySource.prior)),
+    )
+  }
+  const lines = summarySource.messages.map((message) =>
+    redactTemporaryInput(redactor, `${message.role === 'user' ? '用户' : '助手'}: ${message.content}`))
+  sections.push(
+    '以下是' + (summarySource.prior !== null ? '该基准之后新增、' : '') +
+    '尚未进入摘要的成功对话：\n' + lines.join('\n\n'),
+  )
+  sections.push(
+    summarySource.prior !== null
+      ? '请把基准摘要与新增对话合并为一份更新后的完整结构化摘要：' +
+        '基准中仍然成立的旧事实、旧纠正、已排除假设与未解决问题必须保留，' +
+        '新增对话中的新事实、用户更正、新排除的假设与新问题并入对应字段；' +
+        '不要丢失仍然成立的基准内容，不要输出四个字段之外的任何内容。'
+      : '请把新增对话压缩为一份完整的结构化摘要：' +
+        '新增对话中的事实、用户更正、排除的假设与未解决的问题进入对应字段；' +
+        '不要输出四个字段之外的任何内容。',
+  )
+  const prompt = sections.join('\n\n')
+  if (estimateTokens(prompt) > budget) return null
+  return prompt
+}
+
+// parseSummary already guarantees the four string[] fields; every entry is
+// model output entering the public SSE terminal, so each entry passes the same
+// output StreamRedactor as answer text (docs/16 §6.2) — per entry string,
+// never on the JSON blob. Sanitization then drops empty entries and enforces
+// the entry/byte limits; the byte limit counts raw entry bytes, the same
+// caliber the Go API validates on the next request.
+function sanitizeTemporarySummary(parsed: Record<string, string[]>): TemporarySummary | null {
+  const outputRedactor = new StreamRedactor()
+  const clean = (entries: string[] | undefined): string[] =>
+    (entries ?? [])
+      .filter((entry) => entry.trim().length > 0)
+      .map((entry) => outputRedactor.push(entry) + outputRedactor.flush())
+  const summary: TemporarySummary = {
+    confirmedFacts: clean(parsed.confirmedFacts),
+    corrections: clean(parsed.corrections),
+    rejectedHypotheses: clean(parsed.rejectedHypotheses),
+    unresolvedQuestions: clean(parsed.unresolvedQuestions),
+  }
+  const entries = [...summary.confirmedFacts, ...summary.corrections,
+    ...summary.rejectedHypotheses, ...summary.unresolvedQuestions]
+  if (entries.length > maximumTemporarySummaryEntries) return null
+  const totalBytes = entries.reduce((sum, entry) => sum + Buffer.byteLength(entry, 'utf8'), 0)
+  if (totalBytes > maximumTemporarySummaryBytes) return null
+  return summary
+}
+
+// Merges the prior summary with the uncovered prefix into one cumulative
+// summary for run.completed. Runs in its own bounded cancel scope bound to the
+// request lifecycle; every failure path returns null so the caller keeps the
+// request's old summary and the successful answer stays successful.
+async function maintainTemporarySummary(
+  body: TemporaryStreamBody,
+  options: AssistantRunnerOptions,
+  signal: AbortSignal,
+): Promise<TemporarySummary | null> {
+  const summarySource = body.summarySource ?? null
+  if (summarySource === null || summarySource.messages.length === 0 || signal.aborted) return null
+  const redactor = body.sensitivePolicy === 'redact' ? new StreamRedactor() : null
+  const prompt = buildTemporarySummaryInput(body.model.contextWindow, redactor, summarySource)
+  if (prompt === null) return null
+  const maintenance = new AbortController()
+  const budgetTimer = setTimeout(
+    () => maintenance.abort(new Error('temporary summary maintenance budget exhausted')),
+    temporarySummaryBudgetMs,
+  )
+  const abortOnDisconnect = (): void => {
+    maintenance.abort(signal.reason)
+  }
+  signal.addEventListener('abort', abortOnDisconnect, { once: true })
+  try {
+    const message = await collectTurn({
+      protocol: body.model.protocol,
+      baseUrl: body.model.baseUrl,
+      apiKey: body.model.apiKey,
+      modelId: body.model.upstreamModelId,
+      contextWindow: body.model.contextWindow,
+      maxOutputTokens: Math.min(1024, body.model.maxOutputTokens),
+      reasoning: 'off',
+      context: {
+        systemPrompt: summaryPrompt(),
+        messages: [{ role: 'user' as const, content: prompt, timestamp: Date.now() }],
+      },
+      allowInsecureHttp: options.allowInsecureProviderHttp,
+      deadlineAt: new Date(Date.now() + temporarySummaryBudgetMs),
+      signal: maintenance.signal,
+    })
+    const parsed = parseSummary(message.text)
+    return parsed === null ? null : sanitizeTemporarySummary(parsed)
+  } catch {
+    return null
+  } finally {
+    clearTimeout(budgetTimer)
+    signal.removeEventListener('abort', abortOnDisconnect)
+  }
 }
 
 class TemporaryCitationError extends Error {}

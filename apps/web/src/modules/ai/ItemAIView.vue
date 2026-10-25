@@ -44,6 +44,7 @@ const taskPolicy = ref<SensitivePolicy>('block')
 const includeRelated = ref(false)
 const loading = ref(true)
 const artifactLoading = ref(false)
+const artifactError = ref('')
 const busy = ref(false)
 const pageError = ref('')
 const successMessage = ref('')
@@ -53,7 +54,11 @@ const applyTitle = ref(false)
 const applyFolder = ref(false)
 const applyTags = ref<string[]>([])
 const actionDialog = ref<HTMLElement | null>(null)
+const versionSelect = ref<HTMLSelectElement | null>(null)
 let pollingTimer: number | undefined
+let dialogTrigger: HTMLElement | null = null
+// 离页标记：置位后晚到的响应直接丢弃，不再写界面状态、排轮询或补发读取；后端已提交的任务照常执行。
+let unmounted = false
 
 const allModels = computed(() => availableModels(providers.value))
 const visionModels = computed(() => availableModels(providers.value, true))
@@ -78,10 +83,25 @@ watch(
 )
 
 watch(taskType, () => chooseDefaultModel())
-watch(selectedArtifactID, (id) => void loadArtifact(id))
+// busy 会禁用弹窗内当前聚焦的按钮，浏览器随之把焦点挤到 body；拉回弹窗内可聚焦处。
+watch(busy, async (value) => {
+  if (!value || (!applyOpen.value && !confirmAction.value)) return
+  await nextTick()
+  void focusDialog()
+})
+watch(selectedArtifactID, (id) => {
+  if (confirmAction.value) closeConfirmDialog()
+  if (applyOpen.value) closeApplyDialog()
+  selectedArtifact.value = null
+  void loadArtifact(id)
+})
 
 onMounted(() => void loadState())
-onBeforeUnmount(() => window.clearTimeout(pollingTimer))
+onBeforeUnmount(() => {
+  unmounted = true
+  window.clearTimeout(pollingTimer)
+  invalidateArtifactFetch()
+})
 
 async function loadState() {
   loading.value = true
@@ -120,6 +140,7 @@ async function loadArtifacts(preferLatest = false) {
   const response = await apiRequest<{ items: ArtifactSummary[] }>(
     `/api/v1/items/${props.itemId}/artifacts`,
   )
+  if (unmounted) return
   artifacts.value = response.items
   const current = artifacts.value.find((artifact) => artifact.id === selectedArtifactID.value)
   if (preferLatest || !current) {
@@ -132,32 +153,62 @@ async function loadArtifacts(preferLatest = false) {
   }
 }
 
+// Only the latest artifact request may write detail, error or loading state;
+// switching versions, reloading the list and unmounting abort stale ones.
+let artifactFetchController: AbortController | null = null
+
+function invalidateArtifactFetch() {
+  artifactFetchController?.abort()
+  artifactFetchController = null
+  artifactLoading.value = false
+}
+
 async function loadArtifact(id: string) {
+  invalidateArtifactFetch()
+  artifactError.value = ''
   if (!id) {
     selectedArtifact.value = null
     return
   }
+  const controller = new AbortController()
+  artifactFetchController = controller
   artifactLoading.value = true
   pageError.value = ''
   try {
-    selectedArtifact.value = await apiRequest<ArtifactDetail>(`/api/v1/artifacts/${id}`)
+    const detail = await apiRequest<ArtifactDetail>(`/api/v1/artifacts/${id}`, {
+      signal: controller.signal,
+    })
+    if (controller.signal.aborted) return
+    selectedArtifact.value = detail
   } catch (error) {
+    if (controller.signal.aborted) return
     selectedArtifact.value = null
-    pageError.value = messageFor(error)
+    // 详情读取失败只归版本详情区，与任务/全局错误分开，避免被顶部通知加“暂无版本”空态误导。
+    artifactError.value = messageFor(error)
   } finally {
-    artifactLoading.value = false
+    if (!controller.signal.aborted) artifactLoading.value = false
   }
 }
 
+function reloadArtifact() {
+  if (!selectedArtifactID.value || artifactLoading.value) return
+  void loadArtifact(selectedArtifactID.value)
+}
+
 async function loadTasks() {
+  // create/retry 的 800ms 轮询会覆盖仍在等待的 2500ms 句柄，卸载只清得走最新句柄；旧句柄触发时在此止步。
+  if (unmounted) return
   window.clearTimeout(pollingTimer)
   try {
     const response = await apiRequest<{ items: AITask[] }>(
       `/api/v1/ai/tasks?itemId=${encodeURIComponent(props.itemId)}&limit=20`,
     )
+    if (unmounted) return
     const hadActive = hasActiveTask.value
     tasks.value = response.items
     if (hadActive && !hasActiveTask.value) await loadArtifacts(true)
+    // 嵌套读取期间重试/创建可能写入 queued 任务使 hasActiveTask 复真；离页后不再重排轮询。
+    if (unmounted) return
     if (hasActiveTask.value) pollingTimer = window.setTimeout(() => void loadTasks(), 2500)
   } catch (error) {
     pageError.value = messageFor(error)
@@ -185,6 +236,7 @@ async function createTask() {
         auth.csrfToken,
       ),
     )
+    if (unmounted) return
     tasks.value = [task, ...tasks.value.filter((entry) => entry.id !== task.id)]
     successMessage.value = '任务已进入队列；原始记录与现有 AI 版本不会被覆盖。'
     pollingTimer = window.setTimeout(() => void loadTasks(), 800)
@@ -203,6 +255,7 @@ async function cancelTask(task: AITask) {
       `/api/v1/ai/tasks/${task.id}/cancel`,
       jsonRequest('POST', {}, auth.csrfToken),
     )
+    if (unmounted) return
     await loadTasks()
   } catch (error) {
     pageError.value = messageFor(error)
@@ -219,6 +272,7 @@ async function retryTask(task: AITask) {
       `/api/v1/ai/tasks/${task.id}/retry`,
       jsonRequest('POST', {}, auth.csrfToken),
     )
+    if (unmounted) return
     tasks.value = [retry, ...tasks.value]
     pollingTimer = window.setTimeout(() => void loadTasks(), 800)
   } catch (error) {
@@ -228,23 +282,90 @@ async function retryTask(task: AITask) {
   }
 }
 
-function openApply() {
+function openApply(event: Event) {
   if (!selectedArtifact.value) return
   applyTitle.value = false
   applyFolder.value = false
   applyTags.value = []
+  rememberDialogTrigger(event)
   applyOpen.value = true
   void focusDialog()
 }
 
-function requestAction(action: 'activate' | 'invalidate') {
+function requestAction(action: 'activate' | 'invalidate', event: Event) {
+  rememberDialogTrigger(event)
   confirmAction.value = action
   void focusDialog()
 }
 
+function rememberDialogTrigger(event: Event) {
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+}
+
+// busy 守卫只放在模板里的用户 dismiss 入口（backdrop、header X）；版本切换清理复用这两个函数，不加 busy 早退。
+function closeApplyDialog() {
+  if (!applyOpen.value) return
+  applyOpen.value = false
+  returnFocusToTrigger()
+}
+
+function closeConfirmDialog() {
+  if (!confirmAction.value) return
+  confirmAction.value = null
+  returnFocusToTrigger()
+}
+
+async function returnFocusToTrigger() {
+  const trigger = dialogTrigger
+  dialogTrigger = null
+  await nextTick()
+  if (trigger?.isConnected) {
+    trigger.focus()
+    return
+  }
+  // 触发器已随旧版本详情移除（版本切换）时，焦点只回到仍在组件中的版本选择器。
+  if (versionSelect.value?.isConnected) versionSelect.value.focus()
+}
+
 async function focusDialog() {
   await nextTick()
-  actionDialog.value?.querySelector<HTMLElement>('button:not([disabled]), input:not([disabled])')?.focus()
+  const dialog = actionDialog.value
+  if (!dialog) return
+  const target = dialog.querySelector<HTMLElement>('button:not([disabled]), input:not([disabled])')
+  if (target) target.focus()
+  else dialog.focus()
+}
+
+// Escape 只撤销未提交的确认：busy 时 POST 已发出，关闭也不代表撤回。
+function onDialogKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && !busy.value) {
+    event.preventDefault()
+    if (applyOpen.value) closeApplyDialog()
+    else closeConfirmDialog()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const dialog = event.currentTarget as HTMLElement
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!first || !last) {
+    // busy 期间按钮全部禁用时没有可环绕项，Tab 必须留在弹窗容器上。
+    event.preventDefault()
+    dialog.focus()
+    return
+  }
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 async function confirmArtifactAction() {
@@ -257,6 +378,7 @@ async function confirmArtifactAction() {
       `/api/v1/artifacts/${selectedArtifact.value.id}/${action}`,
       jsonRequest('POST', {}, auth.csrfToken),
     )
+    if (unmounted) return
     confirmAction.value = null
     successMessage.value = action === 'activate' ? '当前派生视图已切换，原始记录未改变。' : '该版本已作废；系统没有自动回退到旧版本。'
     await loadArtifacts()
@@ -354,15 +476,25 @@ function messageFor(error: unknown) {
     <section class="artifact-workspace" aria-labelledby="artifact-workspace-title">
       <header><div><p>VERSION HISTORY</p><h3 id="artifact-workspace-title">派生版本</h3></div><span>{{ artifacts.length }} 个版本</span></header>
       <div v-if="artifacts.length" class="artifact-toolbar">
-        <label><span>查看版本</span><select v-model="selectedArtifactID"><option v-for="artifact in artifacts" :key="artifact.id" :value="artifact.id">{{ artifactTypeLabels[artifact.artifactType] }} · v{{ artifact.versionNumber }}{{ artifact.active ? ' · 当前' : '' }}{{ artifact.invalidatedAt ? ' · 已作废' : '' }}{{ artifact.isStale ? ' · 未覆盖最新原文' : '' }}</option></select></label>
+        <label><span>查看版本</span><select v-model="selectedArtifactID" ref="versionSelect"><option v-for="artifact in artifacts" :key="artifact.id" :value="artifact.id">{{ artifactTypeLabels[artifact.artifactType] }} · v{{ artifact.versionNumber }}{{ artifact.active ? ' · 当前' : '' }}{{ artifact.invalidatedAt ? ' · 已作废' : '' }}{{ artifact.isStale ? ' · 未覆盖最新原文' : '' }}</option></select></label>
         <div v-if="selectedSummary" class="artifact-badges"><span v-if="selectedSummary.active" class="badge badge--active">当前版本</span><span v-if="selectedSummary.isStale" class="badge badge--stale">未覆盖最新原始记录</span><span v-if="selectedSummary.invalidatedAt" class="badge badge--invalid">已作废</span></div>
       </div>
 
       <div v-if="artifactLoading" class="ai-loading"><span class="ai-spinner" />正在读取版本内容…</div>
       <div v-else-if="selectedArtifact" class="artifact-selected">
         <aside v-if="selectedArtifact.isStale" class="stale-warning"><UiIcon name="triangle-alert" /><div><strong>此 AI 版本未覆盖最新原始记录</strong><p>它仍可查看，若未作废也可激活或应用建议；执行动作前请先核对新增原文。</p></div></aside>
-        <header class="artifact-meta"><div><strong>{{ artifactTypeLabels[selectedArtifact.artifactType] }} · v{{ selectedArtifact.versionNumber }}</strong><span>{{ generatorLabel(selectedArtifact) }} · Prompt {{ selectedArtifact.promptVersion || '未记录' }} · {{ formatDateTime(selectedArtifact.createdAt) }}</span></div><div class="artifact-actions"><UiButton v-if="!selectedArtifact.active && !selectedArtifact.invalidatedAt" variant="secondary" :disabled="busy" @click="requestAction('activate')">设为当前版本</UiButton><UiButton v-if="!selectedArtifact.invalidatedAt" variant="secondary" :disabled="busy" @click="openApply">应用建议</UiButton><UiButton variant="secondary" :disabled="busy" @click="prepareRegeneration"><UiIcon name="rotate-ccw" />重新生成</UiButton><UiButton v-if="!selectedArtifact.invalidatedAt" variant="danger" :disabled="busy" @click="requestAction('invalidate')">作废版本</UiButton></div></header>
+        <header class="artifact-meta"><div><strong>{{ artifactTypeLabels[selectedArtifact.artifactType] }} · v{{ selectedArtifact.versionNumber }}</strong><span>{{ generatorLabel(selectedArtifact) }} · Prompt {{ selectedArtifact.promptVersion || '未记录' }} · {{ formatDateTime(selectedArtifact.createdAt) }}</span></div><div class="artifact-actions"><UiButton v-if="!selectedArtifact.active && !selectedArtifact.invalidatedAt" variant="secondary" :disabled="busy" @click="requestAction('activate', $event)">设为当前版本</UiButton><UiButton v-if="!selectedArtifact.invalidatedAt" variant="secondary" :disabled="busy" @click="openApply">应用建议</UiButton><UiButton variant="secondary" :disabled="busy" @click="prepareRegeneration"><UiIcon name="rotate-ccw" />重新生成</UiButton><UiButton v-if="!selectedArtifact.invalidatedAt" variant="danger" :disabled="busy" @click="requestAction('invalidate', $event)">作废版本</UiButton></div></header>
         <ArtifactBlocks :content="selectedArtifact.content" :attachments="attachments" @source="emit('source', $event)" />
+      </div>
+
+      <div v-else-if="artifactError" class="artifact-load-error" role="alert">
+        <UiIcon name="triangle-alert" />
+        <div>
+          <strong>版本内容读取失败</strong>
+          <p>{{ artifactError }}</p>
+          <p>该版本已生成，列表未受影响；重新加载只重新读取该版本内容，不会创建新任务。</p>
+        </div>
+        <UiButton variant="secondary" :disabled="artifactLoading" @click="reloadArtifact"><UiIcon name="rotate-ccw" />重新加载</UiButton>
       </div>
 
       <div v-else class="artifact-empty"><UiIcon name="sparkles" :size="30" /><h3>暂无 AI 派生版本</h3><p>你仍可完整使用原始记录、附件和人工元数据。配置可用模型后，可从上方创建候选版本。</p></div>
@@ -370,26 +502,26 @@ function messageFor(error: unknown) {
   </section>
 
   <Teleport to="body">
-    <div v-if="confirmAction && selectedArtifact" class="ai-overlay" @click.self="confirmAction = null">
-      <section ref="actionDialog" class="ai-dialog" role="alertdialog" aria-modal="true" aria-labelledby="artifact-action-title">
+    <div v-if="confirmAction && selectedArtifact" class="ai-overlay" @click.self="!busy && closeConfirmDialog()">
+      <section ref="actionDialog" class="ai-dialog" role="alertdialog" aria-modal="true" aria-labelledby="artifact-action-title" tabindex="-1" @keydown="onDialogKeydown">
         <UiIcon :name="confirmAction === 'invalidate' ? 'triangle-alert' : 'sparkles'" :size="26" />
         <h2 id="artifact-action-title">{{ confirmAction === 'activate' ? '设为当前派生版本？' : '作废这个版本？' }}</h2>
         <p v-if="selectedArtifact.isStale" class="dialog-warning">此 AI 版本未覆盖最新原始记录。继续前请确认你已核对新增原文。</p>
         <p>{{ confirmAction === 'activate' ? '只会切换参与普通搜索和默认展示的派生版本；不会覆盖原文、人工标题、目录或正式标签。' : '作废后该版本只能查看，不能再次激活或应用建议；系统不会自动回退到旧版本。' }}</p>
-        <div class="dialog-actions"><UiButton variant="ghost" :disabled="busy" @click="confirmAction = null">取消</UiButton><UiButton :variant="confirmAction === 'invalidate' ? 'danger' : 'primary'" :disabled="busy" @click="confirmArtifactAction">{{ busy ? '正在处理…' : '确认' }}</UiButton></div>
+        <div class="dialog-actions"><UiButton variant="ghost" :disabled="busy" @click="closeConfirmDialog()">取消</UiButton><UiButton :variant="confirmAction === 'invalidate' ? 'danger' : 'primary'" :disabled="busy" @click="confirmArtifactAction">{{ busy ? '正在处理…' : '确认' }}</UiButton></div>
       </section>
     </div>
 
-    <div v-if="applyOpen && selectedArtifact && selectedClassification" class="ai-overlay" @click.self="applyOpen = false">
-      <section ref="actionDialog" class="ai-dialog apply-dialog" role="dialog" aria-modal="true" aria-labelledby="apply-suggestions-title">
-        <header><div><p>SELECTIVE APPLY</p><h2 id="apply-suggestions-title">选择要应用的建议</h2></div><button type="button" aria-label="关闭" @click="applyOpen = false"><UiIcon name="x" /></button></header>
+    <div v-if="applyOpen && selectedArtifact && selectedClassification" class="ai-overlay" @click.self="!busy && closeApplyDialog()">
+      <section ref="actionDialog" class="ai-dialog apply-dialog" role="dialog" aria-modal="true" aria-labelledby="apply-suggestions-title" tabindex="-1" @keydown="onDialogKeydown">
+        <header><div><p>SELECTIVE APPLY</p><h2 id="apply-suggestions-title">选择要应用的建议</h2></div><button type="button" aria-label="关闭" :disabled="busy" @click="closeApplyDialog()"><UiIcon name="x" /></button></header>
         <p v-if="selectedArtifact.isStale" class="dialog-warning">此 AI 版本未覆盖最新原始记录。应用前请核对建议是否仍适用。</p>
         <p>只修改你勾选的人工元数据；原始记录、附件、敏感状态与该 Artifact 不会改变。</p>
         <label class="suggestion"><input v-model="applyTitle" type="checkbox" /><span><strong>标题</strong><small>{{ selectedArtifact.content.title }}</small></span></label>
         <label class="suggestion"><input v-model="applyFolder" type="checkbox" /><span><strong>目录</strong><small>{{ selectedClassification.suggestedFolderPath.join(' / ') || '收件箱' }}</small></span></label>
         <fieldset><legend>标签（只会应用所选建议）</legend><label v-for="tag in selectedClassification.suggestedTags" :key="tag" class="tag-suggestion"><input v-model="applyTags" type="checkbox" :value="tag" />{{ tag }}</label><p v-if="!selectedClassification.suggestedTags.length">这个版本没有标签建议。</p></fieldset>
         <aside class="sensitivity-suggestion"><UiIcon name="shield-alert" /><span><strong>敏感状态建议：{{ selectedClassification.sensitivitySuggestion }}</strong>{{ selectedClassification.sensitivityReason || '未提供理由' }}。一期不会从此处自动应用敏感状态。</span></aside>
-        <div class="dialog-actions"><UiButton variant="ghost" :disabled="busy" @click="applyOpen = false">取消</UiButton><UiButton variant="primary" :disabled="busy || !canApply" @click="applySuggestions">{{ busy ? '正在应用…' : '应用所选建议' }}</UiButton></div>
+        <div class="dialog-actions"><UiButton variant="ghost" :disabled="busy" @click="closeApplyDialog()">取消</UiButton><UiButton variant="primary" :disabled="busy || !canApply" @click="applySuggestions">{{ busy ? '正在应用…' : '应用所选建议' }}</UiButton></div>
       </section>
     </div>
   </Teleport>
@@ -433,6 +565,10 @@ function messageFor(error: unknown) {
 .badge--stale { color: var(--warning); }
 .badge--invalid { color: var(--danger); }
 .artifact-selected { display: grid; gap: var(--space-4); }
+.artifact-load-error { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-4); border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-subtle)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--danger) 8%, transparent); color: var(--text-secondary); }
+.artifact-load-error > svg { color: var(--danger); }
+.artifact-load-error strong { color: var(--text-primary); }
+.artifact-load-error p { margin: 0; }
 .stale-warning { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--warning) 60%, var(--border-subtle)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--warning) 8%, transparent); }
 .stale-warning > svg { color: var(--warning); }
 .stale-warning p { margin: 0; color: var(--text-secondary); }
@@ -455,7 +591,8 @@ function messageFor(error: unknown) {
 .apply-dialog { width: min(620px, calc(100vw - 32px)); }
 .apply-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; }
 .apply-dialog header h2, .apply-dialog header p { margin: 0; }
-.apply-dialog header button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.apply-dialog header button { display: inline-flex; width: 44px; height: 44px; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.apply-dialog header button:disabled { cursor: not-allowed; opacity: .45; }
 .suggestion { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); }
 .suggestion span { display: grid; }
 .suggestion small { color: var(--text-muted); }
@@ -465,5 +602,5 @@ function messageFor(error: unknown) {
 .sensitivity-suggestion { display: flex; gap: var(--space-2); margin-top: var(--space-3); color: var(--text-secondary); }
 .sensitivity-suggestion span { display: grid; }
 @media (max-width: 900px) { .task-form { grid-template-columns: 1fr 1fr; } .artifact-meta { display: grid; } .artifact-actions { justify-content: flex-start; } }
-@media (max-width: 600px) { .item-ai__header { align-items: flex-start; } .task-form { grid-template-columns: 1fr; } .task-form > *, .related-check, .sensitive-note, .empty-model { grid-column: 1; } .task-row { grid-template-columns: 1fr; } .artifact-toolbar { align-items: stretch; flex-direction: column; } .artifact-toolbar label { min-width: 0; } .artifact-badges { justify-content: flex-start; } .artifact-actions > * { flex: 1 1 auto; } }
+@media (max-width: 600px) { .item-ai__header { align-items: flex-start; } .task-form { grid-template-columns: 1fr; } .task-form > *, .related-check, .sensitive-note, .empty-model { grid-column: 1; } .task-row { grid-template-columns: 1fr; } .artifact-toolbar { align-items: stretch; flex-direction: column; } .artifact-toolbar label { min-width: 0; } .artifact-badges { justify-content: flex-start; } .artifact-actions > * { flex: 1 1 auto; } .artifact-load-error { grid-template-columns: 1fr; justify-items: start; } }
 </style>

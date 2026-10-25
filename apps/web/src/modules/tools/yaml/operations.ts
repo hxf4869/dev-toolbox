@@ -149,7 +149,11 @@ function yamlNodeToLossless(node: Node | null, document: Document.Parsed): Lossl
 }
 
 function yamlScalarToLossless(node: Scalar): LosslessJsonValue {
-  if (typeof node.value === 'bigint') return new LosslessNumber(node.value.toString())
+  if (typeof node.value === 'bigint') {
+    const source = node.source ?? node.value.toString()
+    if (isNumber(source)) return new LosslessNumber(source)
+    return new LosslessNumber(node.value.toString())
+  }
   if (typeof node.value === 'number') {
     if (!Number.isFinite(node.value)) {
       throw new StructuredToolError({ code: 'YAML_NON_JSON_NUMBER', message: 'NaN 和 Infinity 不能转换为 JSON 数值。' })

@@ -26,6 +26,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
 const resultList = ref<HTMLOListElement | null>(null)
 const filtersOpen = ref(false)
 const purgeTarget = ref<{ id: string; title: string } | null>(null)
+const purgeDialog = ref<HTMLElement | null>(null)
 const destructiveBusy = ref(false)
 const destructiveError = ref('')
 const contentKindOptions = [
@@ -50,11 +51,13 @@ const filters = computed<LibraryFilters>(() => ({
   folderId: typeof route.query.folderId === 'string' ? route.query.folderId : undefined,
   tagId: typeof route.query.tagId === 'string' ? route.query.tagId : undefined,
   sort:
-    route.query.sort === 'effective_desc' || route.query.sort === 'updated_desc'
-      ? route.query.sort
-      : route.query.view === 'recent'
-        ? 'effective_desc'
-        : 'updated_desc',
+    route.query.view === 'recent' && !library.query.trim()
+      ? 'effective_desc'
+      : route.query.sort === 'effective_desc' || route.query.sort === 'updated_desc'
+        ? route.query.sort
+        : route.query.view === 'recent'
+          ? 'effective_desc'
+          : 'updated_desc',
   contentKinds: queryValues(route.query.kind).filter(isContentKind),
   sensitivity: queryValues(route.query.sensitivity).filter(isSensitivity),
   from: dateBoundary(route.query.from, false),
@@ -149,6 +152,8 @@ function onResultsScroll() {
 
 function onGlobalShortcut(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null
+  // 模态弹窗内的按键归属弹窗（Tab / Escape 由弹窗自身处理），不触发背景快捷键
+  if (target?.closest('[aria-modal="true"]')) return
   const editable = target?.matches('input, textarea, select, [contenteditable="true"]')
   if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !editable) {
     event.preventDefault()
@@ -245,7 +250,8 @@ async function loadMore() {
   else await library.browse(filters.value, library.nextCursor)
 }
 
-async function restoreItem(id: string) {
+async function restoreItem(id: string, event: Event) {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
   destructiveBusy.value = true
   destructiveError.value = ''
   try {
@@ -255,6 +261,8 @@ async function restoreItem(id: string) {
     destructiveError.value = error instanceof Error ? error.message : '恢复失败'
   } finally {
     destructiveBusy.value = false
+    await nextTick()
+    if (trigger?.isConnected && document.activeElement === document.body) trigger.focus()
   }
 }
 
@@ -276,6 +284,66 @@ async function purgeItem() {
     destructiveBusy.value = false
   }
 }
+
+// 永久删除弹窗的键盘归属：记录触发器，打开即入焦「取消」，Tab 首尾闭环，Escape / 指针取消共用关闭并回焦。
+let purgeTrigger: HTMLElement | null = null
+
+async function openPurgeDialog(event: Event, entry: (typeof library.results)[number]) {
+  purgeTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  destructiveError.value = ''
+  purgeTarget.value = { id: entryID(entry), title: entryTitle(entry) }
+  await nextTick()
+  // 初焦安全的「取消」按钮（弹窗内最后一个可用按钮），避免直接落在危险操作上
+  const buttons = Array.from(purgeDialog.value?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])
+  ;(buttons[buttons.length - 1] ?? purgeDialog.value)?.focus()
+}
+
+async function closePurgeDialog() {
+  // 永久删除进行中与取消按钮的 disabled=busy 语义一致，取消不得关闭
+  if (!purgeTarget.value || destructiveBusy.value) return
+  purgeTarget.value = null
+  destructiveError.value = ''
+  const trigger = purgeTrigger
+  purgeTrigger = null
+  await nextTick()
+  if (trigger?.isConnected) trigger.focus()
+}
+
+function onPurgeDialogKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    // IME 组合中的 Escape 属于输入法行为，不当作弹窗取消
+    if (event.isComposing) return
+    event.preventDefault()
+    void closePurgeDialog()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const dialog = event.currentTarget as HTMLElement
+  const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled])'))
+  // busy 期间按钮全部禁用时没有可环绕项，Tab 必须留在弹窗容器上
+  if (!focusable.length) {
+    event.preventDefault()
+    dialog.focus()
+    return
+  }
+  // 弹窗内 Tab 首尾循环：焦点始终在弹窗的操作之间流转，不外泄到弹窗外
+  event.preventDefault()
+  const current = focusable.indexOf(document.activeElement as HTMLElement)
+  const step = event.shiftKey ? -1 : 1
+  focusable[(current + step + focusable.length) % focusable.length].focus()
+}
+
+// busy 使已聚焦的确认按钮失效后（浏览器把焦点还给 viewport，jsdom 停在禁用控件上），
+// 弹窗仍打开时把焦点收回容器；当前焦点仍有效时不重置。
+watch(destructiveBusy, async (busy) => {
+  if (!busy || !purgeTarget.value) return
+  await nextTick()
+  const root = purgeDialog.value
+  if (!root) return
+  const active = document.activeElement
+  if (active instanceof HTMLElement && root.contains(active) && active.matches('button:not([disabled])')) return
+  root.focus()
+})
 
 async function onCreated() {
   await Promise.all([refreshResults(), library.loadNavigation()])
@@ -411,7 +479,7 @@ function formatTime(value: string) {
         </div>
         <label>
           <span class="sr-only">排序</span>
-          <select :value="filters.sort" @change="changeSort">
+          <select :value="filters.sort" :disabled="filters.view === 'recent' && !library.query.trim()" @change="changeSort">
             <option value="updated_desc">{{ library.mode === 'search' ? '相关性' : '最近更新' }}</option>
             <option value="effective_desc">有效采集时间</option>
           </select>
@@ -457,6 +525,11 @@ function formatTime(value: string) {
         </button>
       </div>
 
+      <div v-if="isTrash && destructiveError && !purgeTarget" class="refresh-error" role="alert">
+        <UiIcon name="triangle-alert" :size="16" />
+        <span>{{ destructiveError }}</span>
+      </div>
+
       <div v-if="!online" class="result-state result-state--offline" role="status">
         <UiIcon name="wifi-off" :size="25" />
         <h3>当前处于离线状态</h3>
@@ -480,7 +553,7 @@ function formatTime(value: string) {
       <div v-else-if="library.results.length === 0" class="result-state">
         <UiIcon :name="library.mode === 'search' ? 'search' : isTrash ? 'trash-2' : 'inbox'" :size="26" />
         <h3>{{ library.mode === 'search' ? '没有符合当前条件的记录' : isTrash ? '回收站是空的' : '这里还没有记录' }}</h3>
-        <p v-if="library.mode === 'search'">换一个字面词，或清除目录与标签过滤。搜索不会解释布尔语法。</p>
+        <p v-if="library.mode === 'search'">换一个字面词，或调整筛选条件。搜索不会解释布尔语法。</p>
         <p v-else-if="isTrash">移入回收站的条目会保留原文与附件，直到你明确永久删除。</p>
         <p v-else>快速记录不依赖 Provider 或 AI worker。</p>
         <UiButton v-if="library.mode === 'search'" variant="secondary" @click="clearSearch">清除搜索</UiButton>
@@ -495,7 +568,7 @@ function formatTime(value: string) {
         </div>
         <ol ref="resultList" class="result-list" @keydown="onResultKeydown">
         <li v-for="entry in library.results" :key="entryID(entry)" :class="{ active: selectedItemID === entryID(entry) }">
-          <RouterLink v-if="!isTrash" :to="detailLocation(entry)" class="result-card">
+          <RouterLink v-if="!isTrash || !libraryEntry(entry)?.deletedAt" :to="detailLocation(entry)" class="result-card">
             <span class="result-card__icon" :class="{ sensitive: entrySensitivity(entry) !== 'normal' }">
               <UiIcon :name="entrySensitivity(entry) === 'normal' ? 'file-text' : 'shield-alert'" />
             </span>
@@ -514,8 +587,8 @@ function formatTime(value: string) {
           <div v-else class="result-card result-card--trash">
             <span class="result-card__icon"><UiIcon name="trash-2" /></span>
             <span class="result-card__body"><strong>{{ entryTitle(entry) }}</strong><small>删除于 {{ formatTime(libraryEntry(entry)?.updatedAt ?? entryTime(entry)) }}</small></span>
-            <UiButton variant="secondary" :disabled="destructiveBusy" @click="restoreItem(entryID(entry))">恢复</UiButton>
-            <UiButton variant="danger" :disabled="destructiveBusy" @click="purgeTarget = { id: entryID(entry), title: entryTitle(entry) }">永久删除</UiButton>
+            <UiButton variant="secondary" :disabled="destructiveBusy" @click="restoreItem(entryID(entry), $event)">恢复</UiButton>
+            <UiButton variant="danger" :disabled="destructiveBusy" @click="openPurgeDialog($event, entry)">永久删除</UiButton>
           </div>
         </li>
         </ol>
@@ -540,13 +613,22 @@ function formatTime(value: string) {
 
   <Teleport to="body">
     <div v-if="purgeTarget" class="purge-overlay">
-      <section role="alertdialog" aria-modal="true" aria-labelledby="purge-title" class="purge-dialog">
+      <section
+        ref="purgeDialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="purge-title"
+        aria-describedby="purge-description"
+        class="purge-dialog"
+        tabindex="-1"
+        @keydown="onPurgeDialogKeydown"
+      >
         <UiIcon name="triangle-alert" :size="28" />
         <h2 id="purge-title">永久删除“{{ purgeTarget.title }}”？</h2>
-        <p>这会物理删除关联的原始记录、附件、缩略图、搜索片段和 AI 版本，无法从回收站恢复。</p>
+        <p id="purge-description">这会物理删除关联的原始记录、附件、缩略图、搜索片段和 AI 版本，无法从回收站恢复。</p>
         <p v-if="destructiveError" class="purge-dialog__error" role="alert">{{ destructiveError }}</p>
         <UiButton variant="danger" :disabled="destructiveBusy" @click="purgeItem">{{ destructiveBusy ? '正在永久删除' : '确认永久删除' }}</UiButton>
-        <UiButton variant="ghost" :disabled="destructiveBusy" @click="purgeTarget = null; destructiveError = ''">取消</UiButton>
+        <UiButton variant="ghost" :disabled="destructiveBusy" @click="closePurgeDialog">取消</UiButton>
       </section>
     </div>
   </Teleport>
@@ -641,6 +723,7 @@ function formatTime(value: string) {
   .sensitivity-label { display: none; }
   .result-card--trash { grid-template-columns: auto minmax(0, 1fr); }
   .result-card--trash button { grid-column: 2; }
+  .purge-dialog button { min-height: 44px; }
   .search-filters { grid-template-columns: 1fr; }
   .results-pane__header { flex-wrap: wrap; }
 }

@@ -56,8 +56,16 @@ const dirty = computed(
     contentFormat.value !== 'plain_text',
 )
 const totalBytes = computed(() => files.value.reduce((total, file) => total + file.size, 0))
+// The API enforces the 1 MiB limit on UTF-8 bytes, not on character count.
+const BODY_LIMIT_BYTES = 1024 * 1024
+const utf8Encoder = new TextEncoder()
+const bodyBytes = computed(() => utf8Encoder.encode(body.value).length)
+const bodyTooLarge = computed(() => bodyBytes.value > BODY_LIMIT_BYTES)
 const canSave = computed(
-  () => !saving.value && (body.value.trim() !== '' || files.value.length > 0),
+  () =>
+    !saving.value &&
+    (body.value.trim() !== '' || files.value.length > 0) &&
+    bodyBytes.value <= BODY_LIMIT_BYTES,
 )
 
 watch(
@@ -144,6 +152,17 @@ function dialogFocusableElements(scope: HTMLElement) {
 
 function onDialogKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    // Keys during IME composition belong to the input method. Safari reports
+    // the composition-confirm keydown as keyCode 229 with isComposing=false
+    // (WebKit bug 324380), so both shapes are treated as composing.
+    if (event.isComposing || event.keyCode === 229) return
+    // The discard confirm is the topmost layer: Escape closes only it, and
+    // the existing confirmDiscard watch returns focus to the editor.
+    if (confirmDiscard.value) {
+      event.preventDefault()
+      confirmDiscard.value = false
+      return
+    }
     onEscape(event)
     if (!event.defaultPrevented) requestClose()
     return
@@ -191,6 +210,7 @@ function onPaste(event: ClipboardEvent) {
 }
 
 function addFiles(incoming: File[]) {
+  if (saving.value) return
   errorMessage.value = ''
   const next = [...files.value]
   for (const file of incoming) {
@@ -238,6 +258,20 @@ async function save() {
   }
 
   saving.value = true
+  // A control disabled by the saving lock cannot keep the dialog's keyboard
+  // focus; hand it to the readonly editor only when the refreshed DOM left
+  // the current focus unusable.
+  void nextTick(() => {
+    const active = document.activeElement
+    if (
+      !(active instanceof HTMLElement) ||
+      active === document.body ||
+      !drawer.value?.contains(active) ||
+      active.hasAttribute('disabled')
+    ) {
+      editor.value?.focus()
+    }
+  })
   try {
     let response: CreateResponse
     if (files.value.length === 0) {
@@ -276,6 +310,9 @@ async function save() {
 }
 
 function onEditorKeydown(event: KeyboardEvent) {
+  // Ctrl/Meta+Enter during IME composition stays with the input method,
+  // including Safari's keyCode-229 composition-confirm shape.
+  if (event.isComposing || event.keyCode === 229) return
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault()
     void save()
@@ -322,7 +359,8 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
         <div class="capture-drawer__body">
           <div v-if="sensitive" class="sensitive-banner" role="status">
             <UiIcon name="shield-alert" />
-            <span><strong>敏感内容</strong>列表将使用安全标题，原文仅在明确揭示后读取。</span>
+            <span v-if="title.trim()"><strong>敏感内容</strong>自定义标题会以原文出现在列表与搜索结果中；正文仅在明确揭示后读取。</span>
+            <span v-else><strong>敏感内容</strong>列表将使用安全标题，原文仅在明确揭示后读取。</span>
           </div>
 
           <label class="editor-field">
@@ -331,22 +369,27 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
               ref="editor"
               v-model="body"
               rows="11"
-              maxlength="1048576"
               placeholder="粘贴命令、排查过程、配置片段或任何需要保留的原始内容…"
+              :aria-invalid="bodyTooLarge"
+              :aria-describedby="bodyTooLarge ? 'capture-body-limit' : undefined"
+              :readonly="saving"
               @keydown="onEditorKeydown"
               @paste="onPaste"
             />
           </label>
 
           <div class="capture-toolbar" role="group" aria-label="内容格式">
-            <button type="button" :class="{ active: contentFormat === 'plain_text' }" :aria-pressed="contentFormat === 'plain_text'" @click="contentFormat = 'plain_text'">
+            <button type="button" :disabled="saving" :class="{ active: contentFormat === 'plain_text' }" :aria-pressed="contentFormat === 'plain_text'" @click="contentFormat = 'plain_text'">
               纯文本
             </button>
-            <button type="button" :class="{ active: contentFormat === 'markdown' }" :aria-pressed="contentFormat === 'markdown'" @click="contentFormat = 'markdown'">
+            <button type="button" :disabled="saving" :class="{ active: contentFormat === 'markdown' }" :aria-pressed="contentFormat === 'markdown'" @click="contentFormat = 'markdown'">
               Markdown
             </button>
-            <span>{{ body.length.toLocaleString('zh-CN') }} 字符</span>
+            <span>{{ bodyBytes.toLocaleString('zh-CN') }} / {{ BODY_LIMIT_BYTES.toLocaleString('zh-CN') }} 字节</span>
           </div>
+          <p v-if="bodyTooLarge" id="capture-body-limit" class="body-limit-warning" role="alert">
+            正文 {{ bodyBytes.toLocaleString('zh-CN') }} 字节，已超过单条原始正文 1 MiB（{{ BODY_LIMIT_BYTES.toLocaleString('zh-CN') }} 字节）上限；请修剪后再保存，输入不会被自动截断。
+          </p>
 
           <section class="attachments" aria-labelledby="capture-attachments-title">
             <header>
@@ -354,14 +397,14 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
                 <h3 id="capture-attachments-title">附件</h3>
                 <p>最多 10 个；单文件 20 MiB，合计 100 MiB。</p>
               </div>
-              <UiButton variant="secondary" @click="chooseFiles"><UiIcon name="paperclip" /> 添加文件</UiButton>
+              <UiButton variant="secondary" :disabled="saving" @click="chooseFiles"><UiIcon name="paperclip" /> 添加文件</UiButton>
               <input ref="fileInput" class="sr-only" type="file" multiple tabindex="-1" aria-label="选择记录附件" @change="onFileSelection" />
             </header>
             <ul v-if="files.length">
               <li v-for="(file, index) in files" :key="`${file.name}-${file.lastModified}-${index}`">
                 <UiIcon :name="file.type.startsWith('image/') ? 'image' : 'file-text'" />
                 <span><strong>{{ file.name }}</strong><small>{{ formatBytes(file.size) }}</small></span>
-                <button type="button" :aria-label="`移除 ${file.name}`" @click="removeFile(index)">
+                <button type="button" :disabled="saving" :aria-label="`移除 ${file.name}`" @click="removeFile(index)">
                   <UiIcon name="x" :size="16" />
                 </button>
               </li>
@@ -374,11 +417,11 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
             <summary>更多选项</summary>
             <label>
               <span>自定义标题 <small>可选，最多 200 字符</small></span>
-              <input v-model="title" maxlength="200" placeholder="留空时按原文确定性生成" />
+              <input v-model="title" maxlength="200" :readonly="saving" placeholder="留空时按原文确定性生成" />
             </label>
             <label>
               <span>目录 <small>可选</small></span>
-              <select v-model="folderId">
+              <select v-model="folderId" :disabled="saving">
                 <option value="">原始收件箱</option>
                 <option v-for="folder in flatFolders" :key="folder.id" :value="folder.id">{{ '　'.repeat(folder.depth) }}{{ folder.name }}</option>
               </select>
@@ -386,7 +429,7 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
             <fieldset v-if="library.tags.length">
               <legend>标签 <small>最多 30 个</small></legend>
               <label v-for="tag in library.tags" :key="tag.id" class="capture-tag">
-                <input v-model="tagIds" type="checkbox" :value="tag.id" :disabled="!tagIds.includes(tag.id) && tagIds.length >= 30" /> {{ tag.name }}
+                <input v-model="tagIds" type="checkbox" :value="tag.id" :disabled="saving || (!tagIds.includes(tag.id) && tagIds.length >= 30)" /> {{ tag.name }}
               </label>
             </fieldset>
           </details>
@@ -396,7 +439,7 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
               <UiIcon name="shield-alert" />
               <span><strong>标记为敏感</strong><small>密码、私钥、Token 或内部地址等内容。</small></span>
             </span>
-            <input v-model="sensitive" type="checkbox" role="switch" />
+            <input v-model="sensitive" type="checkbox" role="switch" :disabled="saving" />
           </label>
 
           <div v-if="savedMessage" class="capture-state capture-state--success" role="status">
@@ -444,7 +487,7 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
 .capture-drawer__header h2, .capture-drawer__header p { margin: 0; }
 .capture-drawer__header h2 { font-size: 16px; }
 .capture-drawer__header p { margin-top: 2px; color: var(--text-muted); font-size: 12px; }
-.icon-button { display: inline-grid; width: 36px; height: 36px; flex: none; place-items: center; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); cursor: pointer; }
+.icon-button { display: inline-grid; width: 40px; height: 40px; flex: none; place-items: center; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); cursor: pointer; }
 .icon-button:hover { border-color: var(--border-subtle); background: var(--bg-elevated); }
 .capture-drawer__body { overflow-y: auto; padding: var(--space-4); }
 .editor-field, .capture-options label { display: grid; gap: var(--space-2); }
@@ -453,9 +496,10 @@ function flattenFolders(entries: FolderEntry[], depth = 0): Array<FolderEntry & 
 textarea, .capture-options input, .capture-options select { width: 100%; padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); }
 textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.65; }
 .capture-toolbar { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-2) 0 var(--space-4); border-bottom: 1px solid var(--border-subtle); }
-.capture-toolbar button { padding: 5px var(--space-2); border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; }
+.capture-toolbar button { min-height: 40px; padding: 5px var(--space-2); border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; }
 .capture-toolbar button.active { border-color: var(--border-strong); background: var(--bg-elevated); color: var(--text-primary); }
 .capture-toolbar span { margin-left: auto; color: var(--text-muted); font-size: 11px; }
+.body-limit-warning { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid color-mix(in srgb, var(--danger) 65%, var(--border-subtle)); border-radius: var(--radius-control); color: var(--danger); font-size: 12px; }
 .attachments { padding: var(--space-4) 0; border-bottom: 1px solid var(--border-subtle); }
 .attachments header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .attachments h3, .attachments p { margin: 0; }
@@ -467,10 +511,10 @@ textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); f
 .attachments li span, .attachments li small { display: block; min-width: 0; }
 .attachments li strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .attachments li small { color: var(--text-muted); font-size: 10px; }
-.attachments li button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.attachments li button { display: inline-grid; min-width: 40px; min-height: 40px; place-items: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
 .attachments__total { margin-top: var(--space-2) !important; text-align: right; }
 .capture-options { padding: var(--space-4) 0; border-bottom: 1px solid var(--border-subtle); }
-.capture-options summary { margin-bottom: var(--space-3); cursor: pointer; color: var(--text-secondary); font-size: 12px; font-weight: 700; }
+.capture-options summary { min-height: 40px; margin-bottom: var(--space-3); padding: 10px 0; cursor: pointer; color: var(--text-secondary); font-size: 12px; font-weight: 700; }
 .capture-options fieldset { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-control); }
 .capture-options legend { color: var(--text-muted); font-size: 11px; }
 .capture-tag { display: inline-flex !important; align-items: center; gap: var(--space-1) !important; color: var(--text-secondary); font-size: 11px; }
@@ -486,7 +530,7 @@ textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); f
 .capture-state { margin-top: var(--space-4); margin-bottom: 0; }
 .capture-state--success { border-color: color-mix(in srgb, var(--success) 55%, var(--border-subtle)); color: var(--success); }
 .capture-state--error { border-color: color-mix(in srgb, var(--danger) 65%, var(--border-subtle)); color: var(--danger); }
-.capture-state button { margin-left: auto; border: 1px solid currentColor; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+.capture-state button { min-width: 40px; min-height: 40px; flex-shrink: 0; margin-left: auto; align-self: center; padding: 0 var(--space-3); border: 1px solid currentColor; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
 .capture-drawer__footer { justify-content: flex-end; border-top: 1px solid var(--border-subtle); }
 .capture-drawer__footer > span { margin-right: auto; color: var(--text-muted); font-size: 11px; }
 kbd { padding: 2px 5px; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--bg-code); font-family: var(--font-mono); }

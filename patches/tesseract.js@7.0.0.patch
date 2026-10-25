@@ -1,0 +1,37 @@
+diff --git a/src/createWorker.js b/src/createWorker.js
+index 89b53b89b27f6579155ed2a0ef372fa8c2a8b8e6..5eef564188422217baabf5e092bbb253343e1512 100644
+--- a/src/createWorker.js
++++ b/src/createWorker.js
+@@ -41,7 +41,14 @@ module.exports = async (langs = 'eng', oem = OEM.LSTM_ONLY, _options = {}, confi
+     workerResResolve = resolve;
+     workerResReject = reject;
+   });
+-  const workerError = (event) => { workerResReject(event.message); };
++  const workerError = (event) => {
++    terminate();
++    for (const promiseId of Object.keys(promises)) {
++      promises[promiseId].reject(event.message);
++      delete promises[promiseId];
++    }
++    workerResReject(event.message);
++  };
+ 
+   let worker = spawnWorker(options);
+   worker.onerror = workerError;
+@@ -210,7 +217,6 @@ module.exports = async (langs = 'eng', oem = OEM.LSTM_ONLY, _options = {}, confi
+     } else if (status === 'reject') {
+       promises[promiseId].reject(data);
+       delete promises[promiseId];
+-      if (action === 'load') workerResReject(data);
+       if (errorHandler) {
+         errorHandler(data);
+       } else {
+@@ -240,7 +246,7 @@ module.exports = async (langs = 'eng', oem = OEM.LSTM_ONLY, _options = {}, confi
+     .then(() => loadLanguageInternal(langs))
+     .then(() => initializeInternal(langs, oem, config))
+     .then(() => workerResResolve(resolveObj))
+-    .catch(() => {});
++    .catch((error) => { terminate(); workerResReject(error); });
+ 
+   return workerRes;
+ };

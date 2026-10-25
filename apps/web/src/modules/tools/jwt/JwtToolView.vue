@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import UiButton from '../../../components/ui/UiButton.vue'
 import {
@@ -40,7 +40,7 @@ const expectedAudience = ref('')
 const expectedSubject = ref('')
 const clockTolerance = ref(60)
 const decoded = ref<DecodedJwt | null>(null)
-const signature = ref<SignatureCheck>({ status: 'not_verified', message: '未验证：解码不代表可信。' })
+const signature = ref<SignatureCheck>(initialSignatureCheck())
 const claims = ref<ClaimsCheck | null>(null)
 const errorMessage = ref('')
 const liveMessage = ref('')
@@ -65,12 +65,37 @@ const decodedTimes = computed(() => decoded.value
     }
   : null)
 
+// 输入偏离最后一次执行后，旧结果不再作为当前结论展示；同时使在途 run 的晚到结果作废。
+// Token 变化使解码与全部校验结果失效；密钥/方式/选中 JWKS key 与期望 claims/时钟容差按影响面分别失效，
+// 已解码内容在密钥与期望参数变化时保留，避免 JWKS 手选入口消失。
+watch(token, () => {
+  latestRunId += 1
+  decoded.value = null
+  claims.value = null
+  signature.value = initialSignatureCheck()
+  errorMessage.value = ''
+})
+
+watch([keyMode, keyValue, selectedKeyIndex], () => {
+  latestRunId += 1
+  signature.value = initialSignatureCheck()
+})
+
+watch([expectedIssuer, expectedAudience, expectedSubject, clockTolerance], () => {
+  latestRunId += 1
+  claims.value = null
+})
+
+function initialSignatureCheck(): SignatureCheck {
+  return { status: 'not_verified', message: '未验证：解码不代表可信。' }
+}
+
 async function run() {
   const runId = ++latestRunId
   const snapshot = createRunSnapshot()
   errorMessage.value = ''
   liveMessage.value = ''
-  signature.value = { status: 'not_verified', message: '未验证：解码不代表可信。' }
+  signature.value = initialSignatureCheck()
   claims.value = null
   try {
     const nextDecoded = decodeJwt(snapshot.token)
@@ -147,7 +172,7 @@ function clearSensitiveState() {
   expectedSubject.value = ''
   decoded.value = null
   claims.value = null
-  signature.value = { status: 'not_verified', message: '未验证：解码不代表可信。' }
+  signature.value = initialSignatureCheck()
   errorMessage.value = ''
   liveMessage.value = ''
 }
@@ -207,7 +232,7 @@ onBeforeUnmount(clearSensitiveState)
     <template v-if="decoded">
       <section class="status-grid" aria-label="JWT 校验状态">
         <article class="status-card" :data-status="signature.status"><span>签名</span><strong>{{ signatureStatusLabel(signature.status) }}</strong><p>{{ signature.message }}</p></article>
-        <article class="status-card" :data-status="claims?.status ?? 'unchecked'"><span>Claims</span><strong>{{ claims ? claimStatusLabel(claims.status) : '未检查' }}</strong><p v-if="!claims">仅解码时不会自动检查时间与期望值。</p><ul v-else-if="claims.issues.length"><li v-for="issue in claims.issues" :key="`${issue.claim}-${issue.code}`">{{ issue.message }}</li></ul><p v-else>已按当前时间、容差与填写的期望值检查。</p></article>
+        <article class="status-card" :data-status="claims?.status ?? 'unchecked'"><span>Claims</span><strong>{{ claims ? claimStatusLabel(claims.status) : '未检查' }}</strong><p v-if="!claims">尚未检查时间与期望值；输入变化后需重新执行。</p><ul v-else-if="claims.issues.length"><li v-for="issue in claims.issues" :key="`${issue.claim}-${issue.code}`">{{ issue.message }}</li></ul><p v-else>已按当前时间、容差与填写的期望值检查。</p></article>
       </section>
 
       <div v-if="keyMode === 'none'" class="claims-action"><UiButton @click="checkClaimsOnly">仅检查 Claims（不验证签名）</UiButton></div>

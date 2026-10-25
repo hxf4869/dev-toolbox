@@ -187,10 +187,14 @@ export function createAppRouter(history: RouterHistory = createWebHistory()) {
   return createRouter({
     history,
     routes: appRoutes,
-    scrollBehavior: async (to) => {
-      if (!to.hash) return { top: 0 }
+    scrollBehavior: async (to): Promise<false | void> => {
+      if (!to.hash) {
+        document.getElementById('main-content')?.scrollTo({ top: 0 })
+        return false
+      }
       await nextTick()
-      return { el: to.hash }
+      document.getElementById(to.hash.slice(1))?.scrollIntoView()
+      return false
     },
   })
 }

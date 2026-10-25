@@ -40,6 +40,10 @@ interface AIConfirmation extends JsonAIRequestDraft {
   providerLabel: string
   modelLabel: string
   targetLanguage: string
+  /** 组件内私有快照：仅用于返回后核对输入与选项是否已变化，绝不进入 HTTP body。 */
+  sourceSnapshot: string
+  providerId: string
+  modelId: string
 }
 
 interface JsonAIResponse {
@@ -105,6 +109,7 @@ const editorSplit = ref(50)
 let inputEditor: AdaptiveEditor | null = null
 let resultEditor: AdaptiveEditor | null = null
 let activeRequest: WorkerRequest<JsonWorkerResult> | null = null
+let repairSource = ''
 let progressTimer: number | undefined
 let aiAbortController: AbortController | null = null
 let confirmationPreviousFocus: HTMLElement | null = null
@@ -164,7 +169,10 @@ onMounted(async () => {
     ariaLabel: 'JSON 输入编辑器',
     language: 'json',
     value: input.value,
-    onChange(value) { input.value = value },
+    onChange(value) {
+      invalidateStaleResults()
+      input.value = value
+    },
   })
   resultEditor = createAdaptiveEditor({
     host: resultHost.value,
@@ -173,14 +181,23 @@ onMounted(async () => {
     value: rightText.value,
     readOnly: true,
     onChange(value) {
-      if (activeTab.value === 'diff') secondaryText.value = value
-      else if (activeTab.value === 'schema') schemaText.value = value
+      if (activeTab.value === 'diff') {
+        invalidateStaleResults()
+        secondaryText.value = value
+      } else if (activeTab.value === 'schema') {
+        invalidateStaleResults()
+        schemaText.value = value
+      }
     },
   })
   await Promise.all([inputEditor.ready, resultEditor.ready])
 })
 
 watch(input, (value) => {
+  if (repairCandidate.value && value !== repairSource) {
+    clearRepairState()
+    summary.value = '输入已修改，修复候选已失效。'
+  }
   if (inputEditor?.getValue() !== value) inputEditor?.setValue(value)
 })
 watch(rightText, (value) => {
@@ -188,6 +205,7 @@ watch(rightText, (value) => {
 })
 watch(activeTab, async (tab) => {
   cancelLocalRequest()
+  clearRepairState()
   if (tab !== 'types') {
     cancelAIRequest()
     closeAIConfirmation()
@@ -205,6 +223,12 @@ watch(activeTab, async (tab) => {
   mobilePane.value = 'input'
   await nextTick()
 })
+watch(
+  [formatMode, jsonPath, diffMode, identityField, language, aiTargetLanguage, aiSendMode, aiProviderId, aiModelId],
+  () => {
+    invalidateStaleResults()
+  },
+)
 watch(aiProviderId, () => {
   if (!availableAIModels.value.some((model) => model.id === aiModelId.value)) {
     aiModelId.value = availableAIModels.value[0]?.id ?? ''
@@ -285,6 +309,7 @@ async function execute(request: JsonWorkerRequest): Promise<JsonWorkerResult | n
   errorMessage.value = ''
   summary.value = ''
   issues.value = []
+  clearRepairState()
   running.value = true
   showProgress.value = false
   window.clearTimeout(progressTimer)
@@ -342,20 +367,50 @@ function consumeResult(result: JsonWorkerResult) {
     output.value = `${summary.value}${issues.value.length ? `\n\n${issues.value.join('\n')}` : ''}`
     return
   }
-  repairCandidate.value = result.candidate
-  repairDiff.value = result.diff
-  summary.value = result.changed ? '已生成受限修复候选，确认前未修改输入。' : '输入已经是严格 JSON。'
+}
+
+function invalidateStaleResults() {
+  cancelLocalRequest()
+  output.value = ''
+  summary.value = ''
+  issues.value = []
+  errorMessage.value = ''
+  aiFailed.value = false
+}
+
+function clearRepairState() {
+  repairCandidate.value = ''
+  repairDiff.value = ''
+  repairSource = ''
 }
 
 async function proposeRepair() {
-  await execute({ operation: 'repair', text: input.value })
+  const source = input.value
+  const result = await execute({ operation: 'repair', text: source })
+  if (result?.operation !== 'repair') return
+  if (input.value !== source) {
+    clearRepairState()
+    summary.value = '输入已修改，本次修复候选已丢弃。'
+    mobilePane.value = 'input'
+    return
+  }
+  repairCandidate.value = result.candidate
+  repairDiff.value = result.diff
+  repairSource = source
+  summary.value = result.changed ? '已生成受限修复候选，确认前未修改输入。' : '输入已经是严格 JSON。'
 }
 
 function applyRepair() {
-  if (!repairCandidate.value) return
-  input.value = repairCandidate.value
-  repairCandidate.value = ''
-  repairDiff.value = ''
+  const candidate = repairCandidate.value
+  if (!candidate) return
+  if (repairSource !== input.value) {
+    clearRepairState()
+    summary.value = '修复候选已失效，未应用到输入。'
+    return
+  }
+  clearRepairState()
+  invalidateStaleResults()
+  input.value = candidate
   summary.value = '修复候选已应用到输入。'
 }
 
@@ -377,8 +432,7 @@ function clearAll() {
   summary.value = ''
   issues.value = []
   errorMessage.value = ''
-  repairCandidate.value = ''
-  repairDiff.value = ''
+  clearRepairState()
   aiFailed.value = false
 }
 
@@ -399,6 +453,7 @@ function cancelLocalRequest() {
 
 async function selectGenerationSource(source: 'local' | 'ai') {
   if (source === 'local') {
+    if (generationSource.value !== 'local') invalidateStaleResults()
     cancelAIRequest()
     closeAIConfirmation()
     generationSource.value = 'local'
@@ -406,6 +461,7 @@ async function selectGenerationSource(source: 'local' | 'ai') {
     return
   }
   if (aiUnavailable.value) return
+  if (generationSource.value !== 'ai') invalidateStaleResults()
   generationSource.value = 'ai'
   await loadAIOptions()
 }
@@ -456,6 +512,9 @@ async function prepareAIConfirmation(trigger: HTMLElement | null) {
       providerLabel: provider.displayName,
       modelLabel: `${model.displayName} · ${model.modelId}`,
       targetLanguage: aiTargetLanguage.value,
+      sourceSnapshot: input.value,
+      providerId: provider.id,
+      modelId: model.id,
     }
     await nextTick()
     confirmationDialog.value?.querySelector<HTMLElement>('footer button:first-of-type')?.focus()
@@ -485,12 +544,20 @@ async function confirmAIRequest() {
       body: confirmation.body,
       signal: controller.signal,
     })
+    if (!aiConfirmationStillCurrent(confirmation)) {
+      summary.value = '输入或选项已修改，本次 AI 返回结果已丢弃；请重新确认发送。'
+      return
+    }
     output.value = result.code
     summary.value = 'AI 已返回普通代码文本；结果未执行、未编译、未保存，也未创建 Artifact。'
     mobilePane.value = 'result'
   } catch (error) {
     if (controller.signal.aborted) {
       summary.value = '已取消本次 AI 请求；输入仍保留在当前页面。'
+      return
+    }
+    if (!aiConfirmationStillCurrent(confirmation)) {
+      summary.value = '输入或选项已修改，本次 AI 请求反馈已丢弃；请重新确认发送。'
       return
     }
     aiFailed.value = true
@@ -536,6 +603,16 @@ function handleConfirmationKeydown(event: KeyboardEvent) {
     event.preventDefault()
     first.focus()
   }
+}
+
+function aiConfirmationStillCurrent(confirmation: AIConfirmation): boolean {
+  return activeTab.value === 'types' &&
+    generationSource.value === 'ai' &&
+    input.value === confirmation.sourceSnapshot &&
+    aiProviderId.value === confirmation.providerId &&
+    aiModelId.value === confirmation.modelId &&
+    aiTargetLanguage.value === confirmation.targetLanguage &&
+    aiSendMode.value === confirmation.mode
 }
 
 function describeAIError(error: unknown): string {
@@ -597,7 +674,7 @@ function describeAIError(error: unknown): string {
       </template>
       <template v-else-if="activeTab === 'schema'">
         <UiButton variant="secondary" :disabled="running" @click="generateSchema">从样本生成初始 Schema</UiButton>
-        <span class="hint">仅 Draft 2020-12；只允许当前文档内 $ref。</span>
+        <span class="hint">仅 Draft 2020-12；只允许当前文档内 $ref/$dynamicRef；format 为注解，不检查邮箱等格式。</span>
       </template>
       <template v-else>
         <fieldset class="source-switch">

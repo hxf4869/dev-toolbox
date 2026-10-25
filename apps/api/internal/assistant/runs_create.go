@@ -276,9 +276,11 @@ func (service *Service) insertRun(request *http.Request, clientRequestID uuid.UU
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE assistant_conversations SET selected_model_id = $2, selected_reasoning_effort = $3, updated_at = $4
+		UPDATE assistant_conversations
+		SET selected_model_id = $2, selected_reasoning_effort = $3, updated_at = $4,
+		    next_message_sequence = next_message_sequence + (CASE WHEN $5 THEN 2 ELSE 0 END)
 		WHERE id = $1
-	`, conversationID, execution.modelID, reasoningOrNull(reasoning), now); err != nil {
+	`, conversationID, execution.modelID, reasoningOrNull(reasoning), now, retry == nil); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -352,8 +354,10 @@ func (service *Service) prepareNewMessages(ctx context.Context, tx pgx.Tx, snaps
 	} else {
 		var folderID *uuid.UUID
 		if snapshot.FolderID != nil {
+			// 锁住已确认的文件夹引用直到本事务提交，避免检查后被并发删除。
+			// 删除先提交时按 ErrNoRows 返回 422；否则删除等待当前事务结束。
 			if err := tx.QueryRow(ctx,
-				`SELECT id FROM assistant_folders WHERE id = $1`, *snapshot.FolderID).Scan(&folderID); errors.Is(err, pgx.ErrNoRows) {
+				`SELECT id FROM assistant_folders WHERE id = $1 FOR KEY SHARE`, *snapshot.FolderID).Scan(&folderID); errors.Is(err, pgx.ErrNoRows) {
 				return messageCtx, &runConflictError{status: http.StatusUnprocessableEntity, code: "VALIDATION_FAILED"}
 			} else if err != nil {
 				return messageCtx, &runConflictError{status: http.StatusInternalServerError, code: "INTERNAL_ERROR"}
@@ -386,11 +390,9 @@ func (service *Service) prepareNewMessages(ctx context.Context, tx pgx.Tx, snaps
 	`, messageCtx.outputMessageID, messageCtx.conversationID, nextSequence+1, now); err != nil {
 		return messageCtx, &runConflictError{status: http.StatusInternalServerError, code: "INTERNAL_ERROR"}
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE assistant_conversations SET next_message_sequence = $2, updated_at = $3 WHERE id = $1
-	`, messageCtx.conversationID, nextSequence+2, now); err != nil {
-		return messageCtx, &runConflictError{status: http.StatusInternalServerError, code: "INTERNAL_ERROR"}
-	}
+	// 序号推进不在本函数单独 UPDATE 会话行:行已 FOR UPDATE 锁定,insertRun 内
+	// 与模型选择更新合并为该事务对会话行的唯一一次 UPDATE,避免持锁事务二次
+	// 触碰会话行与并发删除互等(docs/16 §11.1)。
 	return messageCtx, nil
 }
 

@@ -86,7 +86,8 @@ export function previewCron(input: CronPreviewInput): CronPreview {
       timezone: input.timeZone,
       mode: input.dialect === 'unix' ? '5-part' : fields.length === 6 ? '6-part' : '7-part',
       alternativeWeekdays: input.dialect === 'spring_quartz',
-      legacyMode: false,
+      // Linux crontab(5): 受限的日与星期按 OR 组合；Spring/Quartz 语义为 AND
+      legacyMode: input.dialect === 'unix',
     })
     const nextRuns = cron.nextRuns(5, baseDate).map((date) => ({
       iso: date.toISOString(),

@@ -239,9 +239,8 @@ func (service *Service) authenticatePAT(request *http.Request, authorization str
 	}
 	if lastUsedAt == nil || now.Sub(*lastUsedAt) >= 5*time.Minute {
 		result, updateErr := service.database.Exec(request.Context(), `
-			UPDATE personal_access_tokens SET last_used_at = $2::timestamptz
+			UPDATE personal_access_tokens SET last_used_at = GREATEST(last_used_at, $2::timestamptz)
 			WHERE id = $1 AND revoked_at IS NULL
-			  AND (last_used_at IS NULL OR last_used_at < $2::timestamptz - interval '5 minutes')
 		`, actor.ID, now)
 		if updateErr != nil || result.RowsAffected() != 1 {
 			return Actor{}, false

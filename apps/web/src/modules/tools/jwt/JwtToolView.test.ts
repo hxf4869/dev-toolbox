@@ -81,6 +81,126 @@ describe('JwtToolView async verification isolation', () => {
   })
 })
 
+describe('JwtToolView stale result invalidation', () => {
+  afterEach(() => {
+    vi.resetAllMocks()
+  })
+
+  it('drops decoded sections and passed results after the token changes', async () => {
+    verifyJwtSignature.mockResolvedValue({ status: 'passed', message: '旧 Token 的验签通过' })
+    const wrapper = await mountVerifier()
+
+    await startRun(wrapper, tokenFor('first'), 'first-secret')
+    await flushPromises()
+    expect(wrapper.text()).toContain('旧 Token 的验签通过')
+    expect(wrapper.text()).toContain('Header（已解码）')
+    expect(wrapper.text()).toContain('已按当前时间、容差与填写的期望值检查。')
+
+    await wrapper.get('#jwt-token').setValue(tokenFor('second'))
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('旧 Token 的验签通过')
+    expect(wrapper.text()).not.toContain('通过')
+    expect(wrapper.text()).not.toContain('Header（已解码）')
+    expect(wrapper.text()).not.toContain('first')
+    wrapper.unmount()
+  })
+
+  it('resets only the signature result when the key changes', async () => {
+    verifyJwtSignature.mockResolvedValue({ status: 'passed', message: '旧密钥的验签通过' })
+    const wrapper = await mountVerifier()
+
+    await startRun(wrapper, tokenFor('stable'), 'first-secret')
+    await flushPromises()
+    expect(wrapper.text()).toContain('旧密钥的验签通过')
+
+    await wrapper.get('#jwt-key').setValue('second-secret')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('未验证')
+    expect(wrapper.text()).not.toContain('旧密钥的验签通过')
+    expect(wrapper.text()).toContain('Header（已解码）')
+    expect(wrapper.text()).toContain('stable')
+    expect(wrapper.text()).toContain('已按当前时间、容差与填写的期望值检查。')
+    wrapper.unmount()
+  })
+
+  it('resets only the claims result when expectations or clock tolerance change', async () => {
+    verifyJwtSignature.mockResolvedValue({ status: 'passed', message: '签名结果保持有效' })
+    const wrapper = await mountVerifier()
+
+    await startRun(wrapper, tokenFor('claims-token'), 'secret-value')
+    await flushPromises()
+    expect(wrapper.text()).toContain('已按当前时间、容差与填写的期望值检查。')
+
+    await wrapper.findAll('.field-grid input')[1]!.setValue('https://other-issuer.example')
+    await wrapper.findAll('.field-grid input')[0]!.setValue('120')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('签名结果保持有效')
+    expect(wrapper.text()).toContain('未检查')
+    expect(wrapper.text()).not.toContain('已按当前时间、容差与填写的期望值检查。')
+    expect(wrapper.text()).toContain('claims-token')
+    wrapper.unmount()
+  })
+
+  it('discards a signature result that resolves after the key changed', async () => {
+    const pending = deferred<SignatureCheck>()
+    verifyJwtSignature.mockReturnValueOnce(pending.promise)
+    const wrapper = await mountVerifier()
+
+    await startRun(wrapper, tokenFor('late'), 'first-secret')
+    await wrapper.get('#jwt-key').setValue('second-secret')
+    pending.resolve({ status: 'passed', message: '输入变化后不应恢复为通过' })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('输入变化后不应恢复为通过')
+    expect(wrapper.text()).toContain('未验证')
+    expect(wrapper.text()).toContain('late')
+    wrapper.unmount()
+  })
+
+  it('drops claims-only results and the claims-only entry after the token changes', async () => {
+    const wrapper = mount(JwtToolView)
+    await wrapper.get('#jwt-token').setValue(tokenFor('decode-only'))
+    await wrapper.get('button.button--primary').trigger('click')
+    await flushPromises()
+    const claimsOnlyButton = () => wrapper.findAll('button').find((button) => button.text() === '仅检查 Claims（不验证签名）')!
+    await claimsOnlyButton().trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('已按当前时间、容差与填写的期望值检查。')
+
+    await wrapper.get('#jwt-token').setValue(tokenFor('replaced'))
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('已按当前时间、容差与填写的期望值检查。')
+    expect(wrapper.text()).not.toContain('decode-only')
+    expect(wrapper.findAll('button').some((button) => button.text() === '仅检查 Claims（不验证签名）')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('resets the signature when the selected JWKS key changes while keeping candidates', async () => {
+    verifyJwtSignature.mockResolvedValue({ status: 'passed', message: 'JWKS 首次验签通过' })
+    const wrapper = mount(JwtToolView)
+    await wrapper.get('select').setValue('jwks')
+    await wrapper.get('#jwt-token').setValue(tokenFor('jwks-manual'))
+    await wrapper.get('#jwt-key').setValue(JSON.stringify({ keys: [{ kty: 'oct', k: 'AAAA' }, { kty: 'oct', k: 'BBBB' }] }))
+    await wrapper.get('button.button--primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('JWKS 首次验签通过')
+    expect(wrapper.find('.key-select select').exists()).toBe(true)
+
+    await wrapper.get('.key-select select').setValue('1')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('JWKS 首次验签通过')
+    expect(wrapper.text()).toContain('未验证')
+    expect(wrapper.text()).toContain('jwks-manual')
+    expect(wrapper.find('.key-select select').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
 async function mountVerifier(): Promise<VueWrapper> {
   const wrapper = mount(JwtToolView)
   await wrapper.get('select').setValue('secret')

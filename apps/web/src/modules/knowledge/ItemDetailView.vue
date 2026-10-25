@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance, type Ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from '../../app/auth'
@@ -77,6 +77,16 @@ interface RawRecord extends RawRecordSummary {
   }
 }
 
+// 编辑弹窗本次打开的起点快照（docs/03 4.7：PATCH 缺失字段保持不变）。
+interface EditSnapshot {
+  title: string
+  note: string | null
+  folderId: string | null
+  tagIds: string[]
+  favorite: boolean
+  sensitivity: Sensitivity
+}
+
 const props = withDefaults(defineProps<{ itemId: string; embedded?: boolean }>(), { embedded: false })
 const emit = defineEmits<{ changed: []; deleted: [] }>()
 const route = useRoute()
@@ -88,6 +98,9 @@ const errorMessage = ref('')
 const detail = ref<ItemDetail | null>(null)
 const heading = ref<HTMLElement | null>(null)
 const matchAnchor = ref<HTMLElement | null>(null)
+const rawContent = ref<HTMLElement | null>(null)
+const editTrigger = ref<ComponentPublicInstance | null>(null)
+const supplementTrigger = ref<ComponentPublicInstance | null>(null)
 const selectedRawID = ref('')
 const rawRecord = ref<RawRecord | null>(null)
 const rawLoading = ref(false)
@@ -99,6 +112,9 @@ const sensitiveRevealed = ref(false)
 const supplementOpen = ref(false)
 const editOpen = ref(false)
 const deleteConfirm = ref(false)
+const revealDialog = ref<HTMLElement | null>(null)
+const editDialog = ref<HTMLElement | null>(null)
+const deleteDialog = ref<HTMLElement | null>(null)
 const mutationBusy = ref(false)
 const mutationError = ref('')
 const editTitle = ref('')
@@ -107,11 +123,22 @@ const editFolderID = ref('')
 const editTagIDs = ref<string[]>([])
 const editFavorite = ref(false)
 const editSensitivity = ref<Sensitivity>('normal')
+// DT-R229：保存只提交相对打开快照真正变化的字段。A 保存成功会重载 detail，取消后重开的
+// B 表单仍是旧值，全字段 PATCH 会用旧标题回退 A 刚保存的结果；缺省标题也让敏感升级时
+// 后端保留 generated 标题的脱敏替换语义，不用旧标题冒充用户编辑。
+let editSnapshot: EditSnapshot | null = null
 const matchedFragmentID = ref('')
+// DT-R197：附件缩略图失败态与显式重试。失败以附件 id 记录，只随当前详情生命周期存在
+//（loadDetail 整体重置，切换/重载不串到别的附件）；重试一次点击清除失败记录，v-if 随之
+// 重新挂载 img 对同一 URL 发起一次新加载，不加缓存参数、不自动轮询；未揭示或静态
+// 不可预览的附件不进入该状态。
+const failedPreviews = ref<Record<string, boolean>>({})
 
 const selectedSummary = computed(() =>
   detail.value?.rawRecords.find((record) => record.id === selectedRawID.value),
 )
+const contentKindLabels: Record<string, string> = { text: '文本', image: '图片', file: '文件', mixed: '混合' }
+const selectedContentKindLabel = computed(() => contentKindLabels[selectedSummary.value?.contentKind ?? ''] ?? '原始内容')
 const flatFolders = computed(() => flattenFolders(library.folders))
 const matchedFragment = computed(() =>
   rawRecord.value?.fragments.find((fragment) => fragment.id === matchedFragmentID.value),
@@ -131,28 +158,51 @@ watch(
   () => void applyMatchedFragment(),
 )
 onMounted(() => void loadDetail())
+onBeforeUnmount(() => {
+  invalidateRawFetch()
+  clearCopyFeedback()
+})
+
+// Only the latest raw-record request may write body, error or loading state;
+// switching raw records, reloading metadata and unmounting abort stale ones.
+let rawFetchController: AbortController | null = null
+
+function invalidateRawFetch() {
+  rawFetchController?.abort()
+  rawFetchController = null
+  rawLoading.value = false
+}
+
+// 同一实例上详情重载会并发：已取消保存的晚到收尾与补充 created 收尾各发一次 GET，
+// 只有最新一次请求可以写 detail、错误与 loading，旧请求的结果与失败整体丢弃。
+let detailRequest = 0
 
 async function loadDetail() {
+  const request = ++detailRequest
   loading.value = true
   errorMessage.value = ''
+  invalidateRawFetch()
   rawRecord.value = null
-  copied.value = false
-  copyError.value = false
+  clearCopyFeedback()
   sensitiveRevealed.value = false
+  failedPreviews.value = {}
   try {
-    detail.value = await apiRequest<ItemDetail>(`/api/v1/items/${props.itemId}`)
+    const loaded = await apiRequest<ItemDetail>(`/api/v1/items/${props.itemId}`)
+    if (request !== detailRequest) return
+    detail.value = loaded
     matchedFragmentID.value = typeof route.query.hit === 'string' ? route.query.hit : ''
     selectedRawID.value =
-      detail.value.rawRecords.find((record) =>
+      loaded.rawRecords.find((record) =>
         record.fragments.some((fragment) => fragment.id === matchedFragmentID.value),
-      )?.id ?? detail.value.rawRecords[0]?.id ?? ''
+      )?.id ?? loaded.rawRecords[0]?.id ?? ''
     await nextTick()
-    heading.value?.focus({ preventScroll: true })
+    if (request === detailRequest) heading.value?.focus({ preventScroll: true })
   } catch (error) {
+    if (request !== detailRequest) return
     detail.value = null
     errorMessage.value = error instanceof Error ? error.message : '详情暂时不可用'
   } finally {
-    loading.value = false
+    if (request === detailRequest) loading.value = false
   }
 }
 
@@ -164,21 +214,124 @@ async function applyMatchedFragment() {
   )?.id
   if (!targetRawID) return
   if (selectedRawID.value !== targetRawID) {
-    selectedRawID.value = targetRawID
-    rawRecord.value = null
-    copied.value = false
-    copyError.value = false
+    selectRawRecord(targetRawID)
     return
   }
   await nextTick()
   if (matchedFragment.value) matchAnchor.value?.scrollIntoView({ block: 'center' })
 }
 
-function requestReveal() {
+// 三个详情弹窗共用的键盘归属：记录触发器，打开即入焦，Tab 环绕，Escape / 指针取消并回焦。
+let dialogTrigger: HTMLElement | null = null
+
+// 编辑弹窗的归属代次：取消（含 Escape）与新开编辑都推进代次。挂起保存的晚到收尾
+// 只对同代弹窗生效，不得关闭或抢焦重新打开的编辑弹窗，也不得把旧错误写进它或回收站弹窗。
+let editGeneration = 0
+
+const dialogFocusableSelector =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+
+function rememberDialogTrigger(event: Event) {
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+}
+
+async function returnFocusToTrigger() {
+  const trigger = dialogTrigger
+  dialogTrigger = null
+  await nextTick()
+  if (trigger?.isConnected) trigger.focus()
+}
+
+// 编辑弹窗初焦标题输入框（缺输入控件时退到可见的关闭按钮）；
+// 两个确认弹窗初焦取消按钮，避免自动落在「确认揭示 / 移入回收站」上。
+async function focusDialogTarget(dialog: Ref<HTMLElement | null>, prefer: 'first-input' | 'last-button') {
+  await nextTick()
+  const root = dialog.value
+  if (!root) return
+  const input = prefer === 'first-input' ? root.querySelector<HTMLInputElement>('input:not([disabled])') : null
+  const buttons = Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled])'))
+  const target = input ?? (prefer === 'last-button' ? buttons[buttons.length - 1] : buttons[0])
+  if (target) target.focus()
+  else root.focus()
+}
+
+function effectiveFocusIn(root: HTMLElement) {
+  const active = document.activeElement
+  return active instanceof HTMLElement && root.contains(active) && active.matches(dialogFocusableSelector)
+}
+
+// 指针取消与 Escape 共用同一关闭路径：关弹窗、回焦触发器。
+function closeRevealDialog() {
+  if (!revealConfirm.value) return
+  revealConfirm.value = false
+  void returnFocusToTrigger()
+}
+
+function closeEditDialog() {
+  if (!editOpen.value) return
+  editGeneration += 1
+  editOpen.value = false
+  void returnFocusToTrigger()
+}
+
+function closeTrashDialog() {
+  // 移入进行中与取消按钮的 disabled=mutationBusy 语义一致，取消不得关闭；
+  // 编辑的取消在保存中不禁用，Escape 与其同语义。
+  if (!deleteConfirm.value || mutationBusy.value) return
+  deleteConfirm.value = false
+  void returnFocusToTrigger()
+}
+
+function onDialogKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    // IME 组合中的 Escape 属于输入法行为，不当作弹窗取消。
+    if (event.isComposing) return
+    event.preventDefault()
+    const dialog = event.currentTarget as HTMLElement
+    if (dialog === deleteDialog.value) closeTrashDialog()
+    else if (dialog === editDialog.value) closeEditDialog()
+    else closeRevealDialog()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const dialog = event.currentTarget as HTMLElement
+  const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(dialogFocusableSelector))
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!first || !last) {
+    // busy 期间按钮全部禁用时没有可环绕项，Tab 必须留在弹窗容器上。
+    event.preventDefault()
+    dialog.focus()
+    return
+  }
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+// busy 使已聚焦的确认按钮失效后，浏览器会把焦点还给 viewport（jsdom 则停在已禁用控件上）；
+// 置位与解除（如 DELETE 失败后按钮恢复、焦点仍停在容器）都在弹窗仍打开时恢复有效焦点：
+// 编辑退到标题输入，回收站置位期间落容器、解除后落取消按钮。已有效不重置，成功路径弹窗已关不触焦。
+watch(mutationBusy, async () => {
+  await nextTick()
+  if (editOpen.value) {
+    if (editDialog.value && !effectiveFocusIn(editDialog.value)) void focusDialogTarget(editDialog, 'first-input')
+  } else if (deleteConfirm.value) {
+    if (deleteDialog.value && !effectiveFocusIn(deleteDialog.value)) void focusDialogTarget(deleteDialog, 'last-button')
+  }
+})
+
+function requestReveal(event: Event) {
   if (detail.value?.sensitivity === 'normal') {
     void revealRawRecord()
   } else {
+    rememberDialogTrigger(event)
     revealConfirm.value = true
+    void focusDialogTarget(revealDialog, 'last-button')
   }
 }
 
@@ -190,47 +343,106 @@ async function confirmReveal() {
 
 async function revealRawRecord() {
   if (!selectedRawID.value || !detail.value) return
+  invalidateRawFetch()
+  const controller = new AbortController()
+  rawFetchController = controller
   rawLoading.value = true
   errorMessage.value = ''
   try {
-    rawRecord.value = await apiRequest<RawRecord>(
+    const record = await apiRequest<RawRecord>(
       `/api/v1/items/${detail.value.id}/raw-records/${selectedRawID.value}`,
+      { signal: controller.signal },
     )
+    if (controller.signal.aborted) return
+    rawRecord.value = record
     await nextTick()
     if (matchedFragment.value) {
       matchAnchor.value?.scrollIntoView({ block: 'center' })
       matchAnchor.value?.focus()
+    } else {
+      // 触发按钮随 reveal 占位被 v-if 卸载，焦点会掉到 BODY；只在焦点确实无效（BODY、缺失、断连或已禁用）
+      // 时落到正文容器。用户已移到资料库搜索框等仍连接可用的焦点属于其当前位置，不得抢走。
+      const active = document.activeElement
+      const focusValid =
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        active.isConnected &&
+        !active.hasAttribute('disabled')
+      if (!focusValid) rawContent.value?.focus()
     }
   } catch (error) {
+    if (controller.signal.aborted) return
     errorMessage.value = error instanceof Error ? error.message : '原始记录暂时不可用'
   } finally {
-    rawLoading.value = false
+    if (!controller.signal.aborted) rawLoading.value = false
   }
 }
 
 function selectRawRecord(id: string) {
   if (id === selectedRawID.value) return
+  invalidateRawFetch()
   selectedRawID.value = id
   rawRecord.value = null
+  clearCopyFeedback()
+}
+
+// DT-R273：复制反馈只属于触发复制时展示的那条原始记录；writeText 晚到的成功/失败
+// 按捕获对象的同一性失效，不写回切换或重载后的新记录。1600ms 收尾共用唯一 timer，
+// 有效成功前替换旧 timer，切换、重载与卸载时统一清理。
+let copyTimer: number | null = null
+
+function clearCopyFeedback() {
+  if (copyTimer !== null) {
+    window.clearTimeout(copyTimer)
+    copyTimer = null
+  }
   copied.value = false
   copyError.value = false
 }
 
 async function copyAll() {
-  if (!rawRecord.value) return
+  const record = rawRecord.value
+  if (!record) return
   copyError.value = false
   try {
-    await navigator.clipboard.writeText(rawRecord.value.body)
+    await navigator.clipboard.writeText(record.body)
+    if (rawRecord.value !== record) return
     copied.value = true
-    window.setTimeout(() => (copied.value = false), 1600)
+    if (copyTimer !== null) window.clearTimeout(copyTimer)
+    copyTimer = window.setTimeout(() => (copied.value = false), 1600)
   } catch {
+    if (rawRecord.value !== record) return
     copied.value = false
     copyError.value = true
   }
 }
 
-async function beginEdit() {
+// previewGate：附件缩略图的渲染门控（允许预览、有缩略端点且敏感内容已揭示）。
+// 失败态与重试入口只出现在该门通过后的加载失败，未揭示内容不得为重试提前请求。
+function previewGate(attachment: AttachmentEntry) {
+  return Boolean(
+    attachment.previewAllowed &&
+      attachment.thumbnailUrl &&
+      (detail.value?.sensitivity === 'normal' || sensitiveRevealed.value),
+  )
+}
+
+function onPreviewError(attachmentId: string) {
+  failedPreviews.value[attachmentId] = true
+}
+
+// 一次显式点击只做一次新加载：清除失败记录后 v-if 重建 img（src 不变），
+// 由浏览器对同一 URL 重新发起请求；成败交给新的 load/error，无自动重试。
+function retryPreview(attachmentId: string) {
+  delete failedPreviews.value[attachmentId]
+}
+
+async function beginEdit(event: Event) {
   if (!detail.value) return
+  // 触发元素必须在 loadNavigation 的 await 之前捕获，事件对象的 currentTarget 之后会失效。
+  rememberDialogTrigger(event)
+  // 新开编辑即新会话：在 await 导航前推进代次，旧保存的晚到收尾（如仅剩导航挂起时）不得作用于本弹窗。
+  editGeneration += 1
   if (!library.folders.length && !library.tags.length) {
     try {
       await library.loadNavigation()
@@ -244,35 +456,78 @@ async function beginEdit() {
   editTagIDs.value = detail.value.tags.map((tag) => tag.id)
   editFavorite.value = detail.value.favorite
   editSensitivity.value = detail.value.sensitivity
+  // 打开快照与表单在同一次填充时建立（按服务端 trim/null 语义归一化）；
+  // save 不得把此刻可能已被晚到重载刷新的 detail 当作编辑起点。
+  editSnapshot = {
+    title: detail.value.title.trim(),
+    note: detail.value.note?.trim() || null,
+    folderId: detail.value.folder?.id ?? null,
+    tagIds: detail.value.tags.map((tag) => tag.id),
+    favorite: detail.value.favorite,
+    sensitivity: detail.value.sensitivity,
+  }
   mutationError.value = ''
   editOpen.value = true
+  void focusDialogTarget(editDialog, 'first-input')
 }
 
 async function saveMetadata() {
-  if (!detail.value || !editTitle.value.trim()) return
+  if (!detail.value || !editSnapshot || !editTitle.value.trim()) return
+  // 只提交相对本次打开快照真正变化的字段；payload 形状保持既有契约：
+  // title/note 传原始表单值由服务端 trim，空备注传 null 清空，tagIds 按实际集合比较。
+  const snapshot = editSnapshot
+  const trimmedTitle = editTitle.value.trim()
+  const trimmedNote = editNote.value.trim()
+  const folderId = editFolderID.value || null
+  const tagIds = editTagIDs.value
+  const patch: Record<string, unknown> = {}
+  if (trimmedTitle !== snapshot.title) patch.title = editTitle.value
+  if ((trimmedNote || null) !== snapshot.note) patch.note = trimmedNote ? editNote.value : null
+  if (folderId !== snapshot.folderId) patch.folderId = folderId
+  if (
+    tagIds.length !== snapshot.tagIds.length ||
+    !tagIds.every((id) => snapshot.tagIds.includes(id))
+  ) {
+    patch.tagIds = tagIds
+  }
+  if (editFavorite.value !== snapshot.favorite) patch.favorite = editFavorite.value
+  if (editSensitivity.value !== snapshot.sensitivity) patch.sensitivity = editSensitivity.value
+
+  if (!Object.keys(patch).length) {
+    // 无变化不发后端必拒的空 PATCH：直接关闭，并按成功路径回焦当前渲染的编辑触发器
+    //（此前的详情重载可能已重建头部，beginEdit 记住的 dialogTrigger 可能已断连）。
+    editOpen.value = false
+    await nextTick()
+    const trigger = editTrigger.value?.$el
+    if (trigger instanceof HTMLElement) trigger.focus()
+    return
+  }
+
   mutationBusy.value = true
   mutationError.value = ''
+  const generation = editGeneration
   try {
     await apiRequest(
       `/api/v1/items/${detail.value.id}`,
-      jsonRequest(
-        'PATCH',
-        {
-          title: editTitle.value,
-          note: editNote.value.trim() ? editNote.value : null,
-          folderId: editFolderID.value || null,
-          tagIds: editTagIDs.value,
-          favorite: editFavorite.value,
-          sensitivity: editSensitivity.value,
-        },
-        auth.csrfToken,
-      ),
+      jsonRequest('PATCH', patch, auth.csrfToken),
     )
-    editOpen.value = false
+    // 用户取消后重新打开的编辑弹窗属于新一代，晚到收尾不得关闭它；
+    // 已提交的写入仍完成既有的元数据/导航刷新与 changed 通知。
+    if (editGeneration === generation) editOpen.value = false
     await Promise.all([loadDetail(), library.loadNavigation()])
     emit('changed')
+    // 刷新经 loading 重建头部，回焦必须等当前 DOM 就绪后落到当前渲染的触发按钮；
+    // 已换代时新弹窗正被使用，同样不得抢焦。
+    if (editGeneration === generation) {
+      await nextTick()
+      const trigger = editTrigger.value?.$el
+      if (trigger instanceof HTMLElement) trigger.focus()
+    }
   } catch (error) {
-    mutationError.value = error instanceof Error ? error.message : '元数据保存失败'
+    // 晚到的失败只写回仍属于本次保存的弹窗，避免旧错误串入新编辑或回收站弹窗。
+    if (editGeneration === generation) {
+      mutationError.value = error instanceof Error ? error.message : '元数据保存失败'
+    }
   } finally {
     mutationBusy.value = false
   }
@@ -293,6 +548,12 @@ async function toggleFavorite() {
   } finally {
     mutationBusy.value = false
   }
+}
+
+function openDeleteConfirm(event: Event) {
+  rememberDialogTrigger(event)
+  deleteConfirm.value = true
+  void focusDialogTarget(deleteDialog, 'last-button')
 }
 
 async function trashItem() {
@@ -316,6 +577,21 @@ async function trashItem() {
 async function onSupplementCreated() {
   await loadDetail()
   emit('changed')
+  // 补充 drawer 的关闭回焦指向被 loading 重建销毁的旧「添加补充」按钮，会落空到 BODY；
+  // 重载完成后只在焦点确实无效（BODY、断连或已禁用）时补焦当前渲染的按钮。
+  // 用户已移到资料库搜索框等仍连接可用的焦点属于其当前位置，不得抢走。
+  await nextTick()
+  const active = document.activeElement
+  if (
+    active instanceof HTMLElement &&
+    active !== document.body &&
+    active.isConnected &&
+    !active.hasAttribute('disabled')
+  ) {
+    return
+  }
+  const trigger = supplementTrigger.value?.$el
+  if (trigger instanceof HTMLElement) trigger.focus()
 }
 
 async function locateAISource(fragmentID: string) {
@@ -371,9 +647,9 @@ function formatBytes(bytes: number) {
           <button type="button" class="favorite" :aria-label="detail.favorite ? '取消收藏' : '收藏记录'" :disabled="mutationBusy" @click="toggleFavorite"><UiIcon name="star" :class="{ filled: detail.favorite }" /></button>
         </div>
         <div class="detail-actions">
-          <UiButton variant="secondary" @click="supplementOpen = true"><UiIcon name="plus" /> 添加补充</UiButton>
-          <UiButton variant="secondary" @click="beginEdit"><UiIcon name="pencil" /> 编辑元数据</UiButton>
-          <button type="button" class="trash-action" aria-label="移入回收站" @click="deleteConfirm = true"><UiIcon name="trash-2" /></button>
+          <UiButton ref="supplementTrigger" variant="secondary" @click="supplementOpen = true"><UiIcon name="plus" /> 添加补充</UiButton>
+          <UiButton ref="editTrigger" variant="secondary" @click="beginEdit"><UiIcon name="pencil" /> 编辑元数据</UiButton>
+          <button type="button" class="trash-action" aria-label="移入回收站" @click="openDeleteConfirm"><UiIcon name="trash-2" /></button>
         </div>
         <dl>
           <div><dt>目录</dt><dd>{{ detail.folder?.path || '收件箱' }}</dd></div>
@@ -401,7 +677,7 @@ function formatBytes(bytes: number) {
           </button>
         </aside>
         <main class="raw-panel">
-          <header><div><p>原始记录 · 只读</p><h2>{{ selectedSummary?.contentKind ?? '原始内容' }}</h2></div><UiButton v-if="rawRecord" variant="secondary" @click="copyAll"><UiIcon name="copy" /> {{ copied ? '已复制全部' : copyError ? '复制失败，重试' : '复制全部原文' }}</UiButton></header>
+          <header><div><p>原始记录 · 只读</p><h2>{{ selectedContentKindLabel }}</h2></div><UiButton v-if="rawRecord" variant="secondary" @click="copyAll"><UiIcon name="copy" /> {{ copied ? '已复制全部' : copyError ? '复制失败，重试' : '复制全部原文' }}</UiButton></header>
           <span class="sr-only" role="status">{{ copied ? '原始记录已精确复制' : copyError ? '复制失败，请重试' : '' }}</span>
           <div v-if="!rawRecord" class="reveal-state" :class="{ sensitive: detail.sensitivity !== 'normal' }">
             <UiIcon :name="detail.sensitivity === 'normal' ? 'eye' : 'shield-alert'" :size="25" />
@@ -414,7 +690,7 @@ function formatBytes(bytes: number) {
               <strong><UiIcon name="search" :size="15" /> 搜索命中定位</strong>
               <pre>{{ matchedFragmentText }}</pre>
             </aside>
-            <article class="raw-content"><RawDocument :body="rawRecord.body" :content-format="rawRecord.contentFormat" /></article>
+            <article ref="rawContent" class="raw-content" tabindex="-1"><RawDocument :body="rawRecord.body" :content-format="rawRecord.contentFormat" /></article>
           </template>
           <section v-if="selectedSummary?.attachments.length" class="raw-attachments"><h3>本条原始记录的附件</h3><ul><li v-for="attachment in selectedSummary.attachments" :key="attachment.id"><UiIcon :name="attachment.kind === 'image' ? 'image' : 'file-text'" /><span><strong>{{ attachment.displayName }}</strong><small>{{ attachment.mediaType }} · {{ formatBytes(attachment.sizeBytes) }}</small></span><a v-if="detail.sensitivity === 'normal' || sensitiveRevealed" :href="attachment.contentUrl" download><UiIcon name="download" /> 下载原件</a><button v-else type="button" @click="requestReveal"><UiIcon name="eye" /> 揭示后下载</button></li></ul></section>
         </main>
@@ -424,7 +700,8 @@ function formatBytes(bytes: number) {
         <div v-if="detail.attachments.length" class="attachment-grid">
           <article v-for="attachment in detail.attachments" :key="attachment.id">
             <div class="attachment-preview">
-              <img v-if="attachment.previewAllowed && attachment.thumbnailUrl && (detail.sensitivity === 'normal' || sensitiveRevealed)" :src="attachment.thumbnailUrl" :alt="attachment.displayName" />
+              <img v-if="previewGate(attachment) && !failedPreviews[attachment.id]" :src="attachment.thumbnailUrl ?? undefined" :alt="attachment.displayName" @error="onPreviewError(attachment.id)" />
+              <template v-else-if="previewGate(attachment)"><UiIcon class="preview-failed-icon" name="triangle-alert" :size="28" /><span>预览加载失败</span><button type="button" class="preview-retry" @click="retryPreview(attachment.id)"><UiIcon name="rotate-ccw" :size="14" /> 重试预览</button></template>
               <template v-else><UiIcon :name="attachment.kind === 'image' ? detail.sensitivity === 'normal' ? 'image' : 'shield-alert' : 'file-text'" :size="28" /><span v-if="attachment.kind === 'image' && detail.sensitivity !== 'normal' && !sensitiveRevealed">敏感图片未请求</span><span v-else-if="attachment.kind === 'image'">安全预览不可用</span></template>
             </div>
             <h3>{{ attachment.displayName }}</h3><p>{{ attachment.mediaType }} · {{ formatBytes(attachment.sizeBytes) }}<template v-if="attachment.width && attachment.height"> · {{ attachment.width }}×{{ attachment.height }}</template></p>
@@ -455,9 +732,9 @@ function formatBytes(bytes: number) {
   <SupplementDrawer v-if="detail" :open="supplementOpen" :item-id="detail.id" :raw-records="detail.rawRecords" :current-sensitivity="detail.sensitivity" @close="supplementOpen = false" @created="onSupplementCreated" />
 
   <Teleport to="body">
-    <div v-if="revealConfirm" class="dialog-overlay"><section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reveal-title"><UiIcon name="shield-alert" :size="28" /><h2 id="reveal-title">揭示敏感原文与附件？</h2><p>内容将在当前页面内读取和显示。请确认周围环境安全，复制后也需自行保护剪贴板。</p><UiButton variant="primary" @click="confirmReveal"><UiIcon name="eye" /> 确认揭示</UiButton><UiButton variant="ghost" @click="revealConfirm = false">取消</UiButton></section></div>
-    <div v-if="editOpen && detail" class="dialog-overlay"><section class="edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title"><header><h2 id="edit-title">编辑人工元数据</h2><button type="button" aria-label="关闭编辑" @click="editOpen = false"><UiIcon name="x" /></button></header><label><span>标题</span><input v-model="editTitle" maxlength="200" required /></label><label><span>备注</span><textarea v-model="editNote" maxlength="2000" rows="4" /></label><div class="edit-dialog__row"><label><span>目录</span><select v-model="editFolderID"><option value="">收件箱</option><option v-for="folder in flatFolders" :key="folder.id" :value="folder.id">{{ '　'.repeat(folder.depth) }}{{ folder.name }}</option></select></label><label><span>敏感状态</span><select v-model="editSensitivity"><option value="normal">普通</option><option value="unknown">待确认</option><option value="sensitive">敏感</option></select></label></div><fieldset><legend>标签（最多 30 个）</legend><label v-for="tag in library.tags" :key="tag.id" class="tag-check"><input v-model="editTagIDs" type="checkbox" :value="tag.id" /> {{ tag.name }}</label><span v-if="!library.tags.length">尚无标签，可从资料库结构管理器创建。</span></fieldset><label class="favorite-check"><input v-model="editFavorite" type="checkbox" /> 收藏这条记录</label><p class="edit-dialog__notice">修改敏感状态只改变当前访问与外发策略，不会改写历史原始记录的声明。</p><p v-if="mutationError" class="mutation-error" role="alert">{{ mutationError }}</p><footer><UiButton variant="ghost" @click="editOpen = false">取消</UiButton><UiButton variant="primary" :disabled="mutationBusy || !editTitle.trim()" @click="saveMetadata">{{ mutationBusy ? '正在保存' : '保存元数据' }}</UiButton></footer></section></div>
-    <div v-if="deleteConfirm && detail" class="dialog-overlay"><section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="trash-title"><UiIcon name="trash-2" :size="28" /><h2 id="trash-title">移入回收站？</h2><p>原始记录和附件会保留，但条目将从普通视图与搜索中消失。你仍可在回收站恢复。</p><p v-if="mutationError" class="mutation-error" role="alert">{{ mutationError }}</p><UiButton variant="danger" :disabled="mutationBusy" @click="trashItem">{{ mutationBusy ? '正在移动' : '移入回收站' }}</UiButton><UiButton variant="ghost" :disabled="mutationBusy" @click="deleteConfirm = false">取消</UiButton></section></div>
+    <div v-if="revealConfirm" class="dialog-overlay"><section ref="revealDialog" class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reveal-title" tabindex="-1" @keydown="onDialogKeydown"><UiIcon name="shield-alert" :size="28" /><h2 id="reveal-title">揭示敏感原文与附件？</h2><p>内容将在当前页面内读取和显示。请确认周围环境安全，复制后也需自行保护剪贴板。</p><UiButton variant="primary" @click="confirmReveal"><UiIcon name="eye" /> 确认揭示</UiButton><UiButton variant="ghost" @click="closeRevealDialog">取消</UiButton></section></div>
+    <div v-if="editOpen && detail" class="dialog-overlay"><section ref="editDialog" class="edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title" tabindex="-1" @keydown="onDialogKeydown"><header><h2 id="edit-title">编辑人工元数据</h2><button type="button" aria-label="关闭编辑" @click="closeEditDialog"><UiIcon name="x" /></button></header><label><span>标题</span><input v-model="editTitle" maxlength="200" required /></label><label><span>备注</span><textarea v-model="editNote" maxlength="2000" rows="4" /></label><div class="edit-dialog__row"><label><span>目录</span><select v-model="editFolderID"><option value="">收件箱</option><option v-for="folder in flatFolders" :key="folder.id" :value="folder.id">{{ '　'.repeat(folder.depth) }}{{ folder.name }}</option></select></label><label><span>敏感状态</span><select v-model="editSensitivity"><option value="normal">普通</option><option value="unknown">待确认</option><option value="sensitive">敏感</option></select></label></div><fieldset><legend>标签（最多 30 个）</legend><label v-for="tag in library.tags" :key="tag.id" class="tag-check"><input v-model="editTagIDs" type="checkbox" :value="tag.id" /> {{ tag.name }}</label><span v-if="!library.tags.length">尚无标签，可从资料库结构管理器创建。</span></fieldset><label class="favorite-check"><input v-model="editFavorite" type="checkbox" /> 收藏这条记录</label><p class="edit-dialog__notice">修改敏感状态只改变当前访问与外发策略，不会改写历史原始记录的声明。</p><p v-if="mutationError" class="mutation-error" role="alert">{{ mutationError }}</p><footer><UiButton variant="ghost" @click="closeEditDialog">取消</UiButton><UiButton variant="primary" :disabled="mutationBusy || !editTitle.trim()" @click="saveMetadata">{{ mutationBusy ? '正在保存' : '保存元数据' }}</UiButton></footer></section></div>
+    <div v-if="deleteConfirm && detail" class="dialog-overlay"><section ref="deleteDialog" class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="trash-title" tabindex="-1" @keydown="onDialogKeydown"><UiIcon name="trash-2" :size="28" /><h2 id="trash-title">移入回收站？</h2><p>原始记录和附件会保留，但条目将从普通视图与搜索中消失。你仍可在回收站恢复。</p><p v-if="mutationError" class="mutation-error" role="alert">{{ mutationError }}</p><UiButton variant="danger" :disabled="mutationBusy" @click="trashItem">{{ mutationBusy ? '正在移动' : '移入回收站' }}</UiButton><UiButton variant="ghost" :disabled="mutationBusy" @click="closeTrashDialog">取消</UiButton></section></div>
   </Teleport>
 </template>
 
@@ -515,6 +792,9 @@ dl div { display: grid; gap: 1px; } dt { color: var(--text-muted); font-size: 10
 .attachment-grid article { min-width: 0; padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--bg-elevated); }
 .attachment-preview { display: grid; aspect-ratio: 16/10; place-content: center; justify-items: center; overflow: hidden; border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-muted); }
 .attachment-preview img { width: 100%; height: 100%; object-fit: cover; } .attachment-preview span { margin-top: var(--space-2); font-size: 11px; }
+.attachment-preview .preview-failed-icon { color: var(--danger); }
+.attachment-preview .preview-retry { display: inline-flex; align-items: center; gap: var(--space-1); margin-top: var(--space-2); padding: 5px var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-elevated); color: var(--text-primary); font-size: 11px; cursor: pointer; }
+.attachment-preview .preview-retry:hover { background: var(--accent-soft); }
 .attachment-grid h3 { overflow: hidden; margin: var(--space-3) 0 0; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; } .attachment-grid p { margin: 2px 0 var(--space-3); color: var(--text-muted); font-size: 11px; }
 .attachment-grid a { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--accent); text-decoration: none; }
 .history-panel article { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3); padding-bottom: var(--space-5); }
@@ -526,12 +806,12 @@ dl div { display: grid; gap: 1px; } dt { color: var(--text-muted); font-size: 10
 .confirm-dialog, .edit-dialog { width: min(440px, calc(100vw - 32px)); padding: var(--space-5); border: 1px solid var(--border-strong); border-radius: var(--radius-dialog); background: var(--bg-elevated); box-shadow: var(--shadow-overlay); }
 .confirm-dialog > svg { color: var(--sensitive); } .confirm-dialog h2 { margin: var(--space-3) 0 var(--space-2); font-size: 19px; } .confirm-dialog p { color: var(--text-secondary); } .confirm-dialog button { width: 100%; margin-top: var(--space-2); }
 .edit-dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; }
-.edit-dialog > header { display: flex; align-items: center; justify-content: space-between; } .edit-dialog header h2 { margin: 0; } .edit-dialog header button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.edit-dialog > header { display: flex; align-items: center; justify-content: space-between; } .edit-dialog header h2 { margin: 0; } .edit-dialog header button { display: grid; width: 44px; height: 44px; place-items: center; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
 .edit-dialog > label, .edit-dialog__row label { display: grid; gap: var(--space-1); margin-top: var(--space-3); color: var(--text-secondary); font-size: 11px; font-weight: 700; }
 .edit-dialog input, .edit-dialog textarea, .edit-dialog select { width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--bg-code); color: var(--text-primary); }
 .edit-dialog__row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
 .edit-dialog fieldset { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); } .edit-dialog legend { color: var(--text-muted); font-size: 11px; } .tag-check, .favorite-check { display: inline-flex !important; align-items: center; gap: var(--space-1); font-weight: 400 !important; } .tag-check input, .favorite-check input { width: auto; }
 .edit-dialog__notice { padding: var(--space-2); background: var(--accent-soft); color: var(--text-secondary); font-size: 11px; } .edit-dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 .mutation-error { color: var(--danger) !important; }
-@media (max-width: 720px) { .detail-page { min-height: auto; padding: var(--space-3); } .detail-header { grid-template-columns: 1fr; } .detail-actions, .detail-page--embedded .detail-actions { flex-wrap: wrap; margin-left: 0; } .detail-actions button { flex: 1; } dl { margin-left: 0; } .raw-layout { grid-template-columns: 1fr; } .raw-history { display: flex; overflow-x: auto; gap: var(--space-2); padding: 0 0 var(--space-3); border-right: 0; border-bottom: 1px solid var(--border-subtle); } .raw-history button { min-width: 160px; margin: 0; } .edit-dialog__row { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .detail-page { min-height: auto; padding: var(--space-3); } .detail-header { grid-template-columns: 1fr; } .detail-actions, .detail-page--embedded .detail-actions { flex-wrap: wrap; margin-left: 0; } .detail-actions button { flex: 1; } dl { margin-left: 0; } .raw-layout { grid-template-columns: 1fr; } .raw-history { display: flex; overflow-x: auto; gap: var(--space-2); padding: 0 0 var(--space-3); border-right: 0; border-bottom: 1px solid var(--border-subtle); } .raw-history button { min-width: 160px; margin: 0; } .edit-dialog__row { grid-template-columns: 1fr; } .confirm-dialog button, .edit-dialog footer button { min-height: 44px; } }
 </style>

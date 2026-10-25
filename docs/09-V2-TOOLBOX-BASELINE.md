@@ -243,10 +243,11 @@ V2.2 不把译文重新绘制到图片上，不保存图片或结果，不支持
 
 **Schema**
 
-- 只支持 JSON Schema Draft 2020-12。
+- 只支持 JSON Schema Draft 2020-12；声明其他 `$schema` 或自定义 `$vocabulary` 会被拒绝。
 - 支持粘贴 Schema 校验当前 JSON，以及从当前 JSON 生成一份可编辑的初始 Schema。
-- 禁止网络和远程 `$ref`；只解析当前文档内 `$ref`。
-- 如实例含任一无法安全映射为 JavaScript number 的数值，为避免 Ajv 产生错误结论，本次只校验 Schema 本身，整份实例校验标为 `not_run_precision_guard`；不做部分通过、强转数字或自研任意精度 Schema 引擎。
+- 禁止网络和远程 `$ref`/`$dynamicRef`；只解析当前文档内 `#` 引用。
+- `format` 与未知关键字按 Draft 2020-12 默认注解语义：不参与通过/失败判定，不再像旧实现的 strict 编译期那样报错。
+- 如实例含任一无法安全映射为 JavaScript number 的数值，为避免校验引擎产生错误结论，本次只校验 Schema 本身，整份实例校验标为 `not_run_precision_guard`；不做部分通过、强转数字或自研任意精度 Schema 引擎。
 - 生成 Schema 只根据当前样本结构，不宣称推断出完整业务约束。
 
 **本地类型生成**

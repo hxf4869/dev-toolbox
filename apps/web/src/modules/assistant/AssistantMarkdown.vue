@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import type { CitationRefDTO } from './assistantContracts'
 
@@ -14,6 +14,11 @@ const copiedIndex = ref<number | null>(null)
 const copyErrorIndex = ref<number | null>(null)
 const wrappedIndices = ref(new Set<number>())
 const markdownElement = ref<HTMLElement | null>(null)
+// Feedback records the code text it belongs to, so a source update can tell
+// "same block, appended prose" from a swap at the same index.
+let copiedCodeText: string | null = null
+let erroredCodeText: string | null = null
+let copyFeedbackTimer: number | undefined
 
 const rendered = computed(() => {
   const codeBlocks: string[] = []
@@ -54,18 +59,37 @@ const rendered = computed(() => {
     const blockIndex = codeBlocks.push(token?.content ?? '') - 1
     const language = renderer.utils.escapeHtml(token?.info.trim().split(/\s+/u)[0] ?? '')
     const className = language ? ` class="language-${language}"` : ''
-    const copyLabel =
-      copiedIndex.value === blockIndex
-        ? '已复制'
-        : copyErrorIndex.value === blockIndex
-          ? '复制失败，重试'
-          : '复制代码块'
     const wrapped = wrappedIndices.value.has(blockIndex)
-    return `<section class="assistant-code-block"><header><span>${language || '代码'} · 模型生成，未验证</span><div class="assistant-code-actions"><button type="button" data-wrap-index="${blockIndex}" aria-pressed="${wrapped}" title="切换代码自动换行">自动换行</button><button type="button" data-code-index="${blockIndex}" title="复制这个代码块">${copyLabel}</button></div></header><pre tabindex="0"${wrapped ? ' class="is-wrapped"' : ''}><code${className}>${renderer.utils.escapeHtml(token?.content ?? '')}</code></pre></section>`
+    return `<section class="assistant-code-block"><header><span>${language || '代码'} · 模型生成，未验证</span><div class="assistant-code-actions"><button type="button" data-wrap-index="${blockIndex}" aria-pressed="${wrapped}" title="切换代码自动换行">自动换行</button><button type="button" data-code-index="${blockIndex}" title="复制这个代码块">复制代码块</button></div></header><pre tabindex="0"${wrapped ? ' class="is-wrapped"' : ''}><code${className}>${renderer.utils.escapeHtml(token?.content ?? '')}</code></pre></section>`
   }
 
   return { html: renderer.render(props.source), codeBlocks }
 })
+
+// Copy feedback must never re-enter rendered.html: v-html keeps its nodes, so focus,
+// citation openers and drawer ownership survive feedback changes. The watcher only
+// relabels buttons this component generated, and clears feedback whose code is gone.
+watch(
+  [() => rendered.value.html, copiedIndex, copyErrorIndex],
+  () => {
+    const codeBlocks = rendered.value.codeBlocks
+    if (copiedIndex.value !== null && codeBlocks[copiedIndex.value] !== copiedCodeText) clearCopyFeedback()
+    if (copyErrorIndex.value !== null && codeBlocks[copyErrorIndex.value] !== erroredCodeText) clearCopyFeedback()
+    for (const button of markdownElement.value?.querySelectorAll<HTMLButtonElement>('button[data-code-index]') ?? []) {
+      const index = Number(button.dataset.codeIndex)
+      button.textContent =
+        copiedIndex.value === index ? '已复制' : copyErrorIndex.value === index ? '复制失败，重试' : '复制代码块'
+    }
+  },
+  { flush: 'post' },
+)
+
+function clearCopyFeedback() {
+  copiedIndex.value = null
+  copyErrorIndex.value = null
+  window.clearTimeout(copyFeedbackTimer)
+  copyFeedbackTimer = undefined
+}
 
 async function onContentClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null
@@ -98,12 +122,21 @@ async function onContentClick(event: MouseEvent) {
   } catch {
     // Keep the failed action available for an explicit retry.
   }
+  // The block may have been swapped at the same index while the clipboard promise
+  // was pending; a stale outcome must not label the new code.
+  if (rendered.value.codeBlocks[index] !== content) return
+  window.clearTimeout(copyFeedbackTimer)
+  copyFeedbackTimer = undefined
+  copiedCodeText = content
+  erroredCodeText = content
   const restoreFocus = copyButton === document.activeElement
   copiedIndex.value = copied ? index : null
   copyErrorIndex.value = copied ? null : index
   await restoreCodeFocus('code', index, restoreFocus)
   if (copied) {
-    window.setTimeout(async () => {
+    // One shared timer so an earlier copy cannot cut short a newer one's window.
+    copyFeedbackTimer = window.setTimeout(async () => {
+      copyFeedbackTimer = undefined
       const focused = markdownElement.value?.querySelector(`button[data-code-index="${index}"]`) === document.activeElement
       if (copiedIndex.value === index) copiedIndex.value = null
       await restoreCodeFocus('code', index, focused)
@@ -124,6 +157,8 @@ function insideLink(tokens: Array<{ type: string }>, index: number) {
   }
   return depth > 0
 }
+
+onBeforeUnmount(() => window.clearTimeout(copyFeedbackTimer))
 </script>
 
 <template>

@@ -63,6 +63,12 @@ type providerEntry struct {
 	LastTestFailureCategory *string      `json:"lastTestFailureCategory"`
 }
 
+type providerTestConfiguration struct {
+	protocol         string
+	baseURL          string
+	apiKeyCiphertext []byte
+}
+
 func (service *Service) listProviders(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
 	rows, err := service.database.Query(request.Context(), `
@@ -424,6 +430,7 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 		writeProviderInternal(response, request)
 		return
 	}
+	testedConfig := providerTestConfiguration{protocol: protocol, baseURL: baseURL, apiKeyCiphertext: ciphertext}
 	apiKey, err := secretbox.Open(service.masterKey, ciphertext)
 	if err != nil {
 		writeProviderInternal(response, request)
@@ -447,14 +454,14 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 	internalRequest.Header.Set("Authorization", "Bearer "+service.internalServiceToken)
 	workerResponse, err := service.httpClient.Do(internalRequest)
 	if err != nil {
-		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", nil, "unavailable")
+		_ = service.recordProviderTest(request.Context(), providerID, testedConfig, "unavailable", nil, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
 	defer workerResponse.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(workerResponse.Body, 64*1024+1))
 	if err != nil || len(body) > 64*1024 {
-		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", nil, "unavailable")
+		_ = service.recordProviderTest(request.Context(), providerID, testedConfig, "unavailable", nil, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
@@ -470,24 +477,24 @@ func (service *Service) testProvider(response http.ResponseWriter, request *http
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.LatencyMS < 0 {
-		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", nil, "unavailable")
+		_ = service.recordProviderTest(request.Context(), providerID, testedConfig, "unavailable", nil, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
 	if workerResponse.StatusCode == http.StatusUnprocessableEntity && result.FailureCategory == "credentials_invalid" {
 		latency := int(result.LatencyMS)
-		_ = service.recordProviderTest(request.Context(), providerID, "credentials_invalid", &latency, "credentials_invalid")
+		_ = service.recordProviderTest(request.Context(), providerID, testedConfig, "credentials_invalid", &latency, "credentials_invalid")
 		httpapi.WriteError(response, request, http.StatusUnprocessableEntity, "AI_PROVIDER_CREDENTIALS_INVALID", "Provider 凭据被拒绝")
 		return
 	}
 	if workerResponse.StatusCode != http.StatusOK || result.Status != "ok" {
 		latency := int(result.LatencyMS)
-		_ = service.recordProviderTest(request.Context(), providerID, "unavailable", &latency, "unavailable")
+		_ = service.recordProviderTest(request.Context(), providerID, testedConfig, "unavailable", &latency, "unavailable")
 		writeProviderUnavailable(response, request)
 		return
 	}
 	latency := int(result.LatencyMS)
-	if err := service.recordProviderTest(request.Context(), providerID, "ok", &latency, ""); err != nil {
+	if err := service.recordProviderTest(request.Context(), providerID, testedConfig, "ok", &latency, ""); err != nil {
 		writeProviderInternal(response, request)
 		return
 	}
@@ -528,7 +535,7 @@ func writeAssistantInUse(response http.ResponseWriter, request *http.Request) {
 	httpapi.WriteError(response, request, http.StatusConflict, "PROVIDER_IN_USE", "配置正被排队中的知识助手回答使用")
 }
 
-func (service *Service) recordProviderTest(ctx context.Context, providerID uuid.UUID, status string, latency *int, failureCategory string) error {
+func (service *Service) recordProviderTest(ctx context.Context, providerID uuid.UUID, tested providerTestConfiguration, status string, latency *int, failureCategory string) error {
 	var failure *string
 	if failureCategory != "" {
 		failure = &failureCategory
@@ -536,8 +543,9 @@ func (service *Service) recordProviderTest(ctx context.Context, providerID uuid.
 	_, err := service.database.Exec(ctx, `
 		UPDATE provider_configs SET last_tested_at = $2, last_test_status = $3,
 		       last_test_latency_ms = $4, last_test_failure_category = $5
-		WHERE id = $1 AND deleted_at IS NULL
-	`, providerID, service.now().UTC(), status, latency, failure)
+		WHERE id = $1 AND deleted_at IS NULL AND enabled
+		  AND protocol = $6 AND base_url = $7 AND api_key_ciphertext = $8
+	`, providerID, service.now().UTC(), status, latency, failure, tested.protocol, tested.baseURL, tested.apiKeyCiphertext)
 	return err
 }
 

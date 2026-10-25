@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 
 const props = withDefaults(defineProps<{ source: string; origin?: string }>(), {
   // Raw records are the default origin; AI-derived usage passes its own label
@@ -9,6 +9,11 @@ const props = withDefaults(defineProps<{ source: string; origin?: string }>(), {
 })
 const copiedIndex = ref<number | null>(null)
 const copyErrorIndex = ref<number | null>(null)
+const wrappedIndices = ref(new Set<number>())
+const markdownElement = ref<HTMLElement | null>(null)
+// html=false leaves exactly these focusable kinds inside the rendered markdown.
+const FOCUSABLE = 'a[href], button, pre[tabindex]'
+let feedbackTimer: number | undefined
 
 const rendered = computed(() => {
   const codeBlocks: string[] = []
@@ -33,35 +38,76 @@ const rendered = computed(() => {
     const language = renderer.utils.escapeHtml(token.info.trim().split(/\s+/u)[0] ?? '')
     const className = language ? ` class="language-${language}"` : ''
     const copyLabel = copiedIndex.value === blockIndex ? '已复制' : copyErrorIndex.value === blockIndex ? '复制失败，重试' : '复制代码块'
-    return `<section class="safe-code-block"><header><span>${language || '代码'} · ${renderer.utils.escapeHtml(props.origin)}</span><button type="button" data-code-index="${blockIndex}">${copyLabel}</button></header><pre tabindex="0"><code${className}>${renderer.utils.escapeHtml(token.content)}</code></pre></section>`
+    const wrapped = wrappedIndices.value.has(blockIndex)
+    return `<section class="safe-code-block"><header><span>${language || '代码'} · ${renderer.utils.escapeHtml(props.origin)}</span><div class="safe-code-actions"><button type="button" data-wrap-index="${blockIndex}" aria-pressed="${wrapped}" title="切换代码自动换行">自动换行</button><button type="button" data-code-index="${blockIndex}" title="复制这个代码块">${copyLabel}</button></div></header><pre tabindex="0"${wrapped ? ' class="is-wrapped"' : ''}><code${className}>${renderer.utils.escapeHtml(token.content)}</code></pre></section>`
   }
   return { html: renderer.render(props.source), codeBlocks }
 })
 
 async function onContentClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null
-  const button = target?.closest<HTMLButtonElement>('button[data-code-index]')
-  if (!button) return
-  const index = Number(button.dataset.codeIndex)
+  const wrapButton = target?.closest<HTMLButtonElement>('button[data-wrap-index]')
+  if (wrapButton) {
+    const index = Number(wrapButton.dataset.wrapIndex)
+    await updatePreservingFocus(() => {
+      if (wrappedIndices.value.has(index)) wrappedIndices.value.delete(index)
+      else wrappedIndices.value.add(index)
+    })
+    return
+  }
+
+  const copyButton = target?.closest<HTMLButtonElement>('button[data-code-index]')
+  if (!copyButton) return
+  const index = Number(copyButton.dataset.codeIndex)
   const content = rendered.value.codeBlocks[index]
   if (content === undefined) return
-  copyErrorIndex.value = null
+  let copied = false
   try {
     await navigator.clipboard.writeText(content)
-    copiedIndex.value = index
-    window.setTimeout(() => {
-      if (copiedIndex.value === index) copiedIndex.value = null
-    }, 1600)
+    copied = true
   } catch {
-    copiedIndex.value = null
-    copyErrorIndex.value = index
+    // Keep the failed action available for an explicit retry.
+  }
+  window.clearTimeout(feedbackTimer)
+  await updatePreservingFocus(() => {
+    copiedIndex.value = copied ? index : null
+    copyErrorIndex.value = copied ? null : index
+  })
+  if (copied) {
+    feedbackTimer = window.setTimeout(() => {
+      feedbackTimer = undefined
+      if (copiedIndex.value !== index) return
+      void updatePreservingFocus(() => {
+        copiedIndex.value = null
+      })
+    }, 1600)
   }
 }
+
+// v-html replaces every node on re-render, so the focused element only survives as
+// "the Nth focusable inside this markdown"; our own state changes never add, remove
+// or reorder focusables. Restore only while it is still the same root and source and
+// focus merely fell to body (or stayed put); anything else means someone moved it on purpose.
+async function updatePreservingFocus(update: () => void) {
+  const root = markdownElement.value
+  const source = props.source
+  const active = document.activeElement
+  const focusableBefore = root ? Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)) : []
+  const focusedAt = active instanceof HTMLElement ? focusableBefore.indexOf(active) : -1
+  update()
+  await nextTick()
+  if (!root || focusedAt < 0 || markdownElement.value !== root || props.source !== source) return
+  const current = document.activeElement
+  if (current !== document.body && current !== active) return
+  root.querySelectorAll<HTMLElement>(FOCUSABLE).item(focusedAt)?.focus({ preventScroll: true })
+}
+
+onBeforeUnmount(() => window.clearTimeout(feedbackTimer))
 </script>
 
 <template>
   <!-- markdown-it escapes raw HTML because html=false. -->
-  <div class="safe-markdown" @click="onContentClick" v-html="rendered.html" />
+  <div ref="markdownElement" class="safe-markdown" @click="onContentClick" v-html="rendered.html" />
   <span class="sr-only" role="status">{{ copiedIndex !== null ? '代码块已精确复制' : copyErrorIndex !== null ? '复制失败，请重试' : '' }}</span>
 </template>
 
@@ -97,6 +143,7 @@ async function onContentClick(event: MouseEvent) {
   min-height: 36px;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-3);
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-muted);
@@ -104,11 +151,19 @@ async function onContentClick(event: MouseEvent) {
 }
 
 .safe-markdown :deep(.safe-code-block button) {
+  min-height: 40px;
+  min-width: 40px;
+  padding: 0 var(--space-2);
   border: 0;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--accent);
   cursor: pointer;
 }
+
+.safe-markdown :deep(.safe-code-block button:hover) { background: var(--accent-soft); }
+.safe-markdown :deep(.safe-code-actions) { display: flex; flex-shrink: 0; gap: var(--space-1); }
+.safe-markdown :deep(.safe-code-block button[aria-pressed="true"]) { background: var(--accent-soft); }
 
 .safe-markdown :deep(.safe-code-block pre) {
   margin: 0;
@@ -127,6 +182,8 @@ async function onContentClick(event: MouseEvent) {
   padding: 0;
   background: transparent;
 }
+
+.safe-markdown :deep(pre.is-wrapped) { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .safe-markdown :deep(a) {
   text-decoration-thickness: 1px;

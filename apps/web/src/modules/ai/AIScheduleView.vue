@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { useAuthStore } from '../../app/auth'
@@ -48,6 +48,15 @@ const visionModelLabel = computed(() =>
 )
 const policyLabel = computed(() =>
   policy.value === 'block' ? '阻止外发' : policy.value === 'redact' ? '遮挡后外发' : '允许原文外发',
+)
+
+// flush: 'sync'：保存成功会先回填各字段再置 saved，默认 pre flush 的回调会延后到同步代码之后运行，清掉刚显示的提示。
+watch(
+  [frequency, timezone, localTime, weekday, organizeModelID, visionModelID, policy],
+  () => {
+    saved.value = false
+  },
+  { flush: 'sync' },
 )
 
 onMounted(() => void loadState())
@@ -125,10 +134,10 @@ function messageFor(error: unknown) {
     title-id="schedule-title"
     title="批量与自动整理"
     description="设置自动整理的运行时间和所用模型。"
-    :show-aside="!loading"
+    :show-aside="!loading && settings !== null"
   >
     <template #actions>
-      <UiButton variant="primary" :disabled="loading || busy || (frequency !== 'off' && !organizeModelID)" @click="saveSchedule"><UiIcon name="save" />{{ busy ? '正在保存…' : '保存设置' }}</UiButton>
+      <UiButton variant="primary" :disabled="loading || busy || !settings || (frequency !== 'off' && !organizeModelID)" @click="saveSchedule"><UiIcon name="save" />{{ busy ? '正在保存…' : '保存设置' }}</UiButton>
     </template>
 
     <template #notices>
@@ -138,24 +147,24 @@ function messageFor(error: unknown) {
 
     <div v-if="loading" class="settings-loading"><span class="settings-spinner" />正在读取调度设置…</div>
 
-    <template v-else>
+    <template v-else-if="settings">
       <section class="settings-card" aria-labelledby="frequency-title">
         <header class="settings-card__header"><div><h3 id="frequency-title">运行频率</h3><p>选择关闭、每日或每周。</p></div><span class="settings-status" :class="frequency === 'off' ? '' : 'settings-status--success'">{{ frequency === 'off' ? '已关闭' : frequency === 'daily' ? '每日' : '每周' }}</span></header>
         <div class="settings-card__body frequency-grid">
-          <label v-for="choice in ([{ value: 'off', label: '关闭', detail: '不自动创建任务' }, { value: 'daily', label: '每日', detail: '每天一个时间窗' }, { value: 'weekly', label: '每周', detail: '指定星期与时间' }] as const)" :key="choice.value" :class="{ selected: frequency === choice.value }"><input v-model="frequency" type="radio" :value="choice.value" /><span><strong>{{ choice.label }}</strong><small>{{ choice.detail }}</small></span></label>
+          <label v-for="choice in ([{ value: 'off', label: '关闭', detail: '不自动创建任务' }, { value: 'daily', label: '每日', detail: '每天一个时间窗' }, { value: 'weekly', label: '每周', detail: '指定星期与时间' }] as const)" :key="choice.value" :class="{ selected: frequency === choice.value }"><input v-model="frequency" type="radio" :value="choice.value" :disabled="busy" /><span><strong>{{ choice.label }}</strong><small>{{ choice.detail }}</small></span></label>
         </div>
       </section>
 
       <section class="settings-card" aria-labelledby="window-title">
         <header class="settings-card__header"><div><h3 id="window-title">时间与模型</h3><p>设置运行时区、时间和整理模型。</p></div></header>
         <div class="settings-card__body schedule-form">
-          <label><span>IANA 时区</span><input v-model.trim="timezone" list="timezone-suggestions" maxlength="120" required /><small>使用如 Asia/Shanghai、UTC、America/Los_Angeles 的 IANA 名称。</small></label>
+          <label><span>IANA 时区</span><input v-model.trim="timezone" list="timezone-suggestions" maxlength="120" required :disabled="busy" /><small>使用如 Asia/Shanghai、UTC、America/Los_Angeles 的 IANA 名称。</small></label>
           <datalist id="timezone-suggestions"><option value="Asia/Shanghai" /><option value="UTC" /><option value="Asia/Tokyo" /><option value="Europe/London" /><option value="America/Los_Angeles" /></datalist>
-          <label><span>本地时间</span><input v-model="localTime" type="time" required /></label>
-          <label v-if="frequency === 'weekly'"><span>星期</span><select v-model.number="weekday"><option :value="1">星期一</option><option :value="2">星期二</option><option :value="3">星期三</option><option :value="4">星期四</option><option :value="5">星期五</option><option :value="6">星期六</option><option :value="7">星期日</option></select></label>
-          <label><span>正文整理模型</span><select v-model="organizeModelID"><option value="">未配置</option><option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select><small v-if="frequency !== 'off' && !organizeModelID" class="field-error">启用自动整理前必须选择正文模型。</small></label>
-          <label><span>视觉模型（可选）</span><select v-model="visionModelID"><option value="">未配置，图片分支跳过</option><option v-for="model in visionOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select><small>纯图片或混合条目的图片分支只使用具备视觉能力的模型。</small></label>
-          <label><span>敏感策略</span><select v-model="policy"><option v-for="entry in allowedPolicies" :key="entry" :value="entry">{{ entry === 'block' ? '阻止外发' : entry === 'redact' ? '遮挡后外发' : '允许原文外发' }}</option></select><small>不能比实例的 AI 敏感策略更宽松。</small></label>
+          <label><span>本地时间</span><input v-model="localTime" type="time" required :disabled="busy" /></label>
+          <label v-if="frequency === 'weekly'"><span>星期</span><select v-model.number="weekday" :disabled="busy"><option :value="1">星期一</option><option :value="2">星期二</option><option :value="3">星期三</option><option :value="4">星期四</option><option :value="5">星期五</option><option :value="6">星期六</option><option :value="7">星期日</option></select></label>
+          <label><span>正文整理模型</span><select v-model="organizeModelID" :disabled="busy"><option value="">未配置</option><option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select><small v-if="frequency !== 'off' && !organizeModelID" class="field-error">启用自动整理前必须选择正文模型。</small></label>
+          <label><span>视觉模型（可选）</span><select v-model="visionModelID" :disabled="busy"><option value="">未配置，图片分支跳过</option><option v-for="model in visionOptions" :key="model.id" :value="model.id">{{ model.label }}</option></select><small>纯图片或混合条目的图片分支只使用具备视觉能力的模型。</small></label>
+          <label><span>敏感策略</span><select v-model="policy" :disabled="busy"><option v-for="entry in allowedPolicies" :key="entry" :value="entry">{{ entry === 'block' ? '阻止外发' : entry === 'redact' ? '遮挡后外发' : '允许原文外发' }}</option></select><small>不能比实例的 AI 敏感策略更宽松。</small></label>
         </div>
       </section>
 

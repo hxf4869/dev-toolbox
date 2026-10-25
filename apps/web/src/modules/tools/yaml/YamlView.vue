@@ -22,6 +22,8 @@ const outputHost = ref<HTMLElement | null>(null)
 let inputEditor: AdaptiveEditor | null = null
 let outputEditor: AdaptiveEditor | null = null
 let activeRequest: WorkerRequest<YamlWorkerResult> | null = null
+// 当前 output/status 对应的输入文本；null 表示没有可信结果。applyFormatted 自身回写输入时会先更新它。
+let outputSourceInput: string | null = null
 let progressTimer: number | undefined
 
 const workerClient = new WorkerRequestClient<YamlWorkerRequest, YamlWorkerResult>(
@@ -37,11 +39,20 @@ onMounted(async () => {
   outputEditor = createAdaptiveEditor({ host: outputHost.value, ariaLabel: 'YAML 结果编辑器', language: outputLanguage.value, value: '', readOnly: true })
   await Promise.all([inputEditor.ready, outputEditor.ready])
 })
-watch(input, (value) => { if (inputEditor?.getValue() !== value) inputEditor?.setValue(value) })
+watch(input, (value) => {
+  if (inputEditor?.getValue() !== value) inputEditor?.setValue(value)
+  if (value === outputSourceInput) return
+  cancelLocalRequest()
+  outputSourceInput = null
+  output.value = ''
+  status.value = ''
+  errorMessage.value = ''
+})
 watch(output, (value) => { if (outputEditor?.getValue() !== value) outputEditor?.setValue(value) })
 watch(mode, async () => {
   cancelLocalRequest()
   output.value = ''
+  outputSourceInput = null
   status.value = ''
   errorMessage.value = ''
   inputEditor?.setAriaLabel(mode.value === 'from-json' ? 'JSON 输入编辑器' : 'YAML 输入编辑器')
@@ -73,6 +84,7 @@ async function run() {
     const result = await pending.promise
     if (activeRequest !== pending) return
     output.value = result.output
+    outputSourceInput = request.text
     status.value = result.operation === 'to-json'
       ? result.documentCount === 1 ? '已输出单个 JSON 值。注释不会进入 JSON，之后无法从 JSON 恢复。' : `已将 ${result.documentCount} 个文档按顺序输出为 JSON 数组；注释不会进入 JSON。`
       : result.operation === 'format'
@@ -93,6 +105,10 @@ async function run() {
 
 function applyFormatted() {
   if (mode.value !== 'format' || !output.value) return
+  if (outputSourceInput === null || input.value !== outputSourceInput) return
+  // 回写输入会使 watch 因快照相等而不触发取消，必须先作废在途请求，避免晚到结果覆盖已应用状态。
+  cancelLocalRequest()
+  outputSourceInput = output.value
   input.value = output.value
   status.value = '格式化结果已应用到输入。'
   mobilePane.value = 'input'
@@ -170,6 +186,8 @@ function cancelLocalRequest() {
 .editors { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; min-height: 520px; margin: var(--space-4) var(--space-8); background: var(--border-subtle); }
 .pane { display: flex; min-width: 0; flex-direction: column; padding: var(--space-3); background: var(--bg-surface); }
 .heading { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: var(--space-3); color: var(--text-secondary); font-weight: 600; }
+/* 窄屏下右侧复制反馈与快捷跳转到达最小宽度后，压力只能落到标题上；标题不收缩，改由 pane-actions 自身换行吸收。 */
+.heading > span { flex-shrink: 0; }
 .pane-actions, .editor-shortcuts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-3); }
 .editor-shortcuts { font-size: 12px; font-weight: 500; }
 .editor-shortcuts a { color: var(--text-muted); }

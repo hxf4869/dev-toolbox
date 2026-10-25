@@ -14,18 +14,48 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	_ "golang.org/x/image/webp"
+
+	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
 )
 
 const (
 	maxFileBytes  = 20 * 1024 * 1024
 	maxTotalBytes = 100 * 1024 * 1024
 	maxFileCount  = 10
+
+	// Slow but legal uploads must survive far past the server-wide 15s read
+	// budget, so both authenticated multipart entry points re-arm the
+	// connection-local deadlines before any database work: the body read gets
+	// 300s from that moment and the response write keeps another 60s after it.
+	multipartReadBudget  = 300 * time.Second
+	multipartWriteBudget = multipartReadBudget + 60*time.Second
 )
 
 var errFileTooLarge = errors.New("attachment exceeds 20 MiB")
+
+// extendMultipartDeadlines installs the upload budgets for one multipart
+// request. It must run after authentication and legal parameter parsing,
+// replacing the original 15s deadline before the potentially slow idempotency
+// pre-check (that pre-check then runs inside the 300s window). A writer that
+// cannot carry the deadlines fails the request with the internal error
+// response instead of silently keeping the short server-wide ones.
+func extendMultipartDeadlines(response http.ResponseWriter, request *http.Request) bool {
+	controller := http.NewResponseController(response)
+	started := time.Now()
+	if err := controller.SetReadDeadline(started.Add(multipartReadBudget)); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return false
+	}
+	if err := controller.SetWriteDeadline(started.Add(multipartWriteBudget)); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return false
+	}
+	return true
+}
 
 type preparedFile struct {
 	TempPath      string

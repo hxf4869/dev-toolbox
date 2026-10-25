@@ -10,6 +10,8 @@ const route = useRoute()
 const navigationOpen = ref(false)
 const navigationTrigger = ref<HTMLButtonElement | null>(null)
 
+withDefaults(defineProps<{ routeFailureHref?: string }>(), { routeFailureHref: '' })
+
 const navigationLabel = computed(() => ({
   home: '工作入口',
   knowledge: '资料库导航',
@@ -46,8 +48,13 @@ async function closeNavigation() {
 
 <template>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
-  <div class="shell">
+  <div class="shell" :class="{ 'shell--route-failure': routeFailureHref }">
     <AppRail />
+    <p v-if="routeFailureHref" class="shell__route-failure" role="alert">
+      <UiIcon name="triangle-alert" />
+      <span>页面未能打开。当前页面保持原样，请先保留未保存的输入，再重新加载目标页面。</span>
+      <a :href="routeFailureHref">重新打开目标页面</a>
+    </p>
     <div class="shell__workspace">
       <ModuleNav :open="navigationOpen" @close="closeNavigation" />
       <main id="main-content" class="shell__main" :data-layout="layoutMode" tabindex="-1">
@@ -72,6 +79,8 @@ async function closeNavigation() {
   min-height: 0;
   grid-template-rows: var(--global-header-height) minmax(0, 1fr);
   overflow: hidden;
+  /* sticky .shell__compact-bar 最小高度；scroll-padding 与 min-height 同源引用 */
+  --shell-compact-bar-height: 52px;
 }
 
 .shell__workspace {
@@ -80,6 +89,50 @@ async function closeNavigation() {
   min-height: 0;
   grid-template-columns: var(--module-nav-width) minmax(0, 1fr);
   overflow: hidden;
+}
+
+/* 仅在提示存在时给外层 grid 增加一行，workspace 始终占据 minmax(0, 1fr) */
+.shell--route-failure {
+  grid-template-rows: var(--global-header-height) auto minmax(0, 1fr);
+}
+
+.shell__route-failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-subtle));
+  background: var(--bg-elevated);
+  color: var(--danger);
+}
+
+.shell__route-failure > span {
+  flex: 1 1 24ch;
+  min-width: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.shell__route-failure > a {
+  display: inline-flex;
+  flex: none;
+  min-height: 44px;
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--bg-app);
+  color: var(--accent);
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.shell__route-failure > a:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .shell__main {
@@ -105,13 +158,14 @@ async function closeNavigation() {
 @media (max-width: 1279px) {
   .shell__workspace { grid-template-columns: minmax(0, 1fr); }
   .shell__main[data-layout='assistant'] { grid-template-rows: auto minmax(0, 1fr); }
+  .shell__main { scroll-padding-top: var(--shell-compact-bar-height); }
 
   .shell__compact-bar {
     position: sticky;
     z-index: 18;
     top: 0;
     display: flex;
-    min-height: 52px;
+    min-height: var(--shell-compact-bar-height);
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
@@ -138,7 +192,7 @@ async function closeNavigation() {
 }
 
 @media (max-width: 599px) {
-  .shell__compact-bar { min-height: 52px; padding-inline: var(--space-3); }
+  .shell__compact-bar { min-height: var(--shell-compact-bar-height); padding-inline: var(--space-3); }
   .shell__compact-bar button { min-height: 44px; }
   .shell__route-label { display: none; }
 

@@ -377,6 +377,16 @@ func TestClaimCarriesBaselinePairIndependentOfAnswerBudget(t *testing.T) {
 		`UPDATE assistant_runs SET context_window = 8192, max_output_tokens = 512 WHERE id = $1`, fixture.runID); err != nil {
 		t.Fatalf("shrink run context window: %v", err)
 	}
+	// inputContextBudgetTokens(8192, 512) = 8192-512-1200-1024 = 5456 and the
+	// CJK question below estimates to exactly 5455 tokens (3 bytes per char):
+	// the question itself still fits, but only one budget token remains, so no
+	// stored summary can fit the answer side.
+	if _, err := pool.Exec(ctx, `
+		UPDATE assistant_messages SET content = $2
+		WHERE id = (SELECT input_message_id FROM assistant_runs WHERE id = $1)
+	`, fixture.runID, strings.Repeat("问", 5455)); err != nil {
+		t.Fatalf("grow current question to consume the input budget: %v", err)
+	}
 
 	response, err := server.Client().Post(server.URL+"/internal/assistant/runs/claim",
 		"application/json", strings.NewReader(`{"workerId":"summary-store-test-worker"}`))

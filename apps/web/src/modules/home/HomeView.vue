@@ -2,7 +2,6 @@
 import { RouterLink } from 'vue-router'
 
 import UiIcon from '../../components/ui/UiIcon.vue'
-import ProcessingBadge from '../tools/shared/ui/ProcessingBadge.vue'
 import { V2_TOOLS } from '../tools/toolLinks'
 </script>
 
@@ -12,7 +11,7 @@ import { V2_TOOLS } from '../tools/toolLinks'
     <header class="home-view__intro">
       <p>Dev Toolbox</p>
       <h1>开发与运维工作，从这里进入</h1>
-      <span>知识记录与临时工具平级存在；本地工具的正文只停留在当前页面内存。</span>
+      <span>知识记录、临时工具与知识助手平级进入；多数工具在当前浏览器本地处理，翻译与云 OCR 在你确认后才会外发。</span>
     </header>
 
     <section class="module-choices" aria-labelledby="module-heading">
@@ -30,9 +29,18 @@ import { V2_TOOLS } from '../tools/toolLinks'
         <span class="module-choice__icon"><UiIcon name="wrench" :size="22" /></span>
         <span class="module-choice__body">
           <strong>工具箱</strong>
-          <span>打开即用的确定性工具，不保存输入、结果或使用历史。</span>
+          <span>浏览器本地工具与需确认外发的在线能力；输入和结果不保存为使用历史。</span>
         </span>
         <span class="module-choice__action">浏览工具 <UiIcon name="chevron-right" :size="16" /></span>
+      </RouterLink>
+
+      <RouterLink class="module-choice" to="/assistant">
+        <span class="module-choice__icon"><UiIcon name="sparkles" :size="22" /></span>
+        <span class="module-choice__body">
+          <strong>知识助手</strong>
+          <span>与模型交流，或基于知识库问答并查看引用；内容发送给所选 Provider。</span>
+        </span>
+        <span class="module-choice__action">打开知识助手 <UiIcon name="chevron-right" :size="16" /></span>
       </RouterLink>
     </section>
 
@@ -40,22 +48,28 @@ import { V2_TOOLS } from '../tools/toolLinks'
       <header>
         <div>
           <h2 id="quick-tools-heading">常用工具</h2>
-          <p>直接进入当前已发布的 V2.0 本地工具。</p>
+          <p>直接进入当前已发布的工具，每个入口标注默认本地或含云服务。</p>
         </div>
         <RouterLink to="/tools">查看全部工具</RouterLink>
       </header>
       <div class="quick-tools__grid">
         <RouterLink v-for="tool in V2_TOOLS" :key="tool.path" class="quick-tool" :to="tool.path">
           <UiIcon :name="tool.icon" :size="18" />
-          <span><strong>{{ tool.name }}</strong><small>{{ tool.description }}</small></span>
+          <span class="quick-tool__body">
+            <strong>{{ tool.name }}</strong>
+            <small>{{ tool.description }}</small>
+            <span class="quick-tool__status" :class="{ 'quick-tool__status--cloud': tool.processing === 'cloud' }">
+              {{ tool.processing === 'cloud' ? '含云服务' : '默认本地' }}
+            </span>
+          </span>
           <UiIcon name="chevron-right" :size="15" />
         </RouterLink>
       </div>
     </section>
 
     <aside class="privacy-note" aria-label="内容处理边界">
-      <ProcessingBadge />
-      <p>V2.0 的确定性操作不把正文发送到业务 API，也不写入浏览器持久化存储。JSON 的 AI 类型生成只有在你主动选择并确认发送范围后才会外发。</p>
+      <UiIcon name="lock-keyhole" :size="16" class="privacy-note__icon" />
+      <p>标注“默认本地”的工具不把正文发送到业务 API，也不写入浏览器持久化存储；JSON 的 AI 类型生成、文本翻译与云 OCR 只有在你明确操作并确认发送范围后才会外发。各项工具的实际处理位置以工具页说明为准。</p>
     </aside>
   </div>
 </template>
@@ -75,7 +89,7 @@ import { V2_TOOLS } from '../tools/toolLinks'
 
 .module-choices {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-4);
   margin-top: var(--space-8);
 }
@@ -84,6 +98,7 @@ import { V2_TOOLS } from '../tools/toolLinks'
   display: grid;
   min-height: 176px;
   grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
   gap: var(--space-4);
   align-content: start;
   padding: var(--space-6);
@@ -110,23 +125,26 @@ import { V2_TOOLS } from '../tools/toolLinks'
 .quick-tools__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--border-subtle); border-left: 1px solid var(--border-subtle); }
 .quick-tool { display: grid; min-height: 106px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); padding: var(--space-4); border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); color: var(--text-primary); text-decoration: none; }
 .quick-tool > svg:first-child { color: var(--accent); }
-.quick-tool > span { display: grid; gap: var(--space-1); }
+.quick-tool__body { display: grid; gap: var(--space-1); }
 .quick-tool strong { font-size: 13px; }
 .quick-tool small { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .quick-tool > svg:last-child { color: var(--text-muted); }
 .quick-tool:hover { background: var(--bg-elevated); }
+.quick-tool__status { justify-self: start; padding: var(--space-1) var(--space-2); border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+.quick-tool__status--cloud { border-color: var(--accent); color: var(--accent); }
 
 .privacy-note { display: flex; align-items: flex-start; gap: var(--space-4); margin-top: var(--space-8); padding-top: var(--space-5); border-top: 1px solid var(--border-subtle); }
+.privacy-note__icon { flex: none; margin-top: 2px; color: var(--text-muted); }
 .privacy-note p { max-width: 78ch; margin: 2px 0 0; color: var(--text-muted); font-size: 12px; }
 
 @media (max-width: 899px) {
+  .module-choices { grid-template-columns: 1fr; }
   .quick-tools__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 599px) {
   .home-view { padding: var(--space-5) var(--space-4) var(--space-8); }
   .home-view__intro h1 { font-size: 30px; }
-  .module-choices { grid-template-columns: 1fr; }
   .module-choice { min-height: 154px; }
   .quick-tools > header { align-items: flex-start; flex-direction: column; }
   .quick-tools__grid { grid-template-columns: 1fr; }

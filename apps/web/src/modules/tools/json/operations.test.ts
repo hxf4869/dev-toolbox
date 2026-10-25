@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { getAllRegisteredSchemaUris } from '@hyperjump/json-schema/draft-2020-12'
+import { describe, expect, it, vi } from 'vitest'
 
 import { STRUCTURED_TEXT_LIMIT_BYTES, StructuredToolError } from './contracts'
 import { diffJson, queryJsonPath, runJsonOperation, validateSchema } from './operations'
@@ -135,12 +136,12 @@ describe('Draft 2020-12 schema', () => {
     $ref: '#/$defs/item',
   })
 
-  it('validates safe instances and current-document refs', () => {
-    expect(validateSchema('{"name":"ok"}', schema)).toMatchObject({ status: 'valid', schemaValid: true })
-    expect(validateSchema('{"name":2}', schema)).toMatchObject({ status: 'invalid', schemaValid: true })
+  it('validates safe instances and current-document refs', async () => {
+    expect(await validateSchema('{"name":"ok"}', schema)).toMatchObject({ status: 'valid', schemaValid: true })
+    expect(await validateSchema('{"name":2}', schema)).toMatchObject({ status: 'invalid', schemaValid: true })
   })
 
-  it('compiles schema but skips the entire unsafe instance without partial pass', () => {
+  it('compiles schema but skips the entire unsafe instance without partial pass', async () => {
     const combinedSchema = JSON.stringify({
       $schema: 'https://json-schema.org/draft/2020-12/schema',
       $defs: { n: { type: 'integer', minimum: 1 } },
@@ -148,12 +149,241 @@ describe('Draft 2020-12 schema', () => {
       properties: { n: { oneOf: [{ $ref: '#/$defs/n' }, { type: 'string' }] } },
       required: ['n'],
     })
-    expect(validateSchema('{"n":9007199254740993}', combinedSchema)).toEqual({
+    expect(await validateSchema('{"n":9007199254740993}', combinedSchema)).toEqual({
       operation: 'schema-validate', schemaValid: true, status: 'not_run_precision_guard', issues: [],
     })
   })
 
-  it('rejects remote refs', () => {
-    expectCode(() => validateSchema('{}', '{"$ref":"https://example.com/schema"}'), 'SCHEMA_REMOTE_REF_DISABLED')
+  it('still rejects an invalid schema when the instance is precision-unsafe', async () => {
+    await expect(validateSchema('{"n":9007199254740993}', '{"type":"object","required":"n"}'))
+      .rejects.toMatchObject({ code: 'SCHEMA_INVALID' })
+  })
+
+  it('rejects remote refs and remote dynamic refs', async () => {
+    await expect(validateSchema('{}', '{"$ref":"https://example.com/schema"}'))
+      .rejects.toMatchObject({ code: 'SCHEMA_REMOTE_REF_DISABLED' })
+    await expect(validateSchema('{}', '{"$dynamicRef":"https://example.invalid/dyn#node"}'))
+      .rejects.toMatchObject({ code: 'SCHEMA_REMOTE_REF_DISABLED' })
+  })
+
+  it('treats $ref literals inside const/enum data values as inert without network', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Schema validation must stay offline'))
+    try {
+      const constRef = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        const: { $ref: 'https://example.invalid/const' },
+      })
+      expect(await validateSchema('{"$ref":"https://example.invalid/const"}', constRef)).toMatchObject({ status: 'valid' })
+      expect(await validateSchema('{"$ref":"https://example.invalid/other"}', constRef)).toMatchObject({ status: 'invalid' })
+      const enumRef = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        enum: [{ $dynamicRef: 'https://example.invalid/dyn' }, 'literal'],
+      })
+      expect(await validateSchema('{"$dynamicRef":"https://example.invalid/dyn"}', enumRef)).toMatchObject({ status: 'valid' })
+      expect(await validateSchema('"other"', enumRef)).toMatchObject({ status: 'invalid' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('keeps blocking remote refs in real schemas under schema maps', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Schema validation must stay offline'))
+    try {
+      const constNamedProperty = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: { const: { $ref: 'https://example.invalid/x' } },
+      })
+      await expect(validateSchema('{"const":1}', constNamedProperty))
+        .rejects.toMatchObject({ code: 'SCHEMA_REMOTE_REF_DISABLED' })
+      const refNamedProperty = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: { $ref: 'https://example.invalid/x' },
+      })
+      await expect(validateSchema('{}', refNamedProperty))
+        .rejects.toMatchObject({ code: 'SCHEMA_REMOTE_REF_DISABLED' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('rejects external fetch activated through a local ref into data at the SDK boundary', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Schema validation must stay offline'))
+    try {
+      const localIntoData = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        $ref: '#/enum/1',
+        enum: [0, { $ref: 'https://example.invalid/x' }],
+      })
+      await expect(validateSchema('0', localIntoData)).rejects.toMatchObject({
+        code: 'SCHEMA_REMOTE_REF_DISABLED',
+        message: expect.stringContaining('禁用'),
+      })
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(await validateSchema('0', '{"type":"integer"}')).toMatchObject({ status: 'valid' })
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it.each(['$ref', '$dynamicRef'] as const)('rejects an activated %s pointing to a cached external meta resource', async (field) => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Schema validation must stay offline'))
+    try {
+      const dialect = 'https://json-schema.org/draft/2020-12/schema'
+      const reference = field === '$dynamicRef' ? dialect + '#meta' : dialect
+      const schema = JSON.stringify({ $schema: dialect, $ref: '#/enum/1', enum: [0, { [field]: reference }] })
+      await expect(validateSchema('0', schema)).rejects.toMatchObject({ code: 'SCHEMA_REMOTE_REF_DISABLED' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(await validateSchema('0', '{"type":"integer"}')).toMatchObject({ status: 'valid' })
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('keeps dialect and vocabulary guards active inside data subtrees', async () => {
+    const dataDialect = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      const: { $schema: 'http://json-schema.org/draft-07/schema#' },
+    })
+    await expect(validateSchema('1', dataDialect)).rejects.toMatchObject({ code: 'SCHEMA_DIALECT_UNSUPPORTED' })
+    const dataVocabulary = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      const: {
+        $id: 'https://json-schema.org/draft/2020-12/schema',
+        $vocabulary: { 'https://json-schema.org/draft/2020-12/vocab/core': true },
+        type: 'object',
+      },
+    })
+    await expect(validateSchema('{}', dataVocabulary)).rejects.toMatchObject({ code: 'SCHEMA_VOCABULARY_UNSUPPORTED' })
+  })
+
+  it('allows lazy data ref literals to coexist with local schema refs', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Schema validation must stay offline'))
+    try {
+      const mixed = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        $defs: { item: { type: 'string' } },
+        properties: {
+          kind: { const: { $ref: 'https://example.invalid/y' } },
+          name: { $ref: '#/$defs/item' },
+        },
+      })
+      expect(await validateSchema('{"kind":{"$ref":"https://example.invalid/y"},"name":"ok"}', mixed))
+        .toMatchObject({ status: 'valid' })
+      expect(await validateSchema('{"kind":{"$ref":"https://example.invalid/other"},"name":"ok"}', mixed))
+        .toMatchObject({ status: 'invalid' })
+      expect(await validateSchema('{"kind":{"$ref":"https://example.invalid/y"},"name":2}', mixed))
+        .toMatchObject({ status: 'invalid' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('supports local recursive $dynamicRef', async () => {
+    const dynamicSchema = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      $dynamicAnchor: 'node',
+      type: 'object',
+      properties: { value: { type: 'integer' }, next: { $dynamicRef: '#node' } },
+      required: ['value'],
+      additionalProperties: false,
+    })
+    expect(await validateSchema('{"value":1,"next":{"value":2}}', dynamicSchema)).toMatchObject({ status: 'valid' })
+    expect(await validateSchema('{"value":1,"next":{"value":"x"}}', dynamicSchema)).toMatchObject({ status: 'invalid' })
+  })
+
+  it('rejects schemas declaring a non-2020-12 dialect', async () => {
+    await expect(validateSchema('"x"', '{"$schema":"http://json-schema.org/draft-07/schema#","type":"string"}'))
+      .rejects.toMatchObject({ code: 'SCHEMA_DIALECT_UNSUPPORTED' })
+  })
+
+  it('rejects a custom $vocabulary on the root or a nested resource with $id', async () => {
+    const rootVocabulary = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      $vocabulary: { 'https://json-schema.org/draft/2020-12/vocab/core': true },
+      type: 'object',
+    })
+    await expect(validateSchema('{}', rootVocabulary)).rejects.toMatchObject({ code: 'SCHEMA_VOCABULARY_UNSUPPORTED' })
+    const nestedVocabulary = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        inner: {
+          $id: 'https://example.invalid/inner',
+          $vocabulary: { 'https://json-schema.org/draft/2020-12/vocab/core': true },
+          type: 'string',
+        },
+      },
+    })
+    await expect(validateSchema('{}', nestedVocabulary)).rejects.toMatchObject({ code: 'SCHEMA_VOCABULARY_UNSUPPORTED' })
+  })
+
+  it('rejects an invalid schema and recovers on the next validation', async () => {
+    await expect(validateSchema('{}', '{"type":"object","required":"name"}')).rejects.toMatchObject({ code: 'SCHEMA_INVALID' })
+    expect(await validateSchema('{"name":"ok"}', schema)).toMatchObject({ status: 'valid' })
+  })
+
+  it('treats format and unknown keywords as Draft 2020-12 annotations', async () => {
+    const formatSchema = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: { v: { type: 'string', format: 'email' } },
+      required: ['v'],
+      'x-vendor': { note: 'annotation' },
+    })
+    expect(await validateSchema('{"v":"not-an-email"}', formatSchema)).toMatchObject({ status: 'valid' })
+  })
+
+  it('supports boolean schemas and identifies root validation issues', async () => {
+    expect(await validateSchema('42', 'true')).toMatchObject({ status: 'valid' })
+    expect(await validateSchema('42', 'false')).toMatchObject({ status: 'invalid' })
+    expect(await validateSchema('42', '{"type":"string"}')).toMatchObject({
+      status: 'invalid',
+      issues: [{ code: 'type', message: expect.stringContaining('$') }],
+    })
+  })
+
+  it('rejects non-schema root values with a schema error', async () => {
+    for (const schemaText of ['null', '[]', '42', '"schema"']) {
+      await expect(validateSchema('{}', schemaText)).rejects.toMatchObject({ code: 'SCHEMA_INVALID' })
+    }
+    expect(await validateSchema('{"name":"ok"}', schema)).toMatchObject({ status: 'valid' })
+  })
+
+  it('rejects vocabulary resources nested in schema arrays', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Schema validation must stay offline'))
+    try {
+      const arrayVocabulary = JSON.stringify({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        allOf: [{
+          $id: 'https://json-schema.org/draft/2020-12/schema',
+          $vocabulary: { 'https://json-schema.org/draft/2020-12/vocab/core': true },
+          type: 'object',
+        }],
+      })
+      await expect(validateSchema('{}', arrayVocabulary)).rejects.toMatchObject({ code: 'SCHEMA_VOCABULARY_UNSUPPORTED' })
+      expect(await validateSchema('{"name":"ok"}', schema)).toMatchObject({ status: 'valid' })
+      expect(await validateSchema('{"name":2}', schema)).toMatchObject({ status: 'invalid' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('keeps the validator registry clean across repeated validations', async () => {
+    const baseline = new Set(getAllRegisteredSchemaUris())
+    const withOwnId = JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      $id: 'https://example.invalid/repeat',
+      type: 'string',
+    })
+    expect(await validateSchema('"a"', withOwnId)).toMatchObject({ status: 'valid' })
+    expect(await validateSchema('"b"', withOwnId)).toMatchObject({ status: 'valid' })
+    expect(await validateSchema('{"name":"ok"}', schema)).toMatchObject({ status: 'valid' })
+    expect(getAllRegisteredSchemaUris().filter((uri) => !baseline.has(uri))).toEqual([])
   })
 })

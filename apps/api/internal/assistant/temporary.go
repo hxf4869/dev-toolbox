@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -18,6 +19,12 @@ import (
 )
 
 const maximumTemporaryPhaseWindow = 60 * time.Second
+
+// JSON string escaping can inflate each byte up to sixfold (\uXXXX), so the
+// envelope guard must exceed the sum of the raw contract limits
+// (docs/16 §13.9) or contract-valid requests get rejected at decode time.
+const maximumTemporaryStreamEnvelopeBytes = 6*(MaximumTemporaryHistoryBytes+MaximumUserMessageBytes) +
+	8*MaximumSummaryBytes + 16*1024
 
 type temporaryHistoryMessage struct {
 	Role    string `json:"role"`
@@ -70,19 +77,32 @@ var errTemporarySensitivePolicyChanged = errors.New("temporary sensitive policy 
 func (service *Service) temporaryStream(response http.ResponseWriter, request *http.Request) {
 	httpapi.NoStore(response)
 	var input temporaryStreamInput
-	if httpapi.DecodeJSON(response, request, MaximumTemporaryHistoryBytes+MaximumUserMessageBytes+16*1024, &input) != nil {
+	if httpapi.DecodeJSON(response, request, maximumTemporaryStreamEnvelopeBytes, &input) != nil {
 		writeValidationError(response, request)
 		return
 	}
-	if !validReasoningValue(input.Reasoning) || !validUserContent(input.Content) ||
-		len(input.Messages) > MaximumTemporaryHistory {
+	if !validReasoningValue(input.Reasoning) {
 		writeValidationError(response, request)
+		return
+	}
+	// Size-class contract violations report the stable context error while
+	// shape errors stay VALIDATION_FAILED (docs/16 §13.9).
+	if len(input.Content) > MaximumUserMessageBytes {
+		writeAssistantContextTooLarge(response, request)
+		return
+	}
+	if !validUserContent(input.Content) {
+		writeValidationError(response, request)
+		return
+	}
+	if len(input.Messages) > MaximumTemporaryHistory {
+		writeAssistantContextTooLarge(response, request)
 		return
 	}
 	totalHistory := 0
 	expectedRole := "user"
 	for index, message := range input.Messages {
-		if message.Role != expectedRole || !validUserContent(message.Content) {
+		if message.Role != expectedRole || !validTemporaryHistoryContent(message.Content) {
 			writeValidationError(response, request)
 			return
 		}
@@ -93,8 +113,12 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 			expectedRole = "user"
 		}
 	}
-	if len(input.Messages)%2 != 0 || totalHistory > MaximumTemporaryHistoryBytes {
+	if len(input.Messages)%2 != 0 {
 		writeValidationError(response, request)
+		return
+	}
+	if totalHistory > MaximumTemporaryHistoryBytes {
+		writeAssistantContextTooLarge(response, request)
 		return
 	}
 	for index, message := range input.Messages {
@@ -102,9 +126,16 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 			input.Messages[index].Content = stripCitationTokens(message.Content)
 		}
 	}
-	if input.Summary != nil && !validTemporarySummary(input.Summary) {
-		writeValidationError(response, request)
-		return
+	if input.Summary != nil {
+		if !validTemporarySummary(input.Summary) {
+			writeValidationError(response, request)
+			return
+		}
+		if temporarySummaryEntries(input.Summary) > MaximumSummaryEntries ||
+			temporarySummaryBytes(input.Summary) > MaximumSummaryBytes {
+			writeAssistantContextTooLarge(response, request)
+			return
+		}
 	}
 	// Lock and snapshot the execution configuration, then keep everything in
 	// request memory only (docs/16 §7.2/§12).
@@ -118,6 +149,14 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 	if conflict != nil {
 		tx.Rollback(ctx)
 		writeRunCreationError(response, request, conflict)
+		return
+	}
+	// The current question is never truncated or dropped, so a question alone
+	// over the model input budget fails before the stream starts (docs/16
+	// §10.2). Everything else degrades by trimming instead.
+	if inputContextBudgetTokens(execution.contextWindow, execution.maxOutputTokens) < estimateTokens(input.Content) {
+		tx.Rollback(ctx)
+		writeAssistantContextTooLarge(response, request)
 		return
 	}
 	if _, err := tx.Exec(ctx, `SELECT true FROM app_settings WHERE singleton FOR SHARE`); err != nil {
@@ -224,9 +263,16 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 	query := input.Content
 	var queryVector []float32
 	evidenceState := "unavailable"
+	retrieved := false
 	var snapshots []retrievalCandidate
 	if knowledgeReady {
-		prepare, prepareErr := service.callTemporaryPrepare(ctx, execution, apiKey, embedding, policy, input)
+		rewrite := trimTemporaryRewriteContext(execution.contextWindow, execution.maxOutputTokens,
+			input.Content, input.Summary, input.Messages)
+		prepareInput := temporaryStreamInput{
+			ClientRequestID: input.ClientRequestID, ModelID: input.ModelID, Reasoning: input.Reasoning,
+			Summary: rewrite.summary, Messages: rewrite.messages, Content: input.Content,
+		}
+		prepare, prepareErr := service.callTemporaryPrepare(ctx, execution, apiKey, embedding, policy, prepareInput)
 		if prepareErr == nil {
 			trace.EmbeddingMS = &prepare.EmbeddingDurationMS
 			if prepare.Rewrite != nil {
@@ -250,16 +296,28 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 			trace.RetrievalMS = &retrievalMS
 			if retrieveErr == nil {
 				snapshots = buildSourceSnapshots(candidates, policy)
-				evidenceState = "not_found"
-				if len(snapshots) > 0 {
-					evidenceState = "matched"
-				}
+				retrieved = true
 			} else {
 				snapshots = nil
 				evidenceState = "unavailable"
 			}
 		}
 	}
+	// The answer input is bounded by the real retrieved sources — not by a
+	// frozen reservation for eight maximum sources — so a small model with no
+	// or few sources keeps the recent turns (docs/16 §10.2).
+	answer := trimTemporaryAnswerContext(execution.contextWindow, execution.maxOutputTokens,
+		input.Content, input.Summary, input.Messages, snapshots)
+	if retrieved {
+		evidenceState = "not_found"
+		if len(answer.sources) > 0 {
+			evidenceState = "matched"
+		}
+	}
+	// The rolling-summary maintenance input travels independently of any
+	// answer-side trimming: the uncovered prefix is always the raw request
+	// history minus the most recent 16 successful messages (docs/16 §10.3).
+	summarySource := temporarySummarySourceFor(input.Summary, input.Messages)
 	if temporaryPolicyChanged(ctx) {
 		_ = emit("run.failed", tracedTemporaryTerminalPayload(
 			"failed", "ASSISTANT_SENSITIVE_POLICY_CHANGED", "全局敏感策略已收紧", trace, service.now().UTC(),
@@ -268,26 +326,168 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 	}
 	if !emit("sources.ready", map[string]any{
 		"knowledgeState": knowledgeStateFor(evidenceState), "evidenceState": evidenceState,
-		"providedSourceCount": len(snapshots), "rewriteFallback": trace.RewriteFallback,
+		"providedSourceCount": len(answer.sources), "rewriteFallback": trace.RewriteFallback,
 		"promptVersion": PromptVersion, "retrievalVersion": RetrievalVersion,
 	}) || !emit("run.status", map[string]any{"status": "running", "phase": "answer"}) {
 		return
 	}
-	service.streamTemporaryAnswer(ctx, stream, &sequence, execution, apiKey, policy, input, snapshots, evidenceState, trace)
+	service.streamTemporaryAnswer(ctx, stream, &sequence, execution, apiKey, policy, input,
+		answer, summarySource, evidenceState, trace)
 }
 
 func validTemporarySummary(summary *temporarySummary) bool {
-	total := 0
 	for _, group := range [][]string{summary.ConfirmedFacts, summary.Corrections,
 		summary.RejectedHypotheses, summary.UnresolvedQuestions} {
-		total += len(group)
 		for _, entry := range group {
 			if strings.TrimSpace(entry) == "" {
 				return false
 			}
 		}
 	}
-	return total <= MaximumSummaryEntries
+	return true
+}
+
+// The summary size contract (docs/16 §13.9) counts the UTF-8 bytes of the
+// four arrays' entries — the same caliber the worker enforces before
+// returning a summary — so JSON-encoding differences (Go escapes <>&) can
+// never flip the verdict between the two ends.
+func temporarySummaryBytes(summary *temporarySummary) int {
+	total := 0
+	for _, group := range [][]string{summary.ConfirmedFacts, summary.Corrections,
+		summary.RejectedHypotheses, summary.UnresolvedQuestions} {
+		for _, entry := range group {
+			total += len(entry)
+		}
+	}
+	return total
+}
+
+func temporarySummaryEntries(summary *temporarySummary) int {
+	total := 0
+	for _, group := range [][]string{summary.ConfirmedFacts, summary.Corrections,
+		summary.RejectedHypotheses, summary.UnresolvedQuestions} {
+		total += len(group)
+	}
+	return total
+}
+
+// History messages only answer the 256 KiB conversation total (docs/16
+// §13.9): successful assistant answers may exceed the 32 KiB user-message cap.
+func validTemporaryHistoryContent(content string) bool {
+	return content != "" && utf8.ValidString(content) && strings.TrimSpace(content) != ""
+}
+
+type temporaryRewriteContext struct {
+	summary  *temporarySummary
+	messages []temporaryHistoryMessage
+}
+
+// trimTemporaryRewriteContext bounds the rewrite input by its real payload:
+// the rewrite request carries no source block, so its budget reserves only the
+// rewrite output cap instead of the answer's source allowance.
+func trimTemporaryRewriteContext(contextWindow, maxOutputTokens int, content string,
+	summary *temporarySummary, messages []temporaryHistoryMessage) *temporaryRewriteContext {
+	outputCap := maxOutputTokens
+	if outputCap > MaximumRewriteOutputTokens {
+		outputCap = MaximumRewriteOutputTokens
+	}
+	budget := contextWindow - outputCap - systemPromptTokenEstimate - contextSafetyTokens
+	trimmed := &temporaryRewriteContext{}
+	if budget > 0 {
+		budget -= estimateTokens(content)
+		if budget > 0 {
+			trimmed.summary, trimmed.messages = fillTemporaryContext(budget, summary, messages)
+		}
+	}
+	return trimmed
+}
+
+type temporaryAnswerContext struct {
+	summary  *temporarySummary
+	messages []temporaryHistoryMessage
+	sources  []retrievalCandidate
+}
+
+// trimTemporaryAnswerContext assembles the answer model input: the current
+// question and the highest-ranked retrieved sources are reserved first, then
+// the structured summary (only if it fits), then the most recent successful
+// messages. Actual sources — not a frozen reservation for eight maximum
+// sources — bound the history, so a small model with zero or few sources keeps
+// the recent turns (docs/16 §10.2). The question itself is never trimmed here;
+// the caller rejects an oversized question before the stream starts.
+func trimTemporaryAnswerContext(contextWindow, maxOutputTokens int, content string,
+	summary *temporarySummary, messages []temporaryHistoryMessage, snapshots []retrievalCandidate) *temporaryAnswerContext {
+	budget := contextWindow - maxOutputTokens - systemPromptTokenEstimate - contextSafetyTokens
+	if budget < 0 {
+		budget = 0
+	}
+	budget -= estimateTokens(content)
+	trimmed := &temporaryAnswerContext{sources: []retrievalCandidate{}, messages: []temporaryHistoryMessage{}}
+	if budget < 0 {
+		return trimmed
+	}
+	for _, candidate := range snapshots {
+		cost := estimateTokens(candidate.Content) + estimateTokens(candidate.Title) + 8
+		if cost > budget {
+			break
+		}
+		budget -= cost
+		trimmed.sources = append(trimmed.sources, candidate)
+	}
+	trimmed.summary, trimmed.messages = fillTemporaryContext(budget, summary, messages)
+	return trimmed
+}
+
+// fillTemporaryContext spends the remaining budget on the summary (only when
+// it fits) and then the most recent successful turns, newest pair first: only
+// complete user+assistant pairs enter the context, so the model never sees an
+// orphan assistant message whose question was dropped.
+func fillTemporaryContext(budget int, summary *temporarySummary,
+	messages []temporaryHistoryMessage) (*temporarySummary, []temporaryHistoryMessage) {
+	var chosenSummary *temporarySummary
+	if summary != nil {
+		if encoded, err := jsonMarshal(summary); err == nil {
+			if tokens := estimateTokens(string(encoded)); tokens < budget {
+				budget -= tokens
+				chosenSummary = summary
+			}
+		}
+	}
+	chosen := make([]temporaryHistoryMessage, 0, len(messages))
+	for index := len(messages) - 1; index >= 1; index -= 2 {
+		pairCost := estimateTokens(messages[index].Content) + 4 + estimateTokens(messages[index-1].Content) + 4
+		if pairCost > budget {
+			break
+		}
+		budget -= pairCost
+		chosen = append(chosen, messages[index-1], messages[index])
+	}
+	// chosen is newest-pair-first with each pair in user,assistant order;
+	// reverse the pair order to oldest-first.
+	for left, right := 0, len(chosen)-2; left < right; left, right = left+2, right-2 {
+		chosen[left], chosen[right] = chosen[right], chosen[left]
+		chosen[left+1], chosen[right+1] = chosen[right+1], chosen[left+1]
+	}
+	return chosenSummary, chosen
+}
+
+type temporarySummarySource struct {
+	Prior    *temporarySummary         `json:"prior"`
+	Messages []temporaryHistoryMessage `json:"messages"`
+}
+
+// temporarySummarySourceFor freezes the rolling-summary maintenance input:
+// with more than 16 successful messages in the request, everything except the
+// most recent 16 is the uncovered prefix the next summary folds into the prior
+// one (docs/16 §10.3). It derives from the raw request history, independent of
+// any answer-side trimming.
+func temporarySummarySourceFor(summary *temporarySummary, messages []temporaryHistoryMessage) *temporarySummarySource {
+	if len(messages) <= SummaryMessageTrigger {
+		return nil
+	}
+	prefix := make([]temporaryHistoryMessage, len(messages)-SummaryMessageTrigger)
+	copy(prefix, messages[:len(messages)-SummaryMessageTrigger])
+	return &temporarySummarySource{Prior: summary, Messages: prefix}
 }
 
 func temporaryModelPayload(execution lockedExecution, apiKey string) map[string]any {
@@ -368,7 +568,8 @@ func (service *Service) streamTemporaryAnswer(
 	execution lockedExecution,
 	apiKey, policy string,
 	input temporaryStreamInput,
-	sources []retrievalCandidate,
+	answer *temporaryAnswerContext,
+	summarySource *temporarySummarySource,
 	evidenceState string,
 	trace temporaryRuntimeTrace,
 ) {
@@ -378,8 +579,8 @@ func (service *Service) streamTemporaryAnswer(
 	citationCount := 0
 	citationNumbers := map[int]int{}
 	boundaryState := 0
-	payloadSources := make([]retrievalSourcePayload, 0, len(sources))
-	for index, candidate := range sources {
+	payloadSources := make([]retrievalSourcePayload, 0, len(answer.sources))
+	for index, candidate := range answer.sources {
 		var fragmentRef *uuid.UUID
 		if candidate.FragmentID != uuid.Nil {
 			fragmentRef = &candidate.FragmentID
@@ -396,8 +597,9 @@ func (service *Service) streamTemporaryAnswer(
 		"reasoning":       input.Reasoning,
 		"sensitivePolicy": policy,
 		"promptVersion":   PromptVersion,
-		"summary":         input.Summary,
-		"messages":        input.Messages,
+		"summary":         answer.summary,
+		"messages":        answer.messages,
+		"summarySource":   summarySource,
 		"question":        input.Content,
 		"evidenceState":   evidenceState,
 		"knowledgeState":  knowledgeStateFor(evidenceState),

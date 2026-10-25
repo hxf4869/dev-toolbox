@@ -21,6 +21,7 @@ import {
   formatImageBytes,
   IMAGE_ACCEPT,
   probeImageFile,
+  type ImageProbeResult,
   type LoadedImage,
 } from './imageInput'
 import {
@@ -37,10 +38,10 @@ import {
 } from './ocrClient'
 import {
   acquireOcrWorker,
-  releaseOcrWorker,
   terminateOcrWorker,
   type OcrLanguagePreset,
   type OcrProgressUpdate,
+  type OcrWorkerLease,
 } from './tesseractWorker'
 import { useCloudOcrRun } from './useCloudOcrRun'
 
@@ -57,6 +58,8 @@ const auth = useAuthStore()
 const AUTO_CODE = 'auto'
 /** OCR 页固定启用技术内容保护；校对文本同样可能包含命令、路径与 URL。 */
 const PROTECTION_ENABLED = true
+const TRANSLATE_BUSY_IMAGE_MESSAGE = '翻译正在进行；请先取消或等待完成，再更换图片。'
+const IMAGE_UNREADABLE_MESSAGE = '无法读取这张图片：文件可能已损坏，或浏览器无法完成解码/缩放；请更换图片后重试。'
 
 type LocalOcrPhase = 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -108,6 +111,8 @@ const translateDialogElement = ref<HTMLElement | null>(null)
 let confirmReturnFocus: HTMLElement | null = null
 
 let localGeneration = 0
+/** 图片候选代次：新候选与卸载时递增；旧候选在任何 await 之后都不得再改页面状态。 */
+let selectionGeneration = 0
 let prepGeneration = 0
 let translatePreflightGeneration = 0
 let cloudPreflightGeneration = 0
@@ -314,6 +319,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('paste', handleWindowPaste)
   window.clearTimeout(prepTimer)
+  selectionGeneration += 1
   localGeneration += 1
   void terminateOcrWorker()
   cloudRun.dispose()
@@ -371,23 +377,50 @@ function handleWindowPaste(event: ClipboardEvent): void {
 
 async function handleFileCandidate(file: File): Promise<void> {
   if (translateBusy.value) {
-    imageError.value = '翻译正在进行；请先取消或等待完成，再更换图片。'
+    imageError.value = TRANSLATE_BUSY_IMAGE_MESSAGE
     return
   }
+  const selection = ++selectionGeneration
   imageError.value = ''
-  const result = await probeImageFile(file)
+  let result: ImageProbeResult
+  try {
+    result = await probeImageFile(file)
+  } catch {
+    if (selection !== selectionGeneration) return
+    imageError.value = IMAGE_UNREADABLE_MESSAGE
+    return
+  }
+  if (selection !== selectionGeneration) return
   if (!result.ok) {
     imageError.value = result.violation.message
     return
   }
-  await applyImage(result.image)
+  // 解码期间可能已开始翻译：沿用同一规则，不重置在途翻译。
+  if (translateBusy.value) {
+    imageError.value = TRANSLATE_BUSY_IMAGE_MESSAGE
+    return
+  }
+  await applyImage(result.image, selection)
 }
 
-async function applyImage(next: LoadedImage): Promise<void> {
-  // 取消在途的本地识别与云端识别，再整体重置流程。
+async function applyImage(next: LoadedImage, selection: number): Promise<void> {
+  // 先取消在途的本地识别与云端识别；等待期间候选可能已更替，此时只收尾资源、不应用图片。
+  const teardown = ++localGeneration
+  if (localBusy.value) {
+    await terminateOcrWorker()
+    // worker 已实际终止：仍由本次收尾归属时解除 running，候选作废也不能卡在 busy。
+    if (teardown === localGeneration) {
+      localPhase.value = 'cancelled'
+      localProgress.value = null
+    }
+    if (selection !== selectionGeneration) return
+  }
+  if (cloudBusy.value) {
+    await cloudRun.cancel()
+    if (selection !== selectionGeneration) return
+  }
+  // 应用新图即新的本地识别归属：等待期间迟到的取消收尾不得再改写新图的状态。
   localGeneration += 1
-  if (localBusy.value) await terminateOcrWorker()
-  if (cloudBusy.value) await cloudRun.cancel()
   cloudRun.reset()
   run.resetForNewRun()
   replanSeeds.value = null
@@ -412,7 +445,7 @@ async function applyImage(next: LoadedImage): Promise<void> {
 
 function changeImage(): void {
   if (translateBusy.value) {
-    imageError.value = '翻译正在进行；请先取消或等待完成，再更换图片。'
+    imageError.value = TRANSLATE_BUSY_IMAGE_MESSAGE
     return
   }
   openFilePicker()
@@ -427,38 +460,41 @@ async function runLocalOcr(): Promise<void> {
   localPhase.value = 'running'
   localError.value = ''
   localProgress.value = { stage: 'loading', progress: 0, status: 'loading tesseract core' }
+  let lease: OcrWorkerLease | null = null
   try {
-    const worker = await acquireOcrWorker(ocrLanguage.value, (update) => {
+    lease = await acquireOcrWorker(ocrLanguage.value, (update) => {
       if (generation === localGeneration) localProgress.value = update
     })
-    if (generation !== localGeneration) {
-      releaseOcrWorker()
-      return
-    }
-    const result = await worker.recognize(current.blob, {}, { text: true, blocks: true })
-    if (generation !== localGeneration) {
-      releaseOcrWorker()
-      return
-    }
+    if (generation !== localGeneration) return
+    const result = await lease.worker.recognize(current.blob, {}, { text: true, blocks: true })
+    if (generation !== localGeneration) return
     ocrLines.value = extractOcrLines(result.data)
     proofText.value = result.data.text.replace(/\n+$/, '')
     proofSource.value = 'local'
     localPhase.value = 'done'
   } catch (error) {
+    // 过期归属的迟到失败先于任何资源操作返回：它发生在旧 worker 上，不得
+    // 终止或清掉新归属正在使用的缓存。仅当前归属失败（worker 已死亡或不可用，
+    // 补丁后 onerror 会拒绝在途识别）才丢弃单例缓存，下一次显式重试重新创建，
+    // 不自动重试；终止收尾不写任何视图状态。
     if (generation !== localGeneration) return
+    void terminateOcrWorker()
     localPhase.value = 'failed'
     localError.value = error instanceof Error
       ? `本地识别失败：${error.message}`
       : '本地识别失败；可重试本地识别，或选择“使用阿里云重新识别”。'
   } finally {
-    releaseOcrWorker()
+    // 已过归属（取消/换图/卸载/新识别）时 release 是 no-op，不影响新归属。
+    lease?.release()
   }
 }
 
 async function cancelLocalOcr(): Promise<void> {
   if (!localBusy.value) return
-  localGeneration += 1
+  const generation = ++localGeneration
   await terminateOcrWorker()
+  // 等待期间可能已换图或重新识别：只有仍是本次归属时才写入取消态。
+  if (generation !== localGeneration) return
   localPhase.value = 'cancelled'
   localProgress.value = null
 }

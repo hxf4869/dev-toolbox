@@ -186,7 +186,7 @@ Scene 的 UI 名称固定为“商品标题”“商品详情”“买卖家沟�
 3. 场景未配置：`PROFESSIONAL_SCENE_REQUIRED`。
 4. 自动切换关闭或专业版也不足：`QUOTA_EXHAUSTED`。
 
-同一 chunk 不跨两个 meter。预检只是提示，不占额度；真实预留才是最终决定，因此确认层与调用之间如额度变化，API 必须返回停止错误：可切换时用 `PREFLIGHT_CHANGED` 在 details 给出 `availableEngine`，auto/pair/scene/额度不满足时用各自 422/429。不得用 2xx 成功响应直接换引擎发送，浏览器必须重新 preflight 并确认。
+同一 chunk 不跨两个 meter。预检只是提示，不占额度；真实预留才是最终决定，因此确认层与调用之间如额度变化，API 必须返回停止错误：可切换时用 `PREFLIGHT_CHANGED` 在 details 给出 `availableEngine`，auto/pair/scene/额度不满足时用各自 422/429。不得用 2xx 成功响应直接换引擎发送，浏览器必须重新 preflight。普通文本翻译的新计划通过后自动继续、失败则停止（`12` 第 7.3 节）；各工具的预览与确认交互以 `12` 的对应 UX 流程为准，不统一要求二次确认。
 
 ### 5.3 结算
 
@@ -438,7 +438,7 @@ OCR 成功响应使用同一个顶层形状，`operation="ocr"`、`professionalS
 }
 ```
 
-浏览器收到后，用自己内存中“当前 + 剩余未发”的 `chunkUnits` 重新调用 preflight，再展示完整新计划。该 409 发生在预留和 SDK 调用之前，不改变账本。
+浏览器收到后，用自己内存中“当前 + 剩余未发”的 `chunkUnits` 重新调用 preflight 取得完整新计划；普通文本翻译的新计划通过后自动继续，失败则保持停止（见第 5.2 节与 `12` 第 7.3 节）。该 409 发生在预留和 SDK 调用之前，不改变账本。
 
 如果竞态后只有专业版可用，但当前 `sourceLanguage=auto`，返回 `SOURCE_LANGUAGE_REQUIRED_FOR_PROFESSIONAL` 而不是构造一个不可保证的 `PREFLIGHT_CHANGED`；明确 pair 不受当前 Scene 支持时同理返回 `PROFESSIONAL_LANGUAGE_PAIR_UNSUPPORTED`。两种情况 fake SDK 调用数都必须为 0。
 
@@ -665,7 +665,7 @@ worker 只接受三种现有 Provider protocol，复用既有 base URL 安全规
 | 409 | `CALL_IN_PROGRESS` | 同 key 正在处理；查询/等待，不重发 |
 | 409 | `CALL_SETTLED_WITHOUT_RESULT` | 同 key 已结算但内容未持久化；显示状态与手动新请求风险 |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | key 与原 operation/units 不一致；客户端 bug，不自动生成新 key 隐藏问题 |
-| 409 | `PREFLIGHT_CHANGED` | 确认后当前 chunk 可用引擎变化；浏览器用当前语言与“当前 + 剩余”本地 `chunkUnits` 重做 preflight 和确认 |
+| 409 | `PREFLIGHT_CHANGED` | 确认后当前 chunk 可用引擎变化；浏览器用当前语言与“当前 + 剩余”本地 `chunkUnits` 重做 preflight，随后按第 5.2 节及对应工具 UX 流程继续 |
 | 409 | `QUEUE_TICKET_NOT_READY` | ticket 仍 waiting；继续按 GET 状态等待，不 claim 重试循环 |
 | 409 | `CLOUD_PERMIT_INVALID` | permit 缺失、未知或不属于当前 owner/ticket；停止请求并重新排队 |
 | 409 | `CLOUD_PERMIT_OPERATION_MISMATCH` | permit 的 translation/OCR operation 与 endpoint 不一致；客户端 bug，不调用 SDK |

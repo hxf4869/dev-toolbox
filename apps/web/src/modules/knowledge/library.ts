@@ -109,18 +109,24 @@ export const useLibraryStore = defineStore('library', () => {
   let lastAction: (() => Promise<void>) | null = null
   let resultController: AbortController | null = null
   let resultSequence = 0
+  let navigationSequence = 0
 
   async function loadNavigation() {
+    const sequence = ++navigationSequence
     navigationLoading.value = true
     try {
       const [folderResponse, tagResponse] = await Promise.all([
         apiRequest<{ items: FolderEntry[] }>('/api/v1/folders/tree'),
         apiRequest<{ items: TagEntry[] }>('/api/v1/tags'),
       ])
+      if (sequence !== navigationSequence) return
       folders.value = folderResponse.items
       tags.value = tagResponse.items
+    } catch (caught) {
+      if (sequence !== navigationSequence) return
+      throw caught
     } finally {
-      navigationLoading.value = false
+      if (sequence === navigationSequence) navigationLoading.value = false
     }
   }
 
@@ -151,6 +157,7 @@ export const useLibraryStore = defineStore('library', () => {
         total.value = null
         mode.value = 'browse'
       } catch (caught) {
+        if (sequence !== resultSequence) return
         if (isAbortError(caught)) return
         error.value = caught instanceof Error ? caught.message : '资料库暂时不可用'
       } finally {
@@ -204,6 +211,7 @@ export const useLibraryStore = defineStore('library', () => {
         nextCursor.value = response.nextCursor
         mode.value = 'search'
       } catch (caught) {
+        if (sequence !== resultSequence) return
         if (isAbortError(caught)) return
         error.value = caught instanceof Error ? caught.message : '搜索暂时不可用'
       } finally {

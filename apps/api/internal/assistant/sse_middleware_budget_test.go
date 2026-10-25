@@ -238,7 +238,9 @@ func TestSSETemporaryStreamCancellationPropagatesToWorker(t *testing.T) {
 				upstreamModelID: "model", contextWindow: 1024, maxOutputTokens: 256,
 			}
 			service.streamTemporaryAnswer(request.Context(), stream, &sequence, execution, "key", "allow",
-				temporaryStreamInput{Content: "问题"}, nil, "unavailable",
+				temporaryStreamInput{Content: "问题"},
+				&temporaryAnswerContext{messages: []temporaryHistoryMessage{}, sources: []retrievalCandidate{}},
+				nil, "unavailable",
 				temporaryRuntimeTrace{StartedAt: time.Now().UTC()})
 		})))
 	defer public.Close()

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, resolve, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { request as httpsRequest } from 'node:https'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const project = 'dev-toolbox-v3-acceptance'
@@ -49,6 +50,32 @@ export async function until(check, description, timeout=30000) {
   while(Date.now()<end){if(await check()) return;await new Promise(r=>setTimeout(r,150))}
   throw new Error(`Timed out: ${description}`)
 }
+const nginxStartupCodes=new Set(['ECONNRESET','ECONNREFUSED'])
+export async function waitForNginx(endpoint, ca, timeout=5000) {
+  const target=new URL(endpoint), deadline=Date.now()+timeout
+  let lastCode
+  while(Date.now()<deadline){
+    const remaining=deadline-Date.now()
+    // Per-attempt wall-clock bound: a socket-idle timeout never fires while a slow peer keeps trickling bytes.
+    const code=await new Promise(resolve=>{
+      const settle=value=>{clearTimeout(wallClock);resolve(value)}
+      const request=httpsRequest(target,{path:'/',method:'GET',ca,agent:false},response=>{
+        response.resume()
+        settle(response.statusCode===200?null:`HTTP ${response.statusCode}`)
+        request.destroy()
+      })
+      request.on('error',error=>settle(error.code??error.message))
+      const wallClock=setTimeout(()=>request.destroy(Object.assign(new Error('request timed out'),{code:'ETIMEDOUT'})),remaining)
+      request.end()
+    })
+    if(code===null) return
+    lastCode=code
+    if(code==='ETIMEDOUT') throw new Error(`Timed out: Nginx TLS at ${endpoint} not ready within ${timeout}ms (${lastCode})`)
+    if(!nginxStartupCodes.has(code)) throw new Error(`Nginx TLS check failed at ${endpoint}: ${code}`)
+    await new Promise(resolve=>setTimeout(resolve,Math.min(120,Math.max(deadline-Date.now(),0))))
+  }
+  throw new Error(`Timed out: Nginx TLS at ${endpoint} not ready within ${timeout}ms (${lastCode??'no response'})`)
+}
 
 async function up() {
   assert.equal(docker(['ps','-a','--filter',`label=com.docker.compose.project=${project}`,'-q']), '', 'fixture project already exists; inspect it before reusing')
@@ -57,7 +84,7 @@ async function up() {
   await chmod(directory,0o700)
   for(const name of ['attachments','operations','postgres','caddy']) await mkdir(join(directory,name))
   await chmod(join(directory,'attachments'),0o777)
-  for(const [name,value] of Object.entries({postgres_password:randomBytes(24).toString('hex'),internal_service_token:randomBytes(32).toString('hex'),app_master_key:randomBytes(32).toString('base64'),owner_password:fixturePassword})) {
+  for(const [name,value] of Object.entries({postgres_password:randomBytes(24).toString('hex'),internal_service_token:randomBytes(32).toString('hex'),agent_console_internal_token:randomBytes(32).toString('hex'),app_master_key:randomBytes(32).toString('base64'),owner_password:fixturePassword})) {
     await writeFile(join(directory,name),value,{mode:0o444})
   }
   const state={directory,origin:'http://localhost:18380'}
@@ -89,6 +116,8 @@ secrets:
     file: ${directory}/internal_service_token
   app_master_key:
     file: ${directory}/app_master_key
+  agent_console_internal_token:
+    file: ${directory}/agent_console_internal_token
 `)
   console.log(`Fixture state: ${join(directory,'state.json')}`)
   for(const action of [['build'],['up','-d','--wait','--wait-timeout','120']]) {

@@ -274,7 +274,7 @@ func (service *Service) requeueIndexRows(ctx context.Context, tx pgx.Tx, generat
 			generation = EXCLUDED.generation,
 			sensitivity_snapshot = EXCLUDED.sensitivity_snapshot,
 			policy_snapshot = EXCLUDED.policy_snapshot,
-			state = 'pending', embedding = NULL, dimensions = NULL,
+			state = 'pending', attempt = 0, embedding = NULL, dimensions = NULL,
 			lease_owner = NULL, lease_version = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
 			error_code = NULL, error_detail = NULL, updated_at = EXCLUDED.updated_at
 		WHERE assistant_fragment_embeddings.state = 'excluded'

@@ -39,8 +39,15 @@ const auxiliaryMaintenanceBudgetMs = 60_000
 // summary trigger threshold (60% of the context window, docs/16 §10.3) minus
 // a fixed generation reserve. It is independent of the answer input budget
 // the Go API applies to claim.context.
-const summaryMaintenanceShare = 0.6
-const summaryGenerationReserveTokens = 1024
+export const summaryMaintenanceShare = 0.6
+export const summaryGenerationReserveTokens = 1024
+// Fixed reserves deducted from the model context window when budgeting the
+// answer input, with the exact values and meaning of the Go API's claim-side
+// constants (apps/api/internal/assistant/service.go): a conservative system
+// prompt estimate plus a safety margin that also absorbs the size drift
+// between estimating the pre-redaction strings and sending redacted ones.
+const systemPromptTokenEstimate = 1200
+const contextSafetyTokens = 1024
 
 export interface AssistantRunnerOptions {
   readonly apiInternalUrl: string
@@ -56,6 +63,11 @@ export class AssistantExecutionError extends Error {
     this.name = 'AssistantExecutionError'
   }
 }
+
+// Terminal outcome of one assistant run as reported by the Go API's complete
+// response: 'succeeded' normally, 'stopped' when a stop landed before the
+// late complete (DT-R17).
+type AssistantRunOutcome = 'succeeded' | 'stopped'
 
 export class AssistantRunner {
   constructor(
@@ -79,9 +91,13 @@ export class AssistantRunner {
       reasoningMs: null as number | null,
       answerMs: null as number | null,
     }
+    // 'stopped' means the Go API already terminated the run as stopped on
+    // complete: the lease is gone with the terminal state, so the worker must
+    // neither fail the run again nor run success-only maintenance (DT-R17).
+    let outcome: AssistantRunOutcome = 'succeeded'
     try {
       await heartbeat.start()
-      await this.execute(claim, usage, timings, heartbeat)
+      outcome = await this.execute(claim, usage, timings, heartbeat)
     } catch (error) {
       if (heartbeat.leaseLost || shutdownSignal?.aborted) return
       const failure = normalizeFailure(error, heartbeat.stopRequested)
@@ -103,7 +119,10 @@ export class AssistantRunner {
     // Auxiliary maintenance only ever runs for a completed answer, after the
     // lease heartbeat stopped, in its own bounded cancel scope. It never
     // touches the execution lease and its failure never fails the answer.
-    await this.maintainTitleAndSummary(claim, shutdownSignal)
+    // A run the API already terminated as stopped is not a success to maintain.
+    if (outcome !== 'stopped') {
+      await this.maintainTitleAndSummary(claim, shutdownSignal)
+    }
   }
 
   private async execute(
@@ -111,7 +130,7 @@ export class AssistantRunner {
     usage: Record<string, number | null>,
     timings: Record<string, number | null>,
     heartbeat: RunHeartbeat,
-  ): Promise<void> {
+  ): Promise<AssistantRunOutcome> {
     const deadline = Date.now() + maximumAnswerRuntimeMs
     let query = redactProviderInput(
       claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null,
@@ -177,7 +196,7 @@ export class AssistantRunner {
     }
 
     await this.emitPhase(claim, heartbeat, 'answer')
-    await this.streamAnswer(claim, usage, timings, heartbeat, evidenceState, sources, deadline)
+    return await this.streamAnswer(claim, usage, timings, heartbeat, evidenceState, sources, deadline)
   }
 
   private async rewriteQuery(
@@ -257,23 +276,24 @@ export class AssistantRunner {
     evidenceState: string,
     sources: readonly RetrievalSourcePayload[],
     deadline: number,
-  ): Promise<void> {
+  ): Promise<AssistantRunOutcome> {
     // One same-model retry is allowed only before any user-visible delta
     // (docs/16 §11.2); afterwards an interruption fails the run and keeps the
     // partial content.
     for (let attempt = 1; attempt <= 2; attempt++) {
       let sawDelta = false
       try {
-        await this.answerOnce(claim, usage, timings, heartbeat, evidenceState, sources, deadline, (sent) => {
+        return await this.answerOnce(claim, usage, timings, heartbeat, evidenceState, sources, deadline, (sent) => {
           if (sent) sawDelta = true
         })
-        return
       } catch (error) {
         const retryable = !sawDelta && error instanceof ProviderGatewayError && error.category === 'unavailable'
         if (retryable && attempt === 1) continue
         throw error
       }
     }
+    // Unreachable: the second attempt always returns or throws.
+    return 'succeeded'
   }
 
   private async answerOnce(
@@ -285,7 +305,7 @@ export class AssistantRunner {
     sources: readonly RetrievalSourcePayload[],
     deadline: number,
     onDelta: (sent: boolean) => void,
-  ): Promise<void> {
+  ): Promise<AssistantRunOutcome> {
     const noteOnly = isNoteOnlyRequest(claim.context.question)
     const systemPrompt = assistantSystemPrompt(evidenceState, noteOnly)
     const outbound = providerAnswerMessages(claim, sources)
@@ -303,7 +323,7 @@ export class AssistantRunner {
     const reasoner = new StreamRedactor()
 
     const flusher = new EventFlusher(async (events) => {
-      await this.client.events(claim.run.id, claim.run.leaseVersion, events, heartbeat.signal)
+      await this.submitEvents(claim, heartbeat, events)
     })
 
     const stream = assistantStreamChat({
@@ -382,11 +402,24 @@ export class AssistantRunner {
       throw new AssistantExecutionError('ASSISTANT_PROVIDER_PROTOCOL_ERROR', 'Provider 未返回完整回答')
     }
     await this.emitPhase(claim, heartbeat, 'finalizing')
-    await this.client.completeRun(claim.run.id, claim.run.leaseVersion, usage, timings, heartbeat.signal)
+    const completed = await this.client.completeRun(claim.run.id, claim.run.leaseVersion, usage, timings, heartbeat.signal)
+    return completed.status
   }
 
   private async emit(claim: ClaimedAssistantRun, heartbeat: RunHeartbeat, events: readonly AssistantEvent[]): Promise<void> {
-    await this.client.events(claim.run.id, claim.run.leaseVersion, events, heartbeat.signal)
+    await this.submitEvents(claim, heartbeat, events)
+  }
+
+  // submitEvents sends one events batch and consumes the response: a stop
+  // request observed here must interrupt the run immediately instead of
+  // waiting for the next heartbeat tick (DT-R17, docs/16 §11.2).
+  private async submitEvents(
+    claim: ClaimedAssistantRun,
+    heartbeat: RunHeartbeat,
+    events: readonly AssistantEvent[],
+  ): Promise<void> {
+    const response = await this.client.events(claim.run.id, claim.run.leaseVersion, events, heartbeat.signal)
+    if (response.stopRequested) throwStopRequested(heartbeat)
   }
 
   private async emitPhase(
@@ -561,7 +594,7 @@ export function summaryMaintenanceInput(
 
 // Same deliberately conservative CJK-first estimate as the Go API: at most
 // one token per three UTF-8 bytes never underestimates Chinese text.
-function estimateTokens(text: string): number {
+export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(Buffer.byteLength(text, 'utf8') / 3))
 }
 
@@ -586,12 +619,58 @@ function providerHistoryMessages(
   return messages
 }
 
+// Answer-side context selection (docs/16 §10.2): inside the same input
+// budget the Go API applies to claim.context (context window minus output
+// cap, system prompt estimate and safety margin), the current question and
+// every actually retrieved source are reserved first and never trimmed; the
+// structured summary only stays when it strictly fits what remains, and then
+// complete user+assistant pairs join newest-first while whole pairs fit. A
+// pair that does not fit stops the walk, so an assistant message whose
+// question was dropped never travels alone. The selection is read-only: the
+// claim itself stays untouched and the rewrite path keeps the full context.
 function providerAnswerMessages(
   claim: ClaimedAssistantRun,
   sources: readonly RetrievalSourcePayload[],
 ): Message[] {
   const redactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
-  const messages = providerHistoryMessages(claim, redactor)
+  let remaining = claim.model.contextWindow - claim.model.maxOutputTokens -
+    systemPromptTokenEstimate - contextSafetyTokens - estimateTokens(claim.context.question)
+  for (const source of sources) {
+    // Same per-source cost as the Go retrieval-side budget.
+    remaining -= estimateTokens(source.content) + estimateTokens(source.title) + 8
+  }
+  const summaryTokens = claim.context.summary === null ? 0 : estimateTokens(JSON.stringify(claim.context.summary))
+  const keepSummary = summaryTokens > 0 && summaryTokens < remaining
+  if (keepSummary) remaining -= summaryTokens
+  const pairs: Array<[
+    ClaimedAssistantRun['context']['messages'][number],
+    ClaimedAssistantRun['context']['messages'][number],
+  ]> = []
+  for (let index = claim.context.messages.length - 1; index >= 1; index--) {
+    const answer = claim.context.messages[index]!
+    const question = claim.context.messages[index - 1]!
+    if (answer.role !== 'assistant' || question.role !== 'user') continue
+    const pairCost = estimateTokens(question.content) + 4 + estimateTokens(answer.content) + 4
+    if (pairCost > remaining) break
+    remaining -= pairCost
+    pairs.push([question, answer])
+    index--
+  }
+  const messages: Message[] = []
+  if (keepSummary) {
+    messages.push({
+      role: 'user',
+      content: redactProviderInput(
+        redactor,
+        '以下是当前会话的结构化摘要：\n' + JSON.stringify(claim.context.summary),
+      ),
+      timestamp: Date.now(),
+    })
+  }
+  for (const [question, answer] of pairs.reverse()) {
+    messages.push(historyMessage('user', redactProviderInput(redactor, question.content), claim.model))
+    messages.push(historyMessage('assistant', redactProviderInput(redactor, answer.content), claim.model))
+  }
   if (sources.length > 0) {
     const redactedSources = sources.map((source) => ({
       ...source,
@@ -648,7 +727,7 @@ export function isNoteOnlyRequest(question: string): boolean {
   return /只根据笔记|仅根据笔记|只依据笔记|仅依据笔记/.test(question)
 }
 
-function parseSummary(text: string): Record<string, string[]> | null {
+export function parseSummary(text: string): Record<string, string[]> | null {
   const raw = text.trim()
   const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/iu.exec(raw)
   const candidate = fenced && fenced[1] !== undefined ? fenced[1]!.trim() : raw
@@ -675,6 +754,14 @@ function ensureAlive(heartbeat: RunHeartbeat, deadline: number): void {
   if (heartbeat.leaseLost) throw new AssistantExecutionError('ASSISTANT_PROVIDER_UNAVAILABLE', 'worker 租约过期')
   if (heartbeat.stopRequested) throw new AssistantExecutionError('ASSISTANT_RUN_STOPPED', '用户已请求停止')
   if (Date.now() >= deadline) throw new AssistantExecutionError('ASSISTANT_PROVIDER_UNAVAILABLE', '回答超过运行上限')
+}
+
+// Stops the run through the shared heartbeat stop path and fails the current
+// execution; run() normalizes it through the existing stopped-run failure
+// semantics (DT-R17). Never reaches the Go API as a new error code by itself.
+function throwStopRequested(heartbeat: RunHeartbeat): never {
+  heartbeat.requestStop(new Error('assistant run stop requested'))
+  throw new AssistantExecutionError('ASSISTANT_RUN_STOPPED', '用户已请求停止')
 }
 
 function normalizeFailure(error: unknown, stopped: boolean): { code: string; detail: string } {
@@ -813,6 +900,19 @@ class RunHeartbeat {
     }
   }
 
+  // requestStop moves the run into the stop state from any consumer that
+  // observed stopRequested on an API response (heartbeat tick or an events
+  // exchange): it records the flag, aborts in-flight Provider work through the
+  // run signal and cancels the pending tick (DT-R17).
+  requestStop(reason: unknown): void {
+    this.stopRequested = true
+    this.#controller.abort(reason)
+    if (this.#timer !== undefined) {
+      clearTimeout(this.#timer)
+      this.#timer = undefined
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.#stopped) return
     let result: { readonly stopRequested: boolean }
@@ -829,8 +929,7 @@ class RunHeartbeat {
     }
     if (this.#stopped) return
     if (result.stopRequested) {
-      this.stopRequested = true
-      this.#controller.abort(new Error('assistant run stop requested'))
+      this.requestStop(new Error('assistant run stop requested'))
       return
     }
     this.#timer = setTimeout(() => {
