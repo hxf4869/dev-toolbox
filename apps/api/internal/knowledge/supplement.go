@@ -197,6 +197,13 @@ func (service *Service) createSupplement(ctx context.Context, actor auth.Actor, 
 	}
 	defer tx.Rollback(ctx)
 	if key != "" {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM idempotency_records
+			WHERE actor_type = $1 AND actor_id = $2 AND route_key = $3
+			  AND idempotency_key = $4 AND expires_at <= $5
+		`, actor.Type, actor.ID, routeKey, key, now); err != nil {
+			return createResult{}, err
+		}
 		var existingItemID, existingRawRecordID uuid.UUID
 		err := tx.QueryRow(ctx, `
 			SELECT created_item_id, created_raw_record_id FROM idempotency_records

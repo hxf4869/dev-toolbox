@@ -39,6 +39,8 @@ type v3Harness struct {
 	csrf           string
 	database       *pgxpool.Pool
 	assistant      *assistant.Service
+	ai             *ai.Service
+	totpSecret     string
 	knowledge      *knowledge.Service
 	attachmentRoot string
 }
@@ -125,7 +127,8 @@ func newV3Harness(t *testing.T, workerURLs ...string) *v3Harness {
 	assertStatus(t, confirm, http.StatusOK)
 	csrf := decodeResponse[apiResponse](t, confirm).CSRFToken
 	return &v3Harness{server: server, client: client, csrf: csrf, database: database,
-		assistant: assistantService, knowledge: knowledgeService, attachmentRoot: attachmentRoot}
+		assistant: assistantService, ai: aiService, totpSecret: provisioning.ManualKey,
+		knowledge: knowledgeService, attachmentRoot: attachmentRoot}
 }
 
 func resetV3Database(t *testing.T, database *pgxpool.Pool) {

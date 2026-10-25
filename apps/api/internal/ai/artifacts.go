@@ -157,6 +157,15 @@ func (service *Service) createExternalArtifact(response http.ResponseWriter, req
 			return
 		}
 	}
+	var content map[string]any
+	if err := json.Unmarshal(input.Content, &content); err != nil {
+		writeArtifactInternal(response, request)
+		return
+	}
+	if err := insertArtifactSearchFragments(request.Context(), tx, itemID, artifactID, validated.ArtifactType, content, false, now); err != nil {
+		writeArtifactInternal(response, request)
+		return
+	}
 	if err := tx.Commit(request.Context()); err != nil {
 		writeArtifactInternal(response, request)
 		return

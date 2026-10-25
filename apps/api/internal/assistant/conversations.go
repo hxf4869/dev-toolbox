@@ -232,9 +232,9 @@ func (service *Service) listConversations(response http.ResponseWriter, request 
 	// cursor predicate mirrors that mixed ordering explicitly.
 	if cursor != nil {
 		args = append(args, cursor.PinnedAt, cursor.UpdatedAt, cursor.ID)
-		base := len(args)
+		base := len(args) - 2
 		query += ` AND (
-			(pinned_at IS NOT NULL AND $` + itoa(base) + `::timestamptz IS NULL)
+			(pinned_at IS NULL AND $` + itoa(base) + `::timestamptz IS NOT NULL)
 			OR (pinned_at IS NOT NULL AND $` + itoa(base) + `::timestamptz IS NOT NULL AND (
 			    pinned_at < $` + itoa(base) + `
 			    OR (pinned_at = $` + itoa(base) + ` AND (

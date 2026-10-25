@@ -40,6 +40,9 @@ const fixtures = [
   '多行:\ntoken = "abc,def;ghi" 结束',
   'short Bearer abc 不满八位',
   'my_db_password: p@ss,word 后文',
+  '{"password":"synthetic secret, with separators; and \\"quotes\\""}',
+  "{'api_key': 'synthetic secret; value'}",
+  'lowercase bearer synthetic-token-123456 后文',
 ]
 
 describe('StreamRedactor', () => {
@@ -58,6 +61,28 @@ describe('StreamRedactor', () => {
     expect(output).toContain('<PASSWORD_1>')
     expect(output).not.toContain('hunter2')
   })
+
+  it('redacts quoted fields across every split without releasing any secret', () => {
+    const source = '{"password":"synthetic secret, with separators; and \\"quotes\\""} 后文'
+    for (const result of runAll(source, partitionsFor(source))) {
+      expect(result).toContain('<PASSWORD_1>')
+      expect(result).not.toContain('synthetic')
+      expect(result).not.toContain('separators')
+    }
+  })
+
+  it.each(['password=synthetic-secret; ', 'Bearer synthetic-token-123456 '])(
+    'releases a closed credential and following text before the stream ends: %s',
+    (prefix) => {
+      const redactor = new StreamRedactor()
+      let released = redactor.push(prefix)
+      for (let index = 0; index < 100; index++) released += redactor.push('后续普通回答。'.repeat(20))
+      expect(released).toContain('<')
+      expect(released).toContain('后续普通回答')
+      expect(released).not.toContain('synthetic')
+      expect(Buffer.byteLength(redactor.flush())).toBeLessThan(16 * 1024)
+    },
+  )
 
   it('redacts bearer tokens', () => {
     const output = runAll('Bearer abcdefgh123456789 ok', [[]])[0]!

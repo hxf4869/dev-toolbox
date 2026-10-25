@@ -197,6 +197,16 @@ export class AssistantClient {
     }, 64 * 1024, signal)
   }
 
+  async maintenancePolicy(runId: string, signal?: AbortSignal): Promise<{ readonly allowed: boolean }> {
+    const result = await this.jsonRequest(`/internal/assistant/runs/${runId}/maintenance-policy`, {
+      method: 'GET',
+    }, 8 * 1024, signal)
+    if (typeof result !== 'object' || result === null || !('allowed' in result) || typeof result.allowed !== 'boolean') {
+      throw new AssistantClientError(502, 'ASSISTANT_WORKER_UNAVAILABLE')
+    }
+    return { allowed: result.allowed }
+  }
+
   async runTitle(runId: string, title: string, signal?: AbortSignal): Promise<void> {
     await this.jsonRequest(`/internal/assistant/runs/${runId}/title`, {
       method: 'POST',

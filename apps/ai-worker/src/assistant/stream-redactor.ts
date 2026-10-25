@@ -18,8 +18,9 @@ const maximumHoldBytes = 4096
 const maximumKeyHoldBytes = 512 * 1024
 const ipTailHold = 15
 
-const credentialPattern = /([A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)[ \t]*[:=][ \t]*([^\s,;]+)/g
-const bearerPattern = /\bBearer[ \t]+[A-Za-z0-9._~+/=-]{8,}/g
+const credentialStartPattern = /\b((?:[a-z0-9]+[_-])*(?:password|passwd|username|token|secret|api[_-]?key))\b(["']?\s*[:=]\s*)/gi
+const credentialPattern = /\b((?:[a-z0-9]+[_-])*(?:password|passwd|username|token|secret|api[_-]?key))\b(["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi
+const bearerPattern = /\bBearer[ \t]+[A-Za-z0-9._~+/=-]{8,}/gi
 const keyPattern = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g
 const keyBeginPattern = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/
 const ipPattern = /\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b/g
@@ -108,19 +109,30 @@ export class StreamRedactor {
     const buffer = this.#buffer
     if (buffer.length === 0) return null
     const candidates: number[] = []
-    for (const match of allMatches(credentialPattern, buffer)) {
-      const keyword = match[1]
-      const value = match[2]
-      if (keyword === undefined || value === undefined || !isCredentialKeyword(keyword)) continue
-      const valueStart = match.index + match[0].length - value.length
-      // An open value (run reaches the buffer end) is not yet decidable.
-      candidates.push(match.index)
-      if (valueStart < buffer.length && buffer.length - valueStart > maximumHoldBytes) {
-        // Bounded hold: extremely long running values release past the cap.
+    for (const match of allMatches(credentialStartPattern, buffer)) {
+      const valueStart = match.index + match[0].length
+      const quote = buffer[valueStart]
+      if (quote === '"' || quote === "'") {
+        // Quoted values may contain spaces and separators. Keep the opening
+        // key until its matching, unescaped quote has actually arrived.
+        let closed = false
+        for (let index = valueStart + 1; index < buffer.length; index++) {
+          if (buffer[index] === '\\') index++
+          else if (buffer[index] === quote) {
+            closed = true
+            break
+          }
+        }
+        if (!closed) candidates.push(match.index)
+      } else {
+        const value = /^[^\s,;]*/u.exec(buffer.slice(valueStart))?.[0] ?? ''
+        if (valueStart + value.length === buffer.length) candidates.push(match.index)
       }
     }
     for (const match of allMatches(/\bBearer[ \t]+/gi, buffer)) {
-      candidates.push(match.index)
+      const valueStart = match.index + match[0].length
+      const value = /^[A-Za-z0-9._~+/=-]*/u.exec(buffer.slice(valueStart))?.[0] ?? ''
+      if (valueStart + value.length === buffer.length) candidates.push(match.index)
     }
     const partialBegin = partialPrefixStart(buffer, beginPrefix)
     if (partialBegin !== null) candidates.push(partialBegin)
@@ -185,7 +197,7 @@ function spansFor(text: string): Span[] {
   }
   for (const match of allMatches(credentialPattern, text)) {
     const keyword = match[1]
-    const value = match[2]
+    const value = match[3]
     if (keyword === undefined || value === undefined || !isCredentialKeyword(keyword)) continue
     if (overlaps(spans, match.index, match.index + match[0].length)) continue
     const keywordLength = keyword.length

@@ -8,6 +8,19 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestTextRedactorRedactsQuotedCredentialFields(t *testing.T) {
+	for _, input := range []string{
+		`{"password":"synthetic secret, with separators; and \"quotes\""}`,
+		`{'api_key': 'synthetic secret; value'}`,
+		`DB_PASSWORD="synthetic value with spaces"`,
+	} {
+		redacted := NewTextRedactor().Redact(input)
+		if redacted == input || strings.Contains(redacted, "synthetic") || strings.Contains(redacted, "quotes") {
+			t.Fatalf("quoted credential was not fully redacted: %q", redacted)
+		}
+	}
+}
+
 func TestTextRedactorRedactsNamespacedCredentialKeys(t *testing.T) {
 	redacted := NewTextRedactor().Redact(strings.Join([]string{
 		"KAFKA_MANAGER_USERNAME: demo-user",

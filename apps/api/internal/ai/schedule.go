@@ -173,9 +173,16 @@ func (service *Service) runScheduleWindow(ctx context.Context, now time.Time) er
 	if err := service.database.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM ai_task_runs WHERE schedule_key = $1)`, key).Scan(&exists); err != nil || exists {
 		return err
 	}
+	settings, err := service.loadSettings(ctx, service.database)
+	if err != nil {
+		return err
+	}
+	if policyRank(entry.SensitivePolicy) > policyRank(settings.SensitiveAIPolicy) {
+		entry.SensitivePolicy = settings.SensitiveAIPolicy
+	}
 	rows, err := service.database.Query(ctx, `
 		WITH current_inputs AS (
-			SELECT item.id,
+			SELECT item.id, item.sensitivity,
 			       MIN(record.effective_captured_at) AS oldest_at,
 			       BOOL_OR(btrim(record.body) <> '') AS has_text,
 			       to_jsonb(ARRAY(
@@ -193,13 +200,24 @@ func (service *Service) runScheduleWindow(ctx context.Context, now time.Time) er
 			WHERE item.deleted_at IS NULL GROUP BY item.id
 		)
 		SELECT current.id FROM current_inputs current
-		WHERE (current.has_text AND NOT EXISTS (
+		WHERE (current.has_text
+		  AND (current.sensitivity = 'normal' OR $1 <> 'block')
+		  AND NOT EXISTS (SELECT 1 FROM ai_task_runs running
+		      WHERE running.item_id = current.id AND running.task_type = 'organize_record'
+		        AND running.status IN ('queued', 'running'))
+		  AND NOT EXISTS (
 			SELECT 1 FROM item_active_artifacts active
 			JOIN ai_artifacts artifact ON artifact.id = active.artifact_id AND artifact.invalidated_at IS NULL
 			JOIN ai_task_runs task ON task.id = artifact.task_run_id
 			WHERE active.item_id = current.id AND active.artifact_type = 'organized_record'
 			  AND task.input_snapshot->'rawRecordIds' = current.raw_ids
-		)) OR (jsonb_array_length(current.image_ids) > 0 AND NOT EXISTS (
+		)) OR ($2::uuid IS NOT NULL
+		  AND jsonb_array_length(current.image_ids) BETWEEN 1 AND $3
+		  AND (current.sensitivity = 'normal' OR $1 = 'allow')
+		  AND NOT EXISTS (SELECT 1 FROM ai_task_runs running
+		      WHERE running.item_id = current.id AND running.task_type = 'analyze_image'
+		        AND running.status IN ('queued', 'running'))
+		  AND NOT EXISTS (
 			SELECT 1 FROM item_active_artifacts active
 			JOIN ai_artifacts artifact ON artifact.id = active.artifact_id AND artifact.invalidated_at IS NULL
 			JOIN ai_task_runs task ON task.id = artifact.task_run_id
@@ -207,7 +225,7 @@ func (service *Service) runScheduleWindow(ctx context.Context, now time.Time) er
 			  AND task.input_snapshot->'attachmentIds' = current.image_ids
 		))
 		ORDER BY current.oldest_at, current.id LIMIT 20
-	`)
+	`, entry.SensitivePolicy, entry.VisionModelID, maximumTaskImages)
 	if err != nil {
 		return err
 	}

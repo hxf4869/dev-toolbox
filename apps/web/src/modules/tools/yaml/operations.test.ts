@@ -14,6 +14,21 @@ function expectCode(run: () => unknown, code: string) {
 }
 
 describe('YAML 1.2 workbench', () => {
+  it('round-trips nested empty containers in objects and arrays', () => {
+    const source = '{"list":[],"nested":{},"items":[{},[],{"child":[]} ]}'
+    const yaml = runYamlOperation({ operation: 'from-json', text: source })
+    const json = runYamlOperation({ operation: 'to-json', text: yaml.output })
+    expect(JSON.parse(json.output)).toEqual(JSON.parse(source))
+  })
+
+  it('keeps a __proto__ mapping as an own JSON property', () => {
+    const result = runYamlOperation({ operation: 'to-json', text: '__proto__:\n  test: value\nnormal: ok\n' })
+    const parsed = JSON.parse(result.output)
+    expect(Object.hasOwn(parsed, '__proto__')).toBe(true)
+    expect(parsed.__proto__).toEqual({ test: 'value' })
+    expect(parsed.normal).toBe('ok')
+  })
+
   it('formats multi-document YAML and preserves comments best effort', () => {
     const result = runYamlOperation({
       operation: 'format',

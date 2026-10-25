@@ -34,6 +34,7 @@ interface StubHandlers {
   holdComplete?: (release: () => void) => void
   // Heartbeat responses by call number (1-based); the last entry repeats.
   heartbeatResponses?: (call: number) => Response | Promise<Response>
+  maintenancePolicy?: (call: number) => Response
   // Events responses by call number (1-based); defaults to no stop request.
   eventsResponses?: (call: number) => Response
   // Status carried by the /complete response; defaults to 'succeeded'.
@@ -82,6 +83,10 @@ function createHarness(handlers: StubHandlers = {}) {
       return jsonResponse({ status })
     }
     if (/\/fail$/.test(url)) return jsonResponse({ status: 'failed' })
+    if (/\/maintenance-policy$/.test(url)) {
+      const respond = handlers.maintenancePolicy ?? (() => jsonResponse({ allowed: true }))
+      return respond(calls.filter((call) => /\/maintenance-policy$/.test(call.url)).length)
+    }
     if (/\/title$/.test(url)) return jsonResponse({ applied: true })
     if (/\/summary$/.test(url)) return jsonResponse({ applied: true })
     throw new Error(`unexpected synthetic request: ${url}`)
@@ -336,6 +341,39 @@ describe('cumulative summary maintenance (R2-DT02)', () => {
 })
 
 describe('auxiliary maintenance lifecycle after success (R2-DT03)', () => {
+  it('skips maintenance when the global policy tightened after answer completion', async () => {
+    const { runner, claim, calls, providerCalls } = createHarness({
+      summarySource: coveredSummarySource(),
+      maintenancePolicy: () => jsonResponse({ allowed: false }),
+    })
+    await drive(runner.run(claim))
+    expect(providerCalls.map((call) => call.kind)).toEqual(['answer'])
+    expect(calls.filter((call) => /\/complete$/.test(call.url))).toHaveLength(1)
+    expect(calls.filter((call) => /\/fail$/.test(call.url))).toHaveLength(0)
+  })
+
+  it('aborts an in-flight title when policy tightens and skips the summary', async () => {
+    const { runner, claim, calls, providerCalls } = createHarness({
+      summarySource: coveredSummarySource(),
+      holdTitleModel: () => undefined,
+      maintenancePolicy: (call) => jsonResponse({ allowed: call === 1 }),
+    })
+    const running = runner.run(claim)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await running
+    expect(providerCalls.map((call) => call.kind)).toEqual(['answer', 'title'])
+    expect(calls.filter((call) => /\/(title|summary|fail)$/.test(call.url))).toHaveLength(0)
+  })
+
+  it('rechecks the policy between a completed title and summary', async () => {
+    const { runner, claim, providerCalls } = createHarness({
+      summarySource: coveredSummarySource(),
+      maintenancePolicy: (call) => jsonResponse({ allowed: call === 1 }),
+    })
+    await drive(runner.run(claim))
+    expect(providerCalls.map((call) => call.kind)).toEqual(['answer', 'title'])
+  })
+
   it('finishes maintenance when an in-flight heartbeat tick returns 409 after completeRun', async () => {
     let releaseComplete!: () => void
     let releaseHeartbeat!: (response: Response) => void

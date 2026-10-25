@@ -358,6 +358,11 @@ func (service *Service) recoverExpiredRuns(ctx context.Context, tx pgx.Tx, now t
 			}
 			continue
 		}
+		// No visible output exists, so the next claim starts retrieval afresh.
+		// Keep the event sequence, but discard the previous attempt's sources.
+		if _, err := tx.Exec(ctx, `DELETE FROM assistant_run_sources WHERE run_id = $1`, item.id); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE assistant_runs SET status = 'queued', lease_owner = NULL, lease_version = NULL,
 			       lease_expires_at = NULL, heartbeat_at = NULL WHERE id = $1

@@ -230,6 +230,23 @@ type titleInput struct {
 	Title string `json:"title"`
 }
 
+// runMaintenancePolicy rechecks the global policy after the execution lease
+// ended. A stricter policy invalidates the worker's frozen outbound context.
+func (service *Service) runMaintenancePolicy(response http.ResponseWriter, request *http.Request) {
+	run, ok := service.loadRunOr404(response, request)
+	if !ok {
+		return
+	}
+	policy, err := service.loadSensitivePolicy(request.Context(), service.database)
+	if err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	httpapi.WriteJSON(response, http.StatusOK, map[string]any{
+		"allowed": run.Status == "succeeded" && sensitivePolicyRank(policy) <= sensitivePolicyRank(run.EffectivePolicy),
+	})
+}
+
 // runTitle is a lease-free, best-effort conditional update after the first
 // successful answer; it never overwrites a user title (docs/16 §14).
 func (service *Service) runTitle(response http.ResponseWriter, request *http.Request) {

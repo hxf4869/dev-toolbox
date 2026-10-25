@@ -8,6 +8,19 @@ afterEach(() => {
 })
 
 describe('EventFlusher', () => {
+  it('splits a large reasoning release within the byte limit without breaking Unicode', async () => {
+    const batches: (readonly AssistantEvent[])[] = []
+    const flusher = new EventFlusher(async (events) => { batches.push(events) })
+    const delta = '合成推理🙂'.repeat(3000)
+    await flusher.pushReasoningDelta(delta)
+    await flusher.drain()
+    const parts = batches.flat().map((event) => event.payload['delta'] as string)
+    expect(parts.join('')).toBe(delta)
+    expect(parts.length).toBeGreaterThan(1)
+    expect(parts.every((part) => Buffer.byteLength(part, 'utf8') <= 4096)).toBe(true)
+    expect(parts.every((part) => !part.includes('\uFFFD'))).toBe(true)
+  })
+
   it('keeps tiny deltas within the Go API limit of 50 events per batch', async () => {
     vi.useFakeTimers()
     const batches: (readonly AssistantEvent[])[] = []

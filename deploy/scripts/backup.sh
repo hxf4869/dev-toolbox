@@ -115,7 +115,7 @@ cp "$production_config_root/Caddyfile" "$staging_root/config/Caddyfile"
 cp "$deploy_dir/nginx/external-nginx.conf.template" "$staging_root/config/external-nginx.conf.template"
 jq -n --arg version "$version" --arg createdAt "$started_at" --arg edgeMode "$edge_mode" \
   --arg gateway "dev-toolbox-gateway:$version" --arg api "dev-toolbox-api:$version" \
-  --arg worker "dev-toolbox-ai-worker:$version" --arg postgres "postgres:18.6-alpine3.23" \
+  --arg worker "dev-toolbox-ai-worker:$version" --arg postgres "pgvector/pgvector:0.8.6-pg18-trixie" \
   '{manifestVersion: 1, appVersion: $version, edgeMode: $edgeMode, createdAt: $createdAt, images: {gateway: $gateway, api: $api, aiWorker: $worker, postgres: $postgres}, contents: ["database.dump", "data/attachments", "config/compose.production.yaml", "config/compose.production.external-nginx.yaml", "config/Caddyfile", "config/external-nginx.conf.template"]}' \
   >"$staging_root/config/manifest.json"
 

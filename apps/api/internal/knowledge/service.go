@@ -190,6 +190,13 @@ func (service *Service) createItem(ctx context.Context, actor auth.Actor, input 
 	}
 	defer tx.Rollback(ctx)
 	if idempotencyKey != "" {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM idempotency_records
+			WHERE actor_type = $1 AND actor_id = $2 AND route_key = 'create_item'
+			  AND idempotency_key = $3 AND expires_at <= $4
+		`, actor.Type, actor.ID, idempotencyKey, now); err != nil {
+			return createResult{}, err
+		}
 		var existingItemID, existingRawRecordID uuid.UUID
 		err := tx.QueryRow(ctx, `
 			SELECT created_item_id, created_raw_record_id

@@ -930,6 +930,41 @@ describe('bounded task runner', () => {
     expect(api.completed[0]?.artifactType).toBe('image_analysis')
   })
 
+  it('reads six authorized images and emits the Draft within eight tool calls', async () => {
+    const api = new FakeTaskApi()
+    api.attachmentBytes = new Uint8Array([1, 2, 3])
+    const attachments = Array.from({ length: 6 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      kind: 'image', mediaType: 'image/png', sizeBytes: 3, width: 1, height: 1,
+    }))
+    const base = taskClaim({ attachments, fragments: [] })
+    const claim: ClaimedTask = {
+      ...base,
+      task: { ...base.task, type: 'analyze_image', promptVersion: 'image-v2' },
+      provider: { ...base.provider, supportsVision: true, contextWindow: 32768 },
+    }
+    const draft = {
+      ...organizedDraft(),
+      classification: {
+        contentType: 'image', suggestedFolderPath: ['图片'], suggestedTags: [], sensitivitySuggestion: 'normal',
+      },
+      blocks: attachments.map((_, index) => ({
+        type: 'image_reference', attachmentRef: `A${index + 1}`, caption: '合成图片', sourceRefs: [],
+      })),
+    }
+    const messages = [
+      assistant([toolCall('context', 'get_record_context', {})]),
+      assistant(attachments.map((_, index) => toolCall(`image-${index}`, 'get_attachment', { attachmentRef: `A${index + 1}` }))),
+      assistant([toolCall('draft', 'emit_artifact_draft', draft)]),
+    ]
+    const runner = createRunner(api, async () => ({ message: messages.shift()!, attempts: 1 }))
+    await runner.run(claim)
+    expect(api.attachmentReads).toEqual(attachments.map((attachment) => attachment.id))
+    expect(api.failures).toEqual([])
+    expect(api.completed).toHaveLength(1)
+    expect(api.completed[0]?.blocks).toHaveLength(6)
+  })
+
   it('allows only one format repair and never parses natural-language JSON', async () => {
     const api = new FakeTaskApi()
     const messages = [

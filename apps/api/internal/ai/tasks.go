@@ -19,7 +19,9 @@ import (
 
 const (
 	maximumTaskRuntime = 5 * time.Minute
-	maximumTaskImages  = 7
+	// get_record_context + one get_attachment per image + emit_artifact_draft
+	// must fit the eight-call domain-tool budget.
+	maximumTaskImages = 6
 )
 
 type taskEventEntry struct {

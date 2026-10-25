@@ -607,6 +607,7 @@ Provider 未返回 usage 时该字段为 `null`。连接测试只发起一次外
 
 - item 存在且不在回收站。
 - 模型启用且已配置上下文窗口和最大输出 token；图片任务还必须支持视觉输入。
+- 单个图片分析任务最多 6 张图片，使读取上下文、逐张读取图片和提交 Draft 均能在 8 次领域工具调用内完成；超限返回 `AI_CONTEXT_TOO_LARGE`。
 - 敏感策略允许。
 - 同一 `itemId + taskType` 没有 `queued` 或 `running` 任务；即使手动点击也不允许并发创建，返回 `AI_TASK_ALREADY_ACTIVE`。不同 task type 可以并行。
 

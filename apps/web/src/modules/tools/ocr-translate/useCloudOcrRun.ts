@@ -61,6 +61,7 @@ export function useCloudOcrRun(options: { pollIntervalMs?: number } = {}) {
   let sleepResolve: (() => void) | null = null
   let inFlightAbort: AbortController | null = null
   let generation = 0
+  let disposed = false
   let pendingTicketRelease: Promise<void> = Promise.resolve()
 
   const isBusy = computed(() =>
@@ -112,11 +113,12 @@ export function useCloudOcrRun(options: { pollIntervalMs?: number } = {}) {
 
   /** 用户确认后启动；手动重试同样走这里，内部生成新的幂等键。 */
   async function start(image: LoadedImage, csrf: () => string): Promise<void> {
-    if (isBusy.value) return
+    if (disposed || isBusy.value) return
+    const pendingGeneration = ++generation
     await supersedeActiveRun()
+    if (disposed || generation !== pendingGeneration) return
     csrfTokenSource = csrf
-    generation += 1
-    const run: RunContext = { image, generation }
+    const run: RunContext = { image, generation: pendingGeneration }
     cancelRequested = false
     error.value = null
     resultText.value = ''
@@ -237,6 +239,8 @@ export function useCloudOcrRun(options: { pollIntervalMs?: number } = {}) {
 
   /** 页面卸载：中止在途请求并尽力释放 ticket。 */
   function dispose(): void {
+    disposed = true
+    generation += 1
     cancelRequested = true
     interruptSleep()
     inFlightAbort?.abort()
@@ -246,6 +250,7 @@ export function useCloudOcrRun(options: { pollIntervalMs?: number } = {}) {
 
   /** 换图等场景：丢弃旧运行状态。 */
   function reset(): void {
+    generation += 1
     void supersedeActiveRun()
     resultText.value = ''
     remainingAfter.value = null

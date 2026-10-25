@@ -82,6 +82,19 @@ func (service *Service) login(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	defer tx.Rollback(request.Context())
+	// Password verification happened before the transaction. Serialize challenge
+	// creation with password/TOTP changes and reject a stale password snapshot.
+	var lockedPasswordHash string
+	if err := tx.QueryRow(request.Context(), `
+		SELECT password_hash, totp_secret_ciphertext FROM owner_account WHERE id = $1 FOR UPDATE
+	`, ownerID).Scan(&lockedPasswordHash, &totpCiphertext); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return
+	}
+	if lockedPasswordHash != passwordHash {
+		service.invalidCredentials(response, request)
+		return
+	}
 
 	trustedDeviceID, err := service.validTrustedDevice(request.Context(), tx, request)
 	if err != nil {
@@ -166,6 +179,8 @@ func (service *Service) setupTOTP(response http.ResponseWriter, request *http.Re
 		  AND challenge.consumed_at IS NULL
 		  AND challenge.expires_at > $2
 		  AND challenge.failed_attempts < 5
+		  AND challenge.created_at >= owner.password_changed_at
+		  AND (owner.totp_enabled_at IS NULL OR challenge.created_at >= owner.totp_enabled_at)
 		FOR UPDATE OF challenge
 	`, challengeID, service.now().UTC()).Scan(&username, &pendingCiphertext)
 	if err != nil {
@@ -250,6 +265,16 @@ func (service *Service) finishChallenge(response http.ResponseWriter, request *h
 	var failedAttempts int
 	var currentTOTPCiphertext []byte
 	var pendingTOTPCiphertext []byte
+	// Security changes take the owner lock before consuming challenges. Use
+	// the same order here, before locking an individual challenge.
+	if _, err := tx.Exec(request.Context(), `
+		SELECT id FROM owner_account
+		WHERE id = (SELECT owner_account_id FROM auth_challenges WHERE id = $1)
+		FOR UPDATE
+	`, challengeID); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return
+	}
 	err = tx.QueryRow(request.Context(), `
 		SELECT owner.id, owner.username, challenge.mode, challenge.failed_attempts,
 		       owner.totp_secret_ciphertext, challenge.pending_totp_secret_ciphertext
@@ -259,7 +284,9 @@ func (service *Service) finishChallenge(response http.ResponseWriter, request *h
 		  AND challenge.consumed_at IS NULL
 		  AND challenge.expires_at > $2
 		  AND challenge.failed_attempts < 5
-		FOR UPDATE OF challenge, owner
+		  AND challenge.created_at >= owner.password_changed_at
+		  AND (owner.totp_enabled_at IS NULL OR challenge.created_at >= owner.totp_enabled_at)
+		FOR UPDATE OF challenge
 	`, challengeID, service.now().UTC()).Scan(
 		&ownerID,
 		&username,
@@ -373,8 +400,9 @@ func (service *Service) finishChallenge(response http.ResponseWriter, request *h
 		return
 	}
 	if _, err := tx.Exec(request.Context(), `
-		UPDATE auth_challenges SET consumed_at = $2 WHERE id = $1
-	`, challengeID, now); err != nil {
+		UPDATE auth_challenges SET consumed_at = $2
+		WHERE consumed_at IS NULL AND (id = $1 OR ($3 AND owner_account_id = $4))
+	`, challengeID, now, expectedMode == "totp_enroll", ownerID); err != nil {
 		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
 		return
 	}

@@ -70,7 +70,15 @@ func (service *Service) logoutAll(response http.ResponseWriter, request *http.Re
 		return
 	}
 	defer tx.Rollback(request.Context())
+	if _, err := tx.Exec(request.Context(), `SELECT id FROM owner_account WHERE id = $1 FOR UPDATE`, session.OwnerID); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return
+	}
 	now := service.now().UTC()
+	if _, err := tx.Exec(request.Context(), `UPDATE auth_challenges SET consumed_at = $1 WHERE owner_account_id = $2 AND consumed_at IS NULL`, now, session.OwnerID); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return
+	}
 	if _, err := tx.Exec(request.Context(), "UPDATE auth_sessions SET revoked_at = $1 WHERE revoked_at IS NULL", now); err != nil {
 		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
 		return
@@ -123,6 +131,10 @@ func (service *Service) changePassword(response http.ResponseWriter, request *ht
 		SET password_hash = $2, password_changed_at = $3, updated_at = $3
 		WHERE id = $1
 	`, session.OwnerID, newHash, now); err != nil {
+		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+		return
+	}
+	if _, err := tx.Exec(request.Context(), `UPDATE auth_challenges SET consumed_at = $1 WHERE owner_account_id = $2 AND consumed_at IS NULL`, now, session.OwnerID); err != nil {
 		httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
 		return
 	}

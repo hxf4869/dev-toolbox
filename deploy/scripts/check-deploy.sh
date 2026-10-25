@@ -81,7 +81,7 @@ jq -e --arg version "$version" --arg domain "$domain" --arg edgeMode "$edge_mode
   .services.gateway.image == ("dev-toolbox-gateway:" + $version) and
   .services.api.image == ("dev-toolbox-api:" + $version) and
   .services["ai-worker"].image == ("dev-toolbox-ai-worker:" + $version) and
-  .services.postgres.image == "postgres:18.6-alpine3.23" and
+  .services.postgres.image == "pgvector/pgvector:0.8.6-pg18-trixie" and
   .services.gateway.environment.APP_DOMAIN == (if $edgeMode == "external_nginx" then "http://" + $domain else $domain end) and
   .services.api.environment.APP_ORIGIN == ("https://" + $domain) and
   ((.services.api.ports // []) | length) == 0 and

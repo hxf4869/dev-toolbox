@@ -1200,9 +1200,12 @@ POST /internal/assistant/runs/{id}/retrieval
 POST /internal/assistant/runs/{id}/events
 POST /internal/assistant/runs/{id}/complete
 POST /internal/assistant/runs/{id}/fail
+GET  /internal/assistant/runs/{id}/maintenance-policy
 POST /internal/assistant/runs/{id}/title
 POST /internal/assistant/runs/{id}/summary
 ```
+
+`maintenance-policy` 无需 lease，只在 Run 成功且当前全局敏感策略没有比执行快照更严格时返回 `allowed=true`。Worker 在每次标题/摘要 Provider 请求前复查；维护期间每 10 秒复查，策略收紧或复查失败时中止维护，不改变已成功的回答。
 
 `summary` 请求必填 `baselineThroughMessageSequence`：本次候选摘要所合并的存储摘要水位，0 表示尚无存储摘要；缺失（如旧版 Worker）或不在 `[0, throughMessageSequence)` 区间返回 422。写入为原子条件更新：仅当存储水位仍等于基准且目标水位前进时应用，否则保留原摘要并返回 `applied=false`，防止并发维护互相覆盖。
 

@@ -77,7 +77,15 @@ if grep -F 'handle_response @maintenance' "$deploy_dir/Caddyfile" >/dev/null; th
   printf '%s\n' 'Caddy 不得把 API 的上游错误与额度结算状态改写成维护响应' >&2
   exit 1
 fi
-if grep -F 'flush_interval -1' "$deploy_dir/Caddyfile" >/dev/null; then
+if ! awk '
+  /^[[:space:]]*handle \/api\/\* \{/ { in_api = 1; depth = 0 }
+  in_api {
+    if ($0 ~ /flush_interval[[:space:]]+-1/) exit 1
+    line = $0
+    depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+    if (depth == 0) in_api = 0
+  }
+' "$deploy_dir/Caddyfile"; then
   printf '%s\n' 'Caddy 不得为 Assistant SSE 设置全局 flush_interval -1' >&2
   exit 1
 fi

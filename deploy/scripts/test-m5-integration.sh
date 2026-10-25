@@ -39,6 +39,8 @@ for sequence in 001 002 003 004 005; do
 done
 
 docker compose --env-file "$env_file" -f "$compose_file" up -d --wait postgres
+expected_schema_version=$(printf '%s\n' "$project_dir"/apps/api/migrations/[0-9]*_*.sql \
+  | sed 's|.*/||; s/_.*//' | sort -n | tail -n 1 | awk '{ print $1 + 0 }')
 for database_name in "$upgrade_database" "$empty_database"; do
   docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
     sh -lc "dropdb --if-exists --force -U \"\$POSTGRES_USER\" $database_name && createdb -U \"\$POSTGRES_USER\" $database_name"
@@ -60,7 +62,7 @@ docker compose --env-file "$env_file" -f "$compose_file" run --rm --no-deps \
 for database_name in "$upgrade_database" "$empty_database"; do
   docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
     sh -lc "psql -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d $database_name -Atc \"SELECT version FROM public.schema_version; SELECT count(*) FROM information_schema.columns WHERE table_name = 'provider_configs' AND column_name LIKE 'last_test%';\"" \
-    | awk 'NR == 1 && $0 == "6" { version = 1 } NR == 2 && $0 == "4" { columns = 1 } END { exit !(version && columns) }'
+    | awk -v expected="$expected_schema_version" 'NR == 1 && $0 == expected { version = 1 } NR == 2 && $0 == "4" { columns = 1 } END { exit !(version && columns) }'
 done
 
 docker run -d --rm --name "$test_container" \

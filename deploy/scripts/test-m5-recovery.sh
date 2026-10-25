@@ -57,6 +57,7 @@ for command_name in docker jq openssl awk grep curl; do
   command -v "$command_name" >/dev/null 2>&1 || fail "缺少空机恢复演练命令：$command_name"
 done
 
+candidate_version=$(jq -er '.candidateVersion | select(type == "string" and length > 0)' "$deploy_dir/release-status.v1.json")
 mkdir -p "$source_data_root" "$secrets_root" "$config_root" "$staging_root" "$repository_root" "$state_root"
 awk '
   /^\{\$APP_DOMAIN\} \{/ {
@@ -69,7 +70,7 @@ awk '
 
 {
   printf '%s\n' 'APP_DOMAIN=toolbox.127.0.0.1.nip.io'
-  printf '%s\n' 'APP_VERSION=v1.0.3'
+  printf 'APP_VERSION=%s\n' "$candidate_version"
   printf '%s\n' 'APP_TIMEZONE=Asia/Shanghai'
   printf '%s\n' 'POSTGRES_DB=dev_toolbox_recovery_test'
   printf '%s\n' 'POSTGRES_USER=dev_toolbox_recovery'

@@ -187,26 +187,9 @@ func (service *Service) completeTask(response http.ResponseWriter, request *http
 			return
 		}
 	}
-	searchText := artifactSearchText(content)
-	for ordinal, fragmentText := range splitArtifactSearchText(searchText) {
-		sourceKind := "ai_text"
-		if validated.ArtifactType == "image_analysis" {
-			sourceKind = "image_text"
-		}
-		fragmentKey := artifactID.String() + ":search"
-		if ordinal > 0 {
-			fragmentKey += ":" + strconv.Itoa(ordinal)
-		}
-		if _, err := tx.Exec(request.Context(), `
-			INSERT INTO search_fragments (
-				id, item_id, artifact_id, source_kind, ordinal, content,
-				normalized_content, weight, active, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, $9)
-		`, uuid.NewSHA1(searchFragmentNamespace, []byte(fragmentKey)), itemID,
-			artifactID, sourceKind, ordinal, fragmentText, normalizeArtifactSearch(fragmentText), autoActivate, now); err != nil {
-			writeInternalFailure(response, request)
-			return
-		}
+	if err := insertArtifactSearchFragments(request.Context(), tx, itemID, artifactID, validated.ArtifactType, content, autoActivate, now); err != nil {
+		writeInternalFailure(response, request)
+		return
 	}
 	if autoActivate {
 		if err := activateArtifactInTx(request.Context(), tx, itemID, validated.ArtifactType, artifactID, now); err != nil {
@@ -449,7 +432,48 @@ func loadArtifactForTask(ctx context.Context, tx pgx.Tx, taskID uuid.UUID) (arti
 	return entry, err == nil, err
 }
 
+func insertArtifactSearchFragments(ctx context.Context, tx pgx.Tx, itemID, artifactID uuid.UUID, artifactType string, content map[string]any, active bool, now time.Time) error {
+	for ordinal, fragmentText := range splitArtifactSearchText(artifactSearchText(content)) {
+		sourceKind := "ai_text"
+		if artifactType == "image_analysis" {
+			sourceKind = "image_text"
+		}
+		fragmentKey := artifactID.String() + ":search"
+		if ordinal > 0 {
+			fragmentKey += ":" + strconv.Itoa(ordinal)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO search_fragments (
+				id, item_id, artifact_id, source_kind, ordinal, content,
+				normalized_content, weight, active, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, $9)
+		`, uuid.NewSHA1(searchFragmentNamespace, []byte(fragmentKey)), itemID,
+			artifactID, sourceKind, ordinal, fragmentText, normalizeArtifactSearch(fragmentText), active, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func activateArtifactInTx(ctx context.Context, tx pgx.Tx, itemID uuid.UUID, artifactType string, artifactID uuid.UUID, now time.Time) error {
+	// External artifacts created by older versions may not have fragments yet.
+	var hasFragments bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM search_fragments WHERE artifact_id = $1)`, artifactID).Scan(&hasFragments); err != nil {
+		return err
+	}
+	if !hasFragments {
+		var encoded []byte
+		if err := tx.QueryRow(ctx, `SELECT content FROM ai_artifacts WHERE id = $1`, artifactID).Scan(&encoded); err != nil {
+			return err
+		}
+		var content map[string]any
+		if err := json.Unmarshal(encoded, &content); err != nil {
+			return err
+		}
+		if err := insertArtifactSearchFragments(ctx, tx, itemID, artifactID, artifactType, content, false, now); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE search_fragments SET active = false WHERE artifact_id IN (
 			SELECT artifact_id FROM item_active_artifacts WHERE item_id = $1 AND artifact_type = $2

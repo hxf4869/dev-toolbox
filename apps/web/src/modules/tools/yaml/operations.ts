@@ -136,7 +136,7 @@ function yamlNodeToLossless(node: Node | null, document: Document.Parsed): Lossl
   if (isScalar(node)) return yamlScalarToLossless(node)
   if (isSeq(node)) return node.items.map((item) => yamlNodeToLossless(item as Node | null, document))
   if (isMap(node)) {
-    const output: Record<string, LosslessJsonValue> = {}
+    const output: Record<string, LosslessJsonValue> = Object.create(null)
     for (const pair of node.items as Pair[]) {
       if (!isScalar(pair.key) || typeof pair.key.value !== 'string') {
         throw new StructuredToolError({ code: 'YAML_KEY_UNSUPPORTED', message: 'YAML→JSON 只支持字符串 mapping key。' })
@@ -176,7 +176,7 @@ function emitYamlValue(value: LosslessJsonValue, depth: number, inline: boolean)
   if (typeof value === 'string') return JSON.stringify(value)
   if ('isLosslessNumber' in Object(value)) return (value as LosslessNumber).value
   if (Array.isArray(value)) {
-    if (value.length === 0) return '[]'
+    if (value.length === 0) return `${inline ? '' : '  '.repeat(depth)}[]`
     return value.map((item) => {
       const prefix = `${'  '.repeat(depth)}-`
       if (isObject(item) || Array.isArray(item)) return `${prefix}\n${emitYamlValue(item, depth + 1, false)}`
@@ -184,7 +184,7 @@ function emitYamlValue(value: LosslessJsonValue, depth: number, inline: boolean)
     }).join('\n')
   }
   const entries = Object.entries(value)
-  if (entries.length === 0) return '{}'
+  if (entries.length === 0) return `${inline ? '' : '  '.repeat(depth)}{}`
   return entries.map(([key, child]) => {
     const keyText = /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key) ? key : JSON.stringify(key)
     const prefix = `${'  '.repeat(depth)}${keyText}:`

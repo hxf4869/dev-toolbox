@@ -424,11 +424,14 @@ func (service *Service) prepareRetryMessages(ctx context.Context, tx pgx.Tx, ret
 		`SELECT max(sequence) FROM assistant_messages WHERE conversation_id = $1`, retry.conversationID).Scan(&lastSequence); err != nil {
 		return messageCtx, &runConflictError{status: http.StatusInternalServerError, code: "INTERNAL_ERROR"}
 	}
+	var currentRunID *uuid.UUID
+	var outputStatus string
 	if err := tx.QueryRow(ctx,
-		`SELECT sequence FROM assistant_messages WHERE id = $1`, retry.outputMessageID).Scan(&outputSequence); err != nil {
+		`SELECT sequence, current_run_id, status FROM assistant_messages WHERE id = $1`, retry.outputMessageID).Scan(&outputSequence, &currentRunID, &outputStatus); err != nil {
 		return messageCtx, &runConflictError{status: http.StatusInternalServerError, code: "INTERNAL_ERROR"}
 	}
-	if outputSequence != lastSequence {
+	if outputSequence != lastSequence || currentRunID == nil || *currentRunID != retry.runID ||
+		(outputStatus != "failed" && outputStatus != "stopped") {
 		return messageCtx, &runConflictError{status: http.StatusConflict, code: "ASSISTANT_RUN_NOT_RETRYABLE"}
 	}
 	if _, err := tx.Exec(ctx, `

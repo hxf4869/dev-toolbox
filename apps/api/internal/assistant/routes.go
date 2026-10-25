@@ -51,6 +51,7 @@ func (service *Service) RegisterRoutes(router *http.ServeMux, authService *auth.
 	router.Handle("POST /internal/assistant/runs/{id}/events", service.internalOnly(http.HandlerFunc(service.appendRunEvents)))
 	router.Handle("POST /internal/assistant/runs/{id}/complete", service.internalOnly(http.HandlerFunc(service.completeRun)))
 	router.Handle("POST /internal/assistant/runs/{id}/fail", service.internalOnly(http.HandlerFunc(service.failRun)))
+	router.Handle("GET /internal/assistant/runs/{id}/maintenance-policy", service.internalOnly(http.HandlerFunc(service.runMaintenancePolicy)))
 	router.Handle("POST /internal/assistant/runs/{id}/title", service.internalOnly(http.HandlerFunc(service.runTitle)))
 	router.Handle("POST /internal/assistant/runs/{id}/summary", service.internalOnly(http.HandlerFunc(service.runSummary)))
 	router.Handle("POST /internal/assistant/index/claim", service.internalOnly(http.HandlerFunc(service.claimIndexBatch)))

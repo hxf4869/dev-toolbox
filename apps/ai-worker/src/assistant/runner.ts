@@ -358,7 +358,7 @@ export class AssistantRunner {
         reasoningSeen = true
         const redacted = reasoner.push(event.delta)
         if (redacted.length > 0) {
-          await flusher.push('reasoning.delta', { delta: redacted })
+          await flusher.pushReasoningDelta(redacted)
         }
         continue
       }
@@ -369,7 +369,7 @@ export class AssistantRunner {
           timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
           const tail = reasoner.flush()
           if (tail.length > 0) {
-            await flusher.push('reasoning.delta', { delta: tail })
+            await flusher.pushReasoningDelta(tail)
           }
           await flusher.push('reasoning.completed', { durationMs: timings.reasoningMs ?? 0 })
         }
@@ -384,7 +384,7 @@ export class AssistantRunner {
     const reasoningTail = reasoner.flush()
     if (!answerSeen && reasoningSeen) {
       timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
-      if (reasoningTail.length > 0) await flusher.push('reasoning.delta', { delta: reasoningTail })
+      if (reasoningTail.length > 0) await flusher.pushReasoningDelta(reasoningTail)
       await flusher.push('reasoning.completed', { durationMs: timings.reasoningMs ?? 0 })
     }
     const answerTail = redactor.flush()
@@ -440,6 +440,20 @@ export class AssistantRunner {
     if (shutdownSignal?.aborted) return
     const maintenance = new AbortController()
     const deadline = Date.now() + auxiliaryMaintenanceBudgetMs
+    let policyTimer: ReturnType<typeof setTimeout> | undefined
+    const checkPolicy = async (): Promise<boolean> => {
+      if (maintenance.signal.aborted) return false
+      try {
+        const result = await this.client.maintenancePolicy(claim.run.id, maintenance.signal)
+        if (!result.allowed) maintenance.abort(new Error('assistant sensitive policy changed'))
+      } catch (error) {
+        maintenance.abort(error)
+      }
+      return !maintenance.signal.aborted
+    }
+    const pollPolicy = async (): Promise<void> => {
+      if (await checkPolicy()) policyTimer = setTimeout(() => { void pollPolicy() }, heartbeatIntervalMs)
+    }
     const budgetTimer = setTimeout(
       () => maintenance.abort(new Error('assistant auxiliary maintenance budget exhausted')),
       auxiliaryMaintenanceBudgetMs,
@@ -448,19 +462,23 @@ export class AssistantRunner {
       maintenance.abort(shutdownSignal?.reason)
     }
     shutdownSignal?.addEventListener('abort', abortOnShutdown, { once: true })
+    policyTimer = setTimeout(() => { void pollPolicy() }, heartbeatIntervalMs)
     try {
-      await this.maintainTitle(claim, maintenance.signal, deadline)
-      await this.maintainSummary(claim, maintenance.signal, deadline)
+      await this.maintainTitle(claim, maintenance.signal, deadline, checkPolicy)
+      await this.maintainSummary(claim, maintenance.signal, deadline, checkPolicy)
     } finally {
       clearTimeout(budgetTimer)
+      clearTimeout(policyTimer)
+      maintenance.abort()
       shutdownSignal?.removeEventListener('abort', abortOnShutdown)
     }
   }
 
-  private async maintainTitle(claim: ClaimedAssistantRun, signal: AbortSignal, deadline: number): Promise<void> {
+  private async maintainTitle(claim: ClaimedAssistantRun, signal: AbortSignal, deadline: number, checkPolicy: () => Promise<boolean>): Promise<void> {
     const firstAnswer = claim.context.messages.filter((message) => message.role === 'assistant').length === 0
     if (!firstAnswer) return
     try {
+      if (!await checkPolicy()) return
       const titleRedactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
       const message = await collectAssistantTurn({
         protocol: claim.model.protocol,
@@ -493,7 +511,7 @@ export class AssistantRunner {
     }
   }
 
-  private async maintainSummary(claim: ClaimedAssistantRun, signal: AbortSignal, deadline: number): Promise<void> {
+  private async maintainSummary(claim: ClaimedAssistantRun, signal: AbortSignal, deadline: number, checkPolicy: () => Promise<boolean>): Promise<void> {
     const summarySource = claim.context.summarySource
     if (summarySource === null || summarySource.messages.length === 0) return
     const redactor = claim.sensitivePolicy === 'redact' ? new StreamRedactor() : null
@@ -503,6 +521,7 @@ export class AssistantRunner {
     const input = summaryMaintenanceInput(claim.model.contextWindow, redactor, summarySource)
     if (input === null) return
     try {
+      if (!await checkPolicy()) return
       const message = await collectAssistantTurn({
         protocol: claim.model.protocol,
         baseUrl: claim.model.baseUrl,
@@ -817,6 +836,22 @@ export class EventFlusher {
   #failure: unknown = null
 
   constructor(private readonly submit: (events: readonly AssistantEvent[]) => Promise<void>) {}
+
+  async pushReasoningDelta(delta: string): Promise<void> {
+    let part = ''
+    let bytes = 0
+    for (const character of delta) {
+      const size = Buffer.byteLength(character, 'utf8')
+      if (bytes + size > batchMaximumBytes) {
+        await this.push('reasoning.delta', { delta: part })
+        part = ''
+        bytes = 0
+      }
+      part += character
+      bytes += size
+    }
+    if (part.length > 0) await this.push('reasoning.delta', { delta: part })
+  }
 
   async push(type: string, payload: Record<string, unknown>): Promise<void> {
     if (this.#failure !== null) throw this.#failure
