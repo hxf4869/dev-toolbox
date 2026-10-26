@@ -1,5 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 
 import type { DigestWorkerRequest, DigestWorkerResponse } from './contracts'
 
@@ -189,6 +190,103 @@ describe('DigestToolView copy failure recovery', () => {
   })
 })
 
+describe('DigestToolView copy feedback ownership', () => {
+  it('shows a visible copied state on the button after success, keeps manual recovery on failure, and retracts the feedback on rerun', async () => {
+    const writeText = stubClipboard()
+    writeText.mockRejectedValueOnce(new DOMException('Clipboard write was blocked', 'NotAllowedError'))
+    const wrapper = mount(DigestToolView)
+    await computeText(wrapper, 'abc', SHA256_ABC, 3)
+
+    await resultCopyButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('复制未成功，请选中结果后手动复制。')
+    expect(resultCopyButton(wrapper).text()).toBe('复制摘要')
+    expect(wrapper.get('.sr-only').text()).toBe('')
+
+    await resultCopyButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenNthCalledWith(2, SHA256_ABC)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(resultCopyButton(wrapper).text()).toBe('已复制')
+    expect(wrapper.get('.sr-only').text()).toContain('摘要已复制')
+
+    await runButton(wrapper).trigger('click')
+    expect(resultCopyButton(wrapper).text()).toBe('复制摘要')
+    expect(wrapper.get('.sr-only').text()).toBe('')
+    emitResult(lastWorker(), SHA256_ABC, 3)
+    await flushPromises()
+    expect(wrapper.text()).toContain(SHA256_ABC)
+    expect(resultCopyButton(wrapper).text()).toBe('复制摘要')
+    expect(wrapper.get('.sr-only').text()).toBe('')
+    wrapper.unmount()
+  })
+
+  it('ignores a late clipboard success or failure once the result has been invalidated', async () => {
+    const writeText = stubClipboard()
+    const wrapper = mount(DigestToolView)
+    await computeText(wrapper, 'abc', SHA256_ABC, 3)
+    const lateSuccess = deferred()
+    writeText.mockReturnValueOnce(lateSuccess.promise)
+    await resultCopyButton(wrapper).trigger('click')
+
+    await wrapper.get('#digest-text').setValue('abcd')
+    lateSuccess.resolve()
+    await flushPromises()
+    expect(writeText).toHaveBeenNthCalledWith(1, SHA256_ABC)
+    expect(wrapper.text()).toContain('执行后在此显示')
+    expect(wrapper.get('.sr-only').text()).toBe('')
+    expect(resultCopyButton(wrapper).text()).toBe('复制摘要')
+    expect(resultCopyButton(wrapper).attributes('disabled')).toBeDefined()
+
+    await runButton(wrapper).trigger('click')
+    emitResult(lastWorker(), SHA256_ABCD, 4)
+    await flushPromises()
+    const lateFailure = deferred()
+    writeText.mockReturnValueOnce(lateFailure.promise)
+    await resultCopyButton(wrapper).trigger('click')
+
+    await clearButton(wrapper).trigger('click')
+    lateFailure.reject(new DOMException('Clipboard write was blocked', 'NotAllowedError'))
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.get('.sr-only').text()).toBe('')
+    expect((wrapper.get('#digest-text').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.text()).toContain('执行后在此显示')
+    wrapper.unmount()
+  })
+
+  it('keeps the full feedback window for consecutive copies instead of letting the earlier timer cut it short', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      stubClipboard()
+      const wrapper = mount(DigestToolView)
+      await computeText(wrapper, 'abc', SHA256_ABC, 3)
+
+      await resultCopyButton(wrapper).trigger('click')
+      await flushPromises()
+      expect(resultCopyButton(wrapper).text()).toBe('已复制')
+
+      vi.advanceTimersByTime(800)
+      await resultCopyButton(wrapper).trigger('click')
+      await flushPromises()
+      expect(resultCopyButton(wrapper).text()).toBe('已复制')
+
+      vi.advanceTimersByTime(800)
+      await nextTick()
+      expect(resultCopyButton(wrapper).text()).toBe('已复制')
+      expect(wrapper.get('.sr-only').text()).toContain('摘要已复制')
+
+      vi.advanceTimersByTime(800)
+      await nextTick()
+      expect(resultCopyButton(wrapper).text()).toBe('复制摘要')
+      expect(wrapper.get('.sr-only').text()).toBe('')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 function lastWorker(): FakeWorker {
   return workers.at(-1)!
 }
@@ -199,6 +297,30 @@ function runButton(wrapper: VueWrapper) {
 
 function copyButton(wrapper: VueWrapper) {
   return wrapper.findAll('button').find((button) => button.text() === '复制摘要')!
+}
+
+function resultCopyButton(wrapper: VueWrapper) {
+  return wrapper.get('.result-card header button')
+}
+
+function clearButton(wrapper: VueWrapper) {
+  return wrapper.findAll('button').find((button) => button.text() === '清空')!
+}
+
+function stubClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+  return writeText
+}
+
+function deferred() {
+  let resolve!: () => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 function emitResult(worker: FakeWorker, digest: string, totalBytes: number) {

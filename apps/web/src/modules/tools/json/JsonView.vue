@@ -139,8 +139,9 @@ const selectedAIModel = computed(() =>
   availableAIModels.value.find((model) => model.id === aiModelId.value) ?? null,
 )
 const isBusy = computed(() => running.value || aiRunning.value)
+// 本地 running 时主按钮由模板切换为可用取消，禁用判断只描述非运行态。
 const primaryDisabled = computed(() => {
-  if (running.value || !input.value) return true
+  if (!input.value) return true
   if (activeTab.value !== 'types' || generationSource.value === 'local') return false
   return aiOptionsLoading.value || !selectedAIProvider.value || !selectedAIModel.value || !aiTargetLanguage.value
 })
@@ -714,8 +715,13 @@ function describeAIError(error: unknown): string {
           <span class="ai-scope">只发送当前 JSON 的确认快照；不发送历史、附件或知识条目。</span>
         </template>
       </template>
-      <UiButton variant="primary" :disabled="primaryDisabled" :aria-disabled="aiRunning ? 'true' : undefined" @click="runPrimary">{{ actionLabel }}</UiButton>
-      <UiButton v-if="isBusy" variant="secondary" @click="cancelRunning">取消</UiButton>
+      <UiButton
+        :variant="running ? 'danger' : 'primary'"
+        :disabled="!running && primaryDisabled"
+        :aria-disabled="aiRunning ? 'true' : undefined"
+        @click="running ? cancelRunning() : runPrimary($event)"
+      >{{ running ? '取消' : actionLabel }}</UiButton>
+      <UiButton v-if="aiRunning" variant="secondary" @click="cancelRunning">取消</UiButton>
     </div>
 
     <div id="json-feedback" tabindex="-1">

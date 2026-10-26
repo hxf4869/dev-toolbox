@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 
 import UiButton from '../../components/ui/UiButton.vue'
 import UiIcon from '../../components/ui/UiIcon.vue'
@@ -10,17 +10,27 @@ import { formatBytes, formatDateTime, type ComponentStatus, type OperationsStatu
 const status = ref<OperationsStatus | null>(null)
 const loading = ref(true)
 const errorMessage = ref('')
+// UiButton 根节点是原生 button；重新读取期间重试控件卸载、刷新控件 disabled，只有读取提示能承接焦点。
+const refreshButton = ref<{ $el: HTMLButtonElement } | null>(null)
+const retryButton = ref<HTMLButtonElement | null>(null)
+const loadingNotice = ref<HTMLElement | null>(null)
 
 const overallLabel = computed(() => {
   if (!status.value) return '读取中'
   return status.value.overall === 'healthy' ? '全部可用' : status.value.overall === 'degraded' ? '部分降级' : '核心不可用'
 })
 
-onMounted(() => void loadStatus())
+onMounted(() => void loadStatus(false))
 
-async function loadStatus() {
+// 首次自动读取不接管焦点；用户触发的读取在等待期聚焦读取提示，结束后仅在焦点已丢失时回到重试或刷新控件。
+async function loadStatus(restoreFocus: boolean) {
+  status.value = null
   loading.value = true
   errorMessage.value = ''
+  if (restoreFocus) {
+    await nextTick()
+    loadingNotice.value?.focus()
+  }
   try {
     status.value = await apiRequest<OperationsStatus>('/api/v1/operations/status')
   } catch (error) {
@@ -28,6 +38,14 @@ async function loadStatus() {
   } finally {
     loading.value = false
   }
+  if (!restoreFocus) return
+  await nextTick()
+  if (document.activeElement && document.activeElement !== document.body) return
+  ;(errorMessage.value ? retryButton.value : refreshButton.value?.$el)?.focus()
+}
+
+function reloadStatus() {
+  void loadStatus(true)
 }
 
 function componentIcon(id: ComponentStatus['id']): 'monitor' | 'boxes' | 'sparkles' | 'paperclip' {
@@ -65,15 +83,15 @@ function releaseIcon(id: string): 'paperclip' | 'shield-check' | 'search' | 'spa
     <template #actions>
       <div class="operations-heading-actions">
         <span v-if="status" class="settings-status" :class="`settings-status--${status.overall === 'healthy' ? 'success' : status.overall === 'degraded' ? 'warning' : 'danger'}`">{{ overallLabel }}</span>
-        <UiButton variant="secondary" :disabled="loading" @click="loadStatus"><UiIcon name="rotate-ccw" />刷新</UiButton>
+        <UiButton ref="refreshButton" variant="secondary" :disabled="loading" @click="reloadStatus"><UiIcon name="rotate-ccw" />刷新</UiButton>
       </div>
     </template>
 
     <template #notices>
-      <div v-if="errorMessage" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" /><span>{{ errorMessage }}</span><button type="button" @click="loadStatus">重新读取</button></div>
+      <div v-if="errorMessage" class="settings-notice settings-notice--danger" role="alert"><UiIcon name="triangle-alert" /><span>{{ errorMessage }}</span><button ref="retryButton" type="button" @click="reloadStatus">重新读取</button></div>
     </template>
 
-    <div v-if="loading" class="settings-loading"><span class="settings-spinner" />正在读取系统状态…</div>
+    <div v-if="loading" ref="loadingNotice" class="settings-loading" aria-live="polite" tabindex="-1"><span class="settings-spinner" aria-hidden="true" />正在读取系统状态…</div>
 
     <template v-else-if="status">
       <p class="status-meta">版本 {{ status.version }} · Schema {{ status.schemaVersion }} · 检查于 {{ formatDateTime(status.checkedAt) }}</p>

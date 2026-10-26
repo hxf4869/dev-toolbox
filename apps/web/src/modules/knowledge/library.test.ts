@@ -355,6 +355,7 @@ describe('library navigation stale response ownership', () => {
 
     expect(library.tags.map((tag) => tag.id)).toEqual(['tag-new'])
     expect(library.navigationLoading).toBe(false)
+    expect(library.navigationError, '迟到旧错不得复活为共享导航错误').toBe('')
   })
 
   it('still rejects with the specific error for the latest navigation failure', async () => {
@@ -370,5 +371,6 @@ describe('library navigation stale response ownership', () => {
 
     await expect(library.loadNavigation()).rejects.toThrow('目录暂时不可用')
     expect(library.navigationLoading).toBe(false)
+    expect(library.navigationError, '最新读取失败记录共享导航错误').toBe('目录暂时不可用')
   })
 })

@@ -76,6 +76,7 @@ let previewReturnFocus: HTMLElement | null = null
 
 let prepGeneration = 0
 let preflightGeneration = 0
+let pasteGeneration = 0
 let prepTimer: number | undefined
 
 const run = useTranslateRun({
@@ -213,6 +214,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('online', handleOnlineChange)
   window.clearTimeout(prepTimer)
+  pasteGeneration += 1
   run.dispose()
 })
 
@@ -221,6 +223,8 @@ watch([inputText, protectEnabled], () => {
 })
 
 watch([inputText, protectEnabled, sourceLanguage, targetLanguage], () => {
+  // 输入上下文已变化，等待中的粘贴读取不再代表用户此刻想要的原文。
+  pasteGeneration += 1
   if (isBusy.value) return
   preflightGeneration += 1
   preflightRunning.value = false
@@ -302,15 +306,29 @@ function swapLanguages() {
 
 async function pasteInput() {
   if (isBusy.value) return
+  const generation = ++pasteGeneration
   try {
-    inputText.value = await navigator.clipboard.readText()
+    const text = await navigator.clipboard.readText()
+    if (pasteStale(generation)) return
+    inputText.value = text
+    swapNotice.value = ''
   } catch {
+    if (pasteStale(generation)) return
     swapNotice.value = '浏览器未允许读取剪贴板，请使用系统粘贴快捷键。'
   }
 }
 
+/**
+ * 读取完成时若已被更新的粘贴/清空/上下文变化取代，或在它之后已有一次有效预检开始，迟到结果永久丢弃；
+ * 实际运行中（isBusy）也不写入。预检进行中用户主动发起的新粘贴不在此列，与手输一样生效并作废旧预检。
+ */
+function pasteStale(generation: number): boolean {
+  return generation !== pasteGeneration || isBusy.value
+}
+
 function clearInput() {
   if (isBusy.value) return
+  pasteGeneration += 1
   inputText.value = ''
   swapNotice.value = ''
 }
@@ -331,6 +349,7 @@ async function startTranslation() {
   const current = prepared.value
   if (!current || current.chunks.length === 0) return
   const generation = ++preflightGeneration
+  pasteGeneration += 1
   preflightRunning.value = true
   preflightError.value = null
   try {
@@ -356,6 +375,7 @@ async function startTranslation() {
 async function requestReplanPlan(seeds: TranslateChunkSeed[]) {
   if (seeds.length === 0) return
   const generation = ++preflightGeneration
+  pasteGeneration += 1
   preflightRunning.value = true
   preflightError.value = null
   try {

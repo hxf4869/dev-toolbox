@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 import UiButton from '../../../components/ui/UiButton.vue'
 import {
@@ -17,19 +17,44 @@ const input = ref('')
 const result = ref('')
 const errorMessage = ref('')
 const copyMessage = ref('')
+const copyError = ref('')
+let inputContext = 0
+let copyContext = 0
+let copyTimer: number | undefined
 
 const inputBytes = computed(() => utf8ByteLength(input.value))
 const resultBytes = computed(() => utf8ByteLength(result.value))
 
+function clearCopyTimer() {
+  if (copyTimer !== undefined) {
+    window.clearTimeout(copyTimer)
+    copyTimer = undefined
+  }
+}
+
+onBeforeUnmount(() => {
+  copyContext += 1
+  clearCopyTimer()
+})
+
+function claimInputContext(): number {
+  inputContext += 1
+  return inputContext
+}
+
 function invalidateResult() {
+  claimInputContext()
   result.value = ''
   errorMessage.value = ''
   copyMessage.value = ''
+  copyError.value = ''
 }
 
 function run() {
+  claimInputContext()
   errorMessage.value = ''
   copyMessage.value = ''
+  copyError.value = ''
   try {
     result.value = transformBase64(input.value, operation.value, variant.value)
   } catch (error) {
@@ -40,38 +65,57 @@ function run() {
 }
 
 async function pasteInput() {
+  const context = claimInputContext()
   errorMessage.value = ''
+  copyError.value = ''
   try {
-    input.value = await navigator.clipboard.readText()
+    const text = await navigator.clipboard.readText()
+    if (context !== inputContext) return
+    input.value = text
     invalidateResult()
   } catch {
+    if (context !== inputContext) return
     errorMessage.value = '浏览器未允许读取剪贴板，请使用系统粘贴快捷键。'
   }
 }
 
 async function copyResult() {
+  const context = inputContext
+  const call = ++copyContext
+  clearCopyTimer()
+  copyError.value = ''
   try {
     await navigator.clipboard.writeText(result.value)
+    if (context !== inputContext || call !== copyContext) return
     copyMessage.value = '结果已复制'
-    window.setTimeout(() => (copyMessage.value = ''), 1600)
+    copyTimer = window.setTimeout(() => {
+      copyTimer = undefined
+      copyMessage.value = ''
+    }, 1600)
   } catch {
-    errorMessage.value = '复制未成功，请选中结果后手动复制。'
+    if (context !== inputContext || call !== copyContext) return
+    copyMessage.value = ''
+    copyError.value = '复制未成功，请选中结果后手动复制。'
   }
 }
 
 function clearAll() {
+  claimInputContext()
   input.value = ''
   result.value = ''
   errorMessage.value = ''
   copyMessage.value = ''
+  copyError.value = ''
 }
 
 function swapValues() {
+  claimInputContext()
   const previousInput = input.value
   input.value = result.value
   result.value = previousInput
   errorMessage.value = ''
   copyMessage.value = ''
+  copyError.value = ''
 }
 </script>
 
@@ -101,7 +145,9 @@ function swapValues() {
       </fieldset>
     </section>
 
-    <p v-if="errorMessage" class="error-summary" role="alert">{{ errorMessage }}</p>
+    <p v-if="errorMessage || copyError" class="error-summary" role="alert">
+      {{ copyError || errorMessage }}
+    </p>
 
     <div class="converter-grid">
       <section class="panel">

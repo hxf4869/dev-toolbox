@@ -48,6 +48,146 @@ describe('M5 operations and help', () => {
     wrapper.unmount()
   })
 
+  it('discards the previous snapshot during a refresh and only shows the newly read status', async () => {
+    const respondFetch: Array<(body: unknown, status?: number) => void> = []
+    const requests: string[] = []
+    vi.stubGlobal('fetch', vi.fn((path: unknown, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${String(path)}`)
+      return new Promise<Response>((resolve) => {
+        respondFetch.push((body: unknown, status = 200) => resolve(jsonResponse(body, status)))
+      })
+    }))
+
+    const wrapper = await mountWithRouter(OperationsStatusView, '/settings/operations')
+    respondFetch[0](statusFixture())
+    await flushPromises()
+    expect(requests).toEqual(['GET /api/v1/operations/status'])
+    expect(document.body.textContent).toContain('部分降级')
+    expect(document.body.textContent).toContain('v1.0.1')
+
+    buttonByText('刷新').click()
+    await flushPromises()
+    expect(requests).toHaveLength(2)
+    expect(document.body.textContent).toContain('正在读取系统状态')
+    expect(document.body.textContent).not.toContain('部分降级')
+    expect(document.body.textContent).not.toContain('v1.0.1')
+    expect(buttonByText('刷新').disabled).toBe(true)
+
+    respondFetch[1]({ error: { code: 'INTERNAL_ERROR', message: '状态暂时不可用' } }, 503)
+    await flushPromises()
+    expect(document.body.textContent).toContain('状态暂时不可用')
+    expect(document.body.textContent).not.toContain('系统状态概览')
+    expect(document.body.textContent).not.toContain('当前状态摘要')
+    expect(document.body.textContent).not.toContain('v1.0.1')
+
+    buttonByText('重新读取').click()
+    await flushPromises()
+    expect(requests).toEqual([
+      'GET /api/v1/operations/status',
+      'GET /api/v1/operations/status',
+      'GET /api/v1/operations/status',
+    ])
+    expect(document.body.textContent).toContain('正在读取系统状态')
+    expect(document.body.textContent).not.toContain('系统状态概览')
+
+    const refreshed = statusFixture()
+    refreshed.version = 'v1.0.2'
+    refreshed.release.candidateVersion = 'v1.0.2'
+    respondFetch[2](refreshed)
+    await flushPromises()
+    expect(document.body.textContent).toContain('v1.0.2')
+    expect(document.body.textContent).not.toContain('v1.0.1')
+    expect(document.body.textContent).toContain('部分降级')
+    wrapper.unmount()
+  })
+
+  it('keeps keyboard focus on the loading notice while retrying and returns it to the retry control after another failure', async () => {
+    const fetchStub = stubDeferredFetch()
+    const wrapper = await mountWithRouter(OperationsStatusView, '/settings/operations')
+    expect(document.activeElement).toBe(document.body)
+    fetchStub.respond(0, { error: { code: 'INTERNAL_ERROR', message: '状态暂时不可用' } }, 503)
+    await flushPromises()
+    expect(document.body.textContent).toContain('状态暂时不可用')
+    expect(document.activeElement).toBe(document.body)
+
+    const retry = buttonByText('重新读取')
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click()
+    await flushPromises()
+    expect(fetchStub.requests).toEqual(['GET /api/v1/operations/status', 'GET /api/v1/operations/status'])
+    expect(document.body.textContent).toContain('正在读取系统状态')
+    expectLoadingNoticeFocused(wrapper.element)
+
+    fetchStub.respond(1, { error: { code: 'INTERNAL_ERROR', message: '状态暂时不可用' } }, 503)
+    await flushPromises()
+    expect(document.body.textContent).toContain('状态暂时不可用')
+    expect(document.activeElement).toBe(buttonByText('重新读取'))
+    expect(buttonByText('重新读取').disabled).toBe(false)
+
+    buttonByText('重新读取').click()
+    await flushPromises()
+    expect(fetchStub.requests).toHaveLength(3)
+    expectLoadingNoticeFocused(wrapper.element)
+
+    fetchStub.respond(2, statusFixture())
+    await flushPromises()
+    expect(document.body.textContent).toContain('系统状态概览')
+    expect(document.activeElement).toBe(buttonByText('刷新'))
+    expect(buttonByText('刷新').disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('does not drop focus onto the disabled refresh control during a keyboard refresh', async () => {
+    const fetchStub = stubDeferredFetch()
+    const wrapper = await mountWithRouter(OperationsStatusView, '/settings/operations')
+    fetchStub.respond(0, statusFixture())
+    await flushPromises()
+    expect(document.body.textContent).toContain('系统状态概览')
+    expect(document.activeElement).toBe(document.body)
+
+    const refresh = buttonByText('刷新')
+    refresh.focus()
+    expect(document.activeElement).toBe(refresh)
+    refresh.click()
+    await flushPromises()
+    expect(fetchStub.requests).toHaveLength(2)
+    expect(document.body.textContent).toContain('正在读取系统状态')
+    expect(buttonByText('刷新').disabled).toBe(true)
+    expectLoadingNoticeFocused(wrapper.element)
+
+    fetchStub.respond(1, statusFixture())
+    await flushPromises()
+    expect(document.body.textContent).toContain('系统状态概览')
+    expect(document.activeElement).toBe(buttonByText('刷新'))
+    expect(buttonByText('刷新').disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('leaves focus on the control the user moved to when a late response arrives', async () => {
+    const fetchStub = stubDeferredFetch()
+    const wrapper = await mountWithRouter(OperationsStatusView, '/settings/operations')
+    fetchStub.respond(0, { error: { code: 'INTERNAL_ERROR', message: '状态暂时不可用' } }, 503)
+    await flushPromises()
+
+    const retry = buttonByText('重新读取')
+    retry.focus()
+    retry.click()
+    await flushPromises()
+    expectLoadingNoticeFocused(wrapper.element)
+
+    const subnavLink = document.querySelector<HTMLAnchorElement>('.settings-subnav a')
+    if (!subnavLink) throw new Error('settings subnav link not found')
+    subnavLink.focus()
+    expect(document.activeElement).toBe(subnavLink)
+
+    fetchStub.respond(1, statusFixture())
+    await flushPromises()
+    expect(document.body.textContent).toContain('系统状态概览')
+    expect(document.activeElement).toBe(subnavLink)
+    wrapper.unmount()
+  })
+
   it('documents the v1 boundaries without advertising deferred capabilities', async () => {
     const wrapper = await mountWithRouter(HelpView, '/help')
     await flushPromises()
@@ -113,4 +253,31 @@ function buttonByText(text: string) {
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+}
+
+function stubDeferredFetch() {
+  const requests: string[] = []
+  const responders: Array<(body: unknown, status?: number) => void> = []
+  vi.stubGlobal('fetch', vi.fn((path: unknown, init?: RequestInit) => {
+    requests.push(`${init?.method ?? 'GET'} ${String(path)}`)
+    return new Promise<Response>((resolve) => {
+      responders.push((body: unknown, status = 200) => resolve(jsonResponse(body, status)))
+    })
+  }))
+  return {
+    requests,
+    respond(index: number, body: unknown, status = 200) {
+      const responder = responders[index]
+      if (!responder) throw new Error(`no pending request #${index}`)
+      responder(body, status)
+    },
+  }
+}
+
+function expectLoadingNoticeFocused(root: Element) {
+  const active = document.activeElement
+  expect(active).not.toBe(document.body)
+  expect(active !== null && root.contains(active)).toBe(true)
+  expect((active as HTMLButtonElement | null)?.disabled).toBeFalsy()
+  expect(active?.textContent).toContain('正在读取系统状态')
 }

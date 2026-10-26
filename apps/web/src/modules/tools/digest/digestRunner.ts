@@ -85,7 +85,7 @@ export class DigestRunner {
 }
 
 export function normalizeExpectedDigest(value: string): string {
-  return value.trim().replace(/^0x/i, '').replace(/[\t\n\f\r ]+/g, '').toLowerCase()
+  return value.replace(/[\t\n\v\f\r ]+/g, '').replace(/^0x/i, '').toLowerCase()
 }
 
 export function compareDigest(

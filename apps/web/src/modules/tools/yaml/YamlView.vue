@@ -147,8 +147,7 @@ function cancelLocalRequest() {
     </div>
     <div id="yaml-actions" class="actions">
       <p>格式化会尽力保留注释，但注释位置可能调整；只有点击应用后才改写输入。</p>
-      <UiButton variant="primary" :disabled="running || !input" @click="run">{{ actionLabel }}</UiButton>
-      <UiButton v-if="running" variant="secondary" @click="cancelRunning">取消</UiButton>
+      <UiButton :variant="running ? 'danger' : 'primary'" :disabled="!running && !input" @click="running ? cancelRunning() : run()">{{ running ? '取消' : actionLabel }}</UiButton>
       <UiButton v-if="mode === 'format' && output" variant="secondary" @click="applyFormatted">应用格式化</UiButton>
     </div>
     <div id="yaml-feedback" tabindex="-1">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { useAuthStore } from '../../app/auth'
@@ -13,6 +13,8 @@ const auth = useAuthStore()
 const loggingOut = ref(false)
 const logoutError = ref('')
 const logoutButton = ref<HTMLButtonElement | null>(null)
+const primaryNav = ref<HTMLElement | null>(null)
+let navResizeObserver: ResizeObserver | undefined
 
 const links = [
   { label: '工作台', title: '工作台', to: '/', icon: 'house' as const, active: () => route.name === 'home' },
@@ -55,6 +57,39 @@ const links = [
 
 const themeLabel = computed(() => theme.resolved === 'dark' ? '切换为浅色主题' : '切换为深色主题')
 
+const activeTo = computed(() => links.find((link) => link.active())?.to ?? null)
+
+// 手机端本 nav 横向滚动时，仅当前入口被裁切才滚回可见范围。不用 scrollIntoView（可能连带
+// 滚动页面/主内容），只直接改本 nav 的 scrollLeft：无动画、reduced motion 安全，也不抢焦点。
+function revealActiveEntry(): void {
+  const nav = primaryNav.value
+  const active = nav?.querySelector<HTMLElement>('[aria-current="page"]')
+  if (!nav || !active) return
+  const navRect = nav.getBoundingClientRect()
+  const entryRect = active.getBoundingClientRect()
+  const entryStart = entryRect.left - navRect.left + nav.scrollLeft
+  const entryEnd = entryStart + entryRect.width
+  if (entryStart >= nav.scrollLeft && entryEnd <= nav.scrollLeft + navRect.width) return
+  nav.scrollLeft = entryStart < nav.scrollLeft ? entryStart : entryEnd - navRect.width
+}
+
+watch(activeTo, () => revealActiveEntry(), { flush: 'post' })
+
+onMounted(async () => {
+  await nextTick()
+  revealActiveEntry()
+  if (typeof ResizeObserver === 'undefined') return
+  const nav = primaryNav.value
+  if (!nav) return
+  navResizeObserver = new ResizeObserver(revealActiveEntry)
+  navResizeObserver.observe(nav)
+})
+
+onBeforeUnmount(() => {
+  navResizeObserver?.disconnect()
+  navResizeObserver = undefined
+})
+
 async function logout() {
   loggingOut.value = true
   logoutError.value = ''
@@ -82,7 +117,7 @@ function dismissLogoutError() {
       <span>开发百宝箱</span>
     </RouterLink>
 
-    <nav class="rail__primary" aria-label="全局导航">
+    <nav ref="primaryNav" class="rail__primary" aria-label="全局导航">
       <RouterLink
         v-for="link in links"
         :key="link.to"
@@ -247,6 +282,6 @@ function dismissLogoutError() {
 
 @media (max-width: 520px) {
   .rail__help { display: none; }
-  .rail__item { min-width: 40px; min-height: 44px; padding-inline: var(--space-1); }
+  .rail__item { min-width: 44px; min-height: 44px; padding-inline: var(--space-1); }
 }
 </style>

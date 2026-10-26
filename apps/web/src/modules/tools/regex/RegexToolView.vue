@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import UiButton from '../../../components/ui/UiButton.vue'
+import CopyButton from '../shared/ui/CopyButton.vue'
 import ProcessingBadge from '../shared/ui/ProcessingBadge.vue'
 import { REGEX_MATCH_DISPLAY_LIMIT, REGEX_TEXT_LIMIT, type RegexRunResult } from './contracts'
 import { RegexRunner } from './regexRunner'
@@ -91,7 +92,7 @@ function formatBytes(value: number): string {
         <label for="regex-text">测试文本</label><textarea id="regex-text" v-model="text" rows="12" :disabled="running" spellcheck="false" />
         <p class="counter" :class="{ over: textBytes > REGEX_TEXT_LIMIT }">{{ formatBytes(textBytes) }} / 1 MiB</p>
         <label for="regex-replacement">替换模板（只预览）</label><input id="regex-replacement" v-model="replacement" :disabled="running" spellcheck="false">
-        <div class="actions"><UiButton v-if="!running" variant="primary" @click="runRegex">运行正则</UiButton><UiButton v-else variant="danger" @click="cancelRun">取消运行</UiButton></div>
+        <div class="actions"><UiButton :variant="running ? 'danger' : 'primary'" @click="running ? cancelRun() : runRegex()">{{ running ? '取消运行' : '运行正则' }}</UiButton></div>
       </section>
 
       <section class="tool-card result-card">
@@ -106,7 +107,7 @@ function formatBytes(value: number): string {
             </article>
           </div>
           <p v-else class="empty-inline">没有匹配；原测试文本保持不变。</p>
-          <h3>替换预览</h3><p v-if="result.matchLimitReached" class="preview-omitted">结果规模过大，本次未生成替换预览</p><pre v-else class="replacement-preview">{{ result.replacementPreview }}</pre>
+          <div class="preview-heading"><h3>替换预览</h3><CopyButton v-if="!result.matchLimitReached" :text="result.replacementPreview ?? ''" label="复制替换预览" /></div><p v-if="result.matchLimitReached" class="preview-omitted">结果规模过大，本次未生成替换预览</p><pre v-else class="replacement-preview">{{ result.replacementPreview }}</pre>
         </template>
         <div v-else class="empty-result"><strong>运行后在此显示</strong><span>修改内容不会自动执行或自动重试。</span></div>
       </section>
@@ -118,6 +119,7 @@ function formatBytes(value: number): string {
 .tool-page { width: min(100%, 1180px); padding: var(--space-6); }
 .tool-header, .title-line, .match-list article header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .tool-header { align-items: flex-start; }
+.title-line { flex-wrap: wrap; }
 .breadcrumb { margin: 0 0 var(--space-2); color: var(--text-muted); font-size: 12px; }
 h1, h2, h3, p { margin-top: 0; }
 h1 { margin-bottom: 0; font-size: 26px; }
@@ -151,6 +153,8 @@ pre { margin: var(--space-2) 0 0; overflow: auto; white-space: pre-wrap; overflo
 .match-list dl div { min-width: 0; padding-top: var(--space-2); border-top: 1px solid var(--border-subtle); }
 .match-list dt { color: var(--text-muted); font-size: 10px; }
 .match-list dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.preview-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-5); }
+.preview-heading h3 { margin: 0; }
 .replacement-preview { min-height: 120px; padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); background: var(--bg-code); }
 .preview-omitted { padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); color: var(--warning); }
 .empty-result { display: grid; min-height: 420px; place-content: center; gap: var(--space-2); color: var(--text-muted); text-align: center; }

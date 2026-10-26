@@ -153,7 +153,10 @@ export function rebuildUrl(parsed: ParsedUrl, rows: QueryRow[]): string {
   const includeQuery = parsed.hasQuery || rows.length > 0
   const queryPart = includeQuery ? `?${serializeQueryRows(rows)}` : ''
   const fragmentPart = parsed.hasFragment ? `#${parsed.fragment}` : ''
-  return `${parsed.prefixBeforeQuery}${queryPart}${fragmentPart}`
+  const rebuilt = `${parsed.prefixBeforeQuery}${queryPart}${fragmentPart}`
+  assertUrlInputLimit(rebuilt)
+  validatePercentEscapes(rebuilt)
+  return rebuilt
 }
 
 function splitHostPort(authority: string): { host: string; port: string } {

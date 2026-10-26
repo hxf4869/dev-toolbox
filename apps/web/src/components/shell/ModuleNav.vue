@@ -89,12 +89,21 @@ watch(() => route.fullPath, () => {
   if (compact.value && props.open) emit('close')
 })
 
-// 只在路由或搜索词变化时展开当前工具所在组；同路由、同查询下的手动折叠保持不变。
+// 只在路由或搜索词变化时展开分组：查询非空时展开全部工具分组，查询为空时只展开当前工具所在组；
+// 同路由、同规范化查询下的手动折叠保持不变。
 watch(
   [() => route.name, normalizedToolQuery],
   async () => {
     if (moduleName.value !== 'tools') return
     await nextTick()
+    if (normalizedToolQuery.value) {
+      // 模板里编码组是静态 open、其余两组的 :open 在非空查询间恒为 true，Vue 不会重新 patch，
+      // 被手动折叠的组不会随新查询重开，这里主动展开，让匹配入口可见。
+      navRoot.value?.querySelectorAll<HTMLDetailsElement>('details').forEach((group) => {
+        group.open = true
+      })
+      return
+    }
     const currentGroup = navRoot.value
       ?.querySelector('details nav a.active')
       ?.closest('details') as HTMLDetailsElement | null
@@ -123,7 +132,10 @@ function updateCompact(event: MediaQueryList | MediaQueryListEvent) {
 function filterTools(tools: typeof V2_TOOLS) {
   if (!normalizedToolQuery.value) return tools
   return tools.filter((tool) =>
-    `${tool.name} ${tool.description}`.toLocaleLowerCase().includes(normalizedToolQuery.value),
+    [tool.name, tool.description, ...(tool.searchTerms ?? [])]
+      .join(' ')
+      .toLocaleLowerCase()
+      .includes(normalizedToolQuery.value),
   )
 }
 

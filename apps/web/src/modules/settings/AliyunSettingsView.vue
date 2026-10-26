@@ -15,6 +15,7 @@ import {
   validateAliyunSettingsForm,
   type AliyunCredentialsState,
   type AliyunSettings,
+  type AliyunSettingsFormInput,
   type AliyunSettingsPutBody,
   type AliyunStatusState,
   type AliyunUsage,
@@ -28,6 +29,7 @@ const loading = ref(true)
 const busy = ref(false)
 const pageError = ref('')
 const usageError = ref('')
+const usageLoading = ref(false)
 const formError = ref('')
 const savedNotice = ref(false)
 
@@ -61,6 +63,12 @@ const policyCopied = ref(false)
 const policyCopyError = ref('')
 let policyFeedbackTimer: number | undefined
 
+// 保存成功后待与服务端回显合并的点击快照：只在内存中存活到下一次 settings 读取成功，读取失败时保留给手动重试。
+let pendingMergeBase: AliyunSettingsFormInput | null = null
+// 服务端回显程序性回写表单期间置位，用于把它与用户编辑区分开。
+let applyingServerState = false
+let usageRequestSeq = 0
+
 const credentialsConfigured = computed(() => credentialsState.value.configured)
 const concurrencyIssue = computed(() =>
   concurrencyIssueFor(ownerConcurrency.value, globalConcurrency.value),
@@ -87,12 +95,33 @@ watch(deleteConfirmOpen, async (open, wasOpen) => {
 onMounted(() => void loadState())
 onBeforeUnmount(() => window.clearTimeout(policyFeedbackTimer))
 
+// 用户再次编辑后清掉旧的通用成功反馈，避免它被读成“当前草稿已保存”；程序性回写不触发。
+watch(
+  [
+    accessKeyId,
+    accessKeySecret,
+    generalMonthlyLimit,
+    professionalMonthlyLimit,
+    autoUseProfessional,
+    professionalScene,
+    ocrMonthlyLimit,
+    ownerConcurrency,
+    globalConcurrency,
+  ],
+  () => {
+    if (savedNotice.value && !applyingServerState) savedNotice.value = false
+  },
+  { flush: 'sync' },
+)
+
 async function loadState() {
   loading.value = true
   pageError.value = ''
   void loadUsage()
   try {
-    applySettings(await apiRequest<AliyunSettings>('/api/v1/aliyun/settings'))
+    const response = await apiRequest<AliyunSettings>('/api/v1/aliyun/settings')
+    applySettings(response, pendingMergeBase)
+    pendingMergeBase = null
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : '请求未成功，请稍后重试'
   } finally {
@@ -101,47 +130,111 @@ async function loadState() {
 }
 
 async function loadUsage() {
+  // 归属序号：并发读取时只有最新一次的完成结果能落库；更早发出却更晚到达的成功/失败一律丢弃。
+  const seq = ++usageRequestSeq
+  // 开始即清旧账本：读取在途期间不显示旧用量，也不拿旧账本做客户端额度判断。
+  usage.value = null
   usageError.value = ''
+  usageLoading.value = true
+  let nextUsage: AliyunUsage | null = null
+  let nextError = ''
   try {
-    usage.value = await apiRequest<AliyunUsage>('/api/v1/aliyun/usage/current')
+    nextUsage = await apiRequest<AliyunUsage>('/api/v1/aliyun/usage/current')
   } catch (error) {
-    usage.value = null
-    usageError.value =
+    nextError =
       error instanceof Error ? `${error.message} 请重试；表单仍可编辑。` : '读取本地保护账本失败，请重试。'
   }
+  if (seq !== usageRequestSeq) return
+  usage.value = nextUsage
+  usageError.value = nextError
+  usageLoading.value = false
 }
 
-function applySettings(response: AliyunSettings) {
+function applySettings(response: AliyunSettings, base: AliyunSettingsFormInput | null = null) {
   credentialsState.value = response.credentials
   statusState.value = response.status
-  generalMonthlyLimit.value = String(response.translation.generalMonthlyLimit)
-  professionalMonthlyLimit.value = String(response.translation.professionalMonthlyLimit)
-  autoUseProfessional.value = response.translation.autoUseProfessional
-  professionalScene.value = response.translation.professionalScene ?? ''
-  ocrMonthlyLimit.value = String(response.ocr.monthlyLimit)
-  ownerConcurrency.value = String(response.concurrency.owner)
-  globalConcurrency.value = String(response.concurrency.global)
+  applyingServerState = true
+  try {
+    // 带保存快照基准时，只回写仍等于快照（未被编辑）的字段；保存期间输入的下一份草稿保留。
+    if (!base || sameFormValue(generalMonthlyLimit.value, base.generalMonthlyLimit)) {
+      generalMonthlyLimit.value = String(response.translation.generalMonthlyLimit)
+    }
+    if (!base || sameFormValue(professionalMonthlyLimit.value, base.professionalMonthlyLimit)) {
+      professionalMonthlyLimit.value = String(response.translation.professionalMonthlyLimit)
+    }
+    if (!base || autoUseProfessional.value === base.autoUseProfessional) {
+      autoUseProfessional.value = response.translation.autoUseProfessional
+    }
+    if (!base || professionalScene.value === base.professionalScene) {
+      professionalScene.value = response.translation.professionalScene ?? ''
+    }
+    if (!base || sameFormValue(ocrMonthlyLimit.value, base.ocrMonthlyLimit)) {
+      ocrMonthlyLimit.value = String(response.ocr.monthlyLimit)
+    }
+    if (!base || sameFormValue(ownerConcurrency.value, base.ownerConcurrency)) {
+      ownerConcurrency.value = String(response.concurrency.owner)
+    }
+    if (!base || sameFormValue(globalConcurrency.value, base.globalConcurrency)) {
+      globalConcurrency.value = String(response.concurrency.global)
+    }
+  } finally {
+    applyingServerState = false
+  }
 }
 
-function buildPutBody(): AliyunSettingsPutBody {
-  const scene = ALIYUN_SCENES.find((entry) => entry.code === professionalScene.value)
+/** type=number 的 v-model 可能给 number 也可能给 string，按字符串形式比较。 */
+function sameFormValue(current: string | number, base: string | number) {
+  return String(current) === String(base)
+}
+
+function currentFormInput(): AliyunSettingsFormInput {
+  return {
+    credentialsConfigured: credentialsConfigured.value,
+    accessKeyId: accessKeyId.value,
+    accessKeySecret: accessKeySecret.value,
+    generalMonthlyLimit: generalMonthlyLimit.value,
+    professionalMonthlyLimit: professionalMonthlyLimit.value,
+    autoUseProfessional: autoUseProfessional.value,
+    professionalScene: professionalScene.value,
+    ocrMonthlyLimit: ocrMonthlyLimit.value,
+    ownerConcurrency: ownerConcurrency.value,
+    globalConcurrency: globalConcurrency.value,
+  }
+}
+
+function formMatchesSnapshot(snapshot: AliyunSettingsFormInput) {
+  return (
+    sameFormValue(generalMonthlyLimit.value, snapshot.generalMonthlyLimit) &&
+    sameFormValue(professionalMonthlyLimit.value, snapshot.professionalMonthlyLimit) &&
+    autoUseProfessional.value === snapshot.autoUseProfessional &&
+    professionalScene.value === snapshot.professionalScene &&
+    sameFormValue(ocrMonthlyLimit.value, snapshot.ocrMonthlyLimit) &&
+    sameFormValue(ownerConcurrency.value, snapshot.ownerConcurrency) &&
+    sameFormValue(globalConcurrency.value, snapshot.globalConcurrency) &&
+    accessKeyId.value === snapshot.accessKeyId &&
+    accessKeySecret.value === snapshot.accessKeySecret
+  )
+}
+
+function buildPutBody(input: AliyunSettingsFormInput): AliyunSettingsPutBody {
+  const scene = ALIYUN_SCENES.find((entry) => entry.code === input.professionalScene)
   const body: AliyunSettingsPutBody = {
     translation: {
-      generalMonthlyLimit: Number(generalMonthlyLimit.value),
-      professionalMonthlyLimit: Number(professionalMonthlyLimit.value),
-      autoUseProfessional: autoUseProfessional.value,
+      generalMonthlyLimit: Number(input.generalMonthlyLimit),
+      professionalMonthlyLimit: Number(input.professionalMonthlyLimit),
+      autoUseProfessional: input.autoUseProfessional,
       professionalScene: scene ? scene.code : null,
     },
-    ocr: { monthlyLimit: Number(ocrMonthlyLimit.value) },
+    ocr: { monthlyLimit: Number(input.ocrMonthlyLimit) },
     concurrency: {
-      owner: Number(ownerConcurrency.value),
-      global: Number(globalConcurrency.value),
+      owner: Number(input.ownerConcurrency),
+      global: Number(input.globalConcurrency),
     },
   }
-  if (accessKeyId.value.trim() && accessKeySecret.value) {
+  if (input.accessKeyId.trim() && input.accessKeySecret) {
     body.credentials = {
-      accessKeyId: accessKeyId.value.trim(),
-      accessKeySecret: accessKeySecret.value,
+      accessKeyId: input.accessKeyId.trim(),
+      accessKeySecret: input.accessKeySecret,
     }
   }
   return body
@@ -150,38 +243,36 @@ function buildPutBody(): AliyunSettingsPutBody {
 async function saveSettings() {
   formError.value = ''
   savedNotice.value = false
-  const errors = validateAliyunSettingsForm(
-    {
-      credentialsConfigured: credentialsConfigured.value,
-      accessKeyId: accessKeyId.value,
-      accessKeySecret: accessKeySecret.value,
-      generalMonthlyLimit: generalMonthlyLimit.value,
-      professionalMonthlyLimit: professionalMonthlyLimit.value,
-      autoUseProfessional: autoUseProfessional.value,
-      professionalScene: professionalScene.value,
-      ocrMonthlyLimit: ocrMonthlyLimit.value,
-      ownerConcurrency: ownerConcurrency.value,
-      globalConcurrency: globalConcurrency.value,
-    },
-    usage.value,
-  )
+  // 点击时的完整快照：校验与 PUT 使用同一份值；保存期间表单不锁，用户可继续编辑下一份草稿。
+  const snapshot = currentFormInput()
+  const errors = validateAliyunSettingsForm(snapshot, usage.value)
   if (errors.length > 0) {
     formError.value = errors[0]!
     return
   }
   busy.value = true
   try {
-    // 全量替换合同：PUT 前先 GET 同步服务端最新状态，再提交完整当前值。
+    // 全量替换合同：PUT 前先 GET 同步服务端最新状态，再提交完整的点击快照。
     const latest = await apiRequest<AliyunSettings>('/api/v1/aliyun/settings')
     credentialsState.value = latest.credentials
     statusState.value = latest.status
     await apiRequest<unknown>(
       '/api/v1/aliyun/settings',
-      jsonRequest('PUT', buildPutBody(), auth.csrfToken),
+      jsonRequest('PUT', buildPutBody(snapshot), auth.csrfToken),
     )
-    accessKeyId.value = ''
-    accessKeySecret.value = ''
-    savedNotice.value = true
+    const hasNewDraft = !formMatchesSnapshot(snapshot)
+    // 只清掉仍属于本次提交且未被改动的整对凭据；保存期间输入的下一份凭据不清、不拆成半对。
+    if (
+      accessKeyId.value === snapshot.accessKeyId &&
+      accessKeySecret.value === snapshot.accessKeySecret
+    ) {
+      accessKeyId.value = ''
+      accessKeySecret.value = ''
+    }
+    // 存在未保存的新草稿时不显示通用成功反馈，避免暗示它已保存；无新草稿时保持既有成功语义。
+    savedNotice.value = !hasNewDraft
+    // 恢复基准只用于比较七个配置字段；不让它在读取失败期间继续持有已提交的旧凭据。
+    pendingMergeBase = { ...snapshot, accessKeyId: '', accessKeySecret: '' }
     await loadState()
   } catch (error) {
     formError.value = aliyunSaveErrorMessage(error)
@@ -258,6 +349,7 @@ function meterUsage(meter: AliyunUsageMeterName) {
 }
 
 function meterUsageHint(meter: AliyunUsageMeterName) {
+  if (usageLoading.value) return '正在读取本月账本…'
   const entry = meterUsage(meter)
   if (!entry) return '当前月账本尚未读取。'
   return `当前月已用 ${formatNumber(entry.used)}、预留 ${formatNumber(entry.reserved)}；新上限不能低于两者之和。`
@@ -280,10 +372,10 @@ function formatStatusTime(value: string | null) {
     title-id="aliyun-settings-title"
     title="阿里云服务"
     description="配置云翻译、文字识别和每月使用上限；保存设置不会发起云调用。"
-    :show-aside="!loading"
+    :show-aside="!loading && !pageError"
   >
     <template #actions>
-      <UiButton variant="primary" :disabled="loading || busy" @click="saveSettings">
+      <UiButton variant="primary" :disabled="loading || busy || Boolean(pageError)" @click="saveSettings">
         <UiIcon name="save" />{{ busy ? '正在保存…' : '保存设置' }}
       </UiButton>
     </template>
@@ -320,7 +412,8 @@ function formatStatusTime(value: string | null) {
       <span class="settings-spinner" aria-hidden="true" />正在读取阿里云服务设置…
     </div>
 
-    <template v-else>
+    <!-- 设置读取失败时状态未知：不显示任何未确认的凭据/额度/云状态断言，只保留错误与重试。 -->
+    <template v-else-if="!pageError">
       <section class="settings-card" aria-labelledby="aliyun-credentials-title">
         <header class="settings-card__header">
           <div>
@@ -549,6 +642,7 @@ function formatStatusTime(value: string | null) {
             <p v-if="usage">
               月份 {{ usage.month }} · 时区 {{ usage.timezone }} · 来源：本地保护账本（{{ usage.source }}）
             </p>
+            <p v-else-if="usageLoading" role="status">正在读取本月账本…</p>
             <p v-else>尚未读取到本月账本。</p>
           </div>
         </header>
@@ -611,7 +705,7 @@ function formatStatusTime(value: string | null) {
           <div><dt>专业场景</dt><dd>{{ ALIYUN_SCENES.find((scene) => scene.code === professionalScene)?.label ?? '未选择' }}</dd></div>
           <div><dt>OCR 月度上限</dt><dd>{{ ocrMonthlyLimit || '未设置' }} 次</dd></div>
           <div><dt>云调用并发</dt><dd>{{ ownerConcurrency || '—' }} / {{ globalConcurrency || '—' }}</dd></div>
-          <div><dt>账本月份</dt><dd>{{ usage?.month ?? '未读取' }}</dd></div>
+          <div><dt>账本月份</dt><dd>{{ usageLoading ? '读取中' : (usage?.month ?? '未读取') }}</dd></div>
         </dl>
       </section>
       <section
@@ -620,7 +714,7 @@ function formatStatusTime(value: string | null) {
       >
         <UiIcon :name="credentialsConfigured ? 'shield-check' : 'triangle-alert'" />
         <div>
-          <strong>{{ credentialsConfigured ? '配置已保存，尚未实调验证' : '云能力当前不可用' }}</strong>
+          <strong>{{ credentialsConfigured ? '凭据已配置，尚未实调验证' : '云能力当前不可用' }}</strong>
           <p>{{ credentialsConfigured ? `最近失败类别：${failureCategoryLabel}` : '未配置凭据时，云翻译与云 OCR 会在发送前停止；本地工具不受影响。' }}</p>
         </div>
       </section>

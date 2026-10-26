@@ -46,6 +46,10 @@ const errorMessage = ref('')
 const liveMessage = ref('')
 let latestRunId = 0
 
+// 粘贴归属按目标各计世代：对应目标的后续手输与后发粘贴、keyMode 切换、显式 run 与仅检查 Claims、
+// 清空全部和卸载都会作废在途 read 的回填与报错；两个目标互不作废，编辑密钥不拦截 Token 粘贴。
+const pasteEpoch: Record<'token' | 'key', number> = { token: 0, key: 0 }
+
 const tokenBytes = computed(() => jwtUtf8ByteLength(token.value))
 const keyBytes = computed(() => jwtUtf8ByteLength(keyValue.value))
 const keyLabel = computed(() => ({ secret: '共享 secret', pem: 'PEM 公钥', jwk: 'JWK', jwks: 'JWKS' })[keyMode.value as Exclude<KeyMode, 'none'>] ?? '')
@@ -70,15 +74,24 @@ const decodedTimes = computed(() => decoded.value
 // 已解码内容在密钥与期望参数变化时保留，避免 JWKS 手选入口消失。
 watch(token, () => {
   latestRunId += 1
+  pasteEpoch.token += 1
   decoded.value = null
   claims.value = null
   signature.value = initialSignatureCheck()
   errorMessage.value = ''
+  liveMessage.value = ''
 })
 
 watch([keyMode, keyValue, selectedKeyIndex], () => {
   latestRunId += 1
+  pasteEpoch.key += 1
   signature.value = initialSignatureCheck()
+})
+
+// JWKS 文本一旦变化（整体替换、重排、清空回填），旧手选索引就可能指向另一个 key，必须重新确认；
+// 不做内容比较，keyValue 未变时手选继续有效；keyMode 切换由 @change 单独清理。
+watch(keyValue, () => {
+  selectedKeyIndex.value = undefined
 })
 
 watch([expectedIssuer, expectedAudience, expectedSubject, clockTolerance], () => {
@@ -92,6 +105,8 @@ function initialSignatureCheck(): SignatureCheck {
 
 async function run() {
   const runId = ++latestRunId
+  pasteEpoch.token += 1
+  pasteEpoch.key += 1
   const snapshot = createRunSnapshot()
   errorMessage.value = ''
   liveMessage.value = ''
@@ -127,6 +142,8 @@ function createRunSnapshot(): JwtRunSnapshot {
 
 function checkClaimsOnly() {
   if (!decoded.value) return
+  pasteEpoch.token += 1
+  pasteEpoch.key += 1
   claims.value = checkJwtClaims(decoded.value.payload, {
     issuer: expectedIssuer.value.trim() || undefined,
     audience: expectedAudience.value.trim() || undefined,
@@ -142,28 +159,40 @@ function buildKeyInput(snapshot: JwtRunSnapshot): JwtKeyInput {
     : { kind: snapshot.keyMode, value: snapshot.keyValue } as JwtKeyInput
 }
 
+// 粘贴结果归属于发起世代；read 期间对应目标被手输、重新粘贴或清理时，晚到的成功与失败都直接丢弃。
 async function paste(target: 'token' | 'key') {
+  const epoch = ++pasteEpoch[target]
   errorMessage.value = ''
   try {
     const value = await navigator.clipboard.readText()
+    if (epoch !== pasteEpoch[target]) return
     if (target === 'token') token.value = value
     else keyValue.value = value
   } catch {
+    if (epoch !== pasteEpoch[target]) return
     errorMessage.value = '浏览器未允许读取剪贴板，请使用系统粘贴快捷键。'
   }
 }
 
+// 复制反馈归属于发起时的 decoded 对象；密钥与期望 Claims 变化不更换 decoded，不使复制失效（故不按 latestRunId 判断）。
 async function copyJson(value: unknown, label: string) {
+  const source = decoded.value
+  liveMessage.value = ''
+  errorMessage.value = ''
   try {
     await navigator.clipboard.writeText(JSON.stringify(value, null, 2))
+    if (decoded.value !== source) return
     liveMessage.value = `${label} 已复制`
   } catch {
+    if (decoded.value !== source) return
     errorMessage.value = '复制未成功，请手动选择内容。'
   }
 }
 
 function clearSensitiveState() {
   latestRunId += 1
+  pasteEpoch.token += 1
+  pasteEpoch.key += 1
   token.value = ''
   keyValue.value = ''
   selectedKeyIndex.value = undefined

@@ -22,6 +22,8 @@ const canceled = ref(false)
 const copyStatus = ref('')
 const runner = new DigestRunner()
 let progressTimer: number | undefined
+let copyTimer: number | undefined
+let copyRequest = 0
 
 const insecureAlgorithm = computed(() => algorithm.value === 'md5' || algorithm.value === 'sha1')
 const comparison = computed(() => compareDigest(digest.value, expected.value, algorithm.value))
@@ -30,6 +32,7 @@ const textBytes = computed(() => new TextEncoder().encode(textInput.value).byteL
 
 onBeforeUnmount(() => {
   clearProgressTimer()
+  invalidateCopyFeedback()
   runner.dispose()
   selectedFile.value = null
 })
@@ -46,6 +49,7 @@ function resetResult() {
   canceled.value = false
   expected.value = ''
   progress.value = { processedBytes: 0, totalBytes: 0, rateBytesPerSecond: 0 }
+  invalidateCopyFeedback()
 }
 
 function clearAll() {
@@ -61,10 +65,19 @@ function clearProgressTimer() {
   progressTimer = undefined
 }
 
+// 复制反馈按发起序号归属：同一文本重算会得到相同摘要字符串，不能用摘要值判断迟到回包是否仍属于当前结果。
+function invalidateCopyFeedback() {
+  copyRequest += 1
+  if (copyTimer !== undefined) window.clearTimeout(copyTimer)
+  copyTimer = undefined
+  copyStatus.value = ''
+}
+
 async function runDigest() {
   errorMessage.value = ''
   canceled.value = false
   digest.value = ''
+  invalidateCopyFeedback()
   progress.value = { processedBytes: 0, totalBytes: mode.value === 'file' ? selectedFile.value?.size ?? 0 : new TextEncoder().encode(textInput.value).byteLength, rateBytesPerSecond: 0 }
   if (mode.value === 'file' && !selectedFile.value) {
     errorMessage.value = '请选择一个本地文件'
@@ -100,13 +113,16 @@ function cancelDigest() {
 
 async function copyDigest() {
   if (!digest.value) return
-  copyStatus.value = ''
+  invalidateCopyFeedback()
   errorMessage.value = ''
+  const request = copyRequest
   try {
     await navigator.clipboard.writeText(digest.value)
+    if (request !== copyRequest) return
     copyStatus.value = '摘要已复制'
-    window.setTimeout(() => { copyStatus.value = '' }, 1600)
+    copyTimer = window.setTimeout(() => { copyStatus.value = '' }, 1600)
   } catch {
+    if (request !== copyRequest) return
     errorMessage.value = '复制未成功，请选中结果后手动复制。'
   }
 }
@@ -150,7 +166,7 @@ function formatBytes(value: number): string {
           <dl v-if="selectedFile" class="file-meta"><div><dt>文件名</dt><dd>{{ selectedFile.name }}</dd></div><div><dt>大小</dt><dd>{{ formatBytes(selectedFile.size) }}</dd></div><div><dt>算法</dt><dd>{{ digestLabels[algorithm] }}</dd></div></dl>
         </template>
 
-        <div class="primary-actions"><UiButton v-if="!running" variant="primary" @click="runDigest">计算摘要</UiButton><UiButton v-else variant="danger" @click="cancelDigest">取消计算</UiButton></div>
+        <div class="primary-actions"><UiButton :variant="running ? 'danger' : 'primary'" @click="running ? cancelDigest() : runDigest()">{{ running ? '取消计算' : '计算摘要' }}</UiButton></div>
 
         <div v-if="running && showProgress" class="progress-box" role="status" aria-live="polite">
           <div><span>已处理 {{ formatBytes(progress.processedBytes) }} / {{ formatBytes(progress.totalBytes) }}</span><strong>{{ progressPercent.toFixed(1) }}%</strong></div>
@@ -160,7 +176,7 @@ function formatBytes(value: number): string {
       </section>
 
       <section class="tool-card result-card">
-        <header><h2>摘要结果</h2><UiButton variant="secondary" :disabled="!digest" @click="copyDigest">复制摘要</UiButton></header>
+        <header><h2>摘要结果</h2><UiButton variant="secondary" :disabled="!digest" @click="copyDigest">{{ copyStatus ? '已复制' : '复制摘要' }}</UiButton></header>
         <template v-if="digest">
           <p class="algorithm-label">{{ digestLabels[algorithm] }} · {{ formatBytes(totalBytes) }}</p>
           <output class="digest-output">{{ digest }}</output>

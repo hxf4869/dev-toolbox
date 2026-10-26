@@ -93,6 +93,8 @@ type ResultEntry =
   | { kind: 'library'; item: LibraryItem }
   | { kind: 'search'; item: SearchItem }
 
+const MUTATION_REFRESH_ERROR = '更改已保存，但目录与标签未能刷新。请重新读取列表。'
+
 export const useLibraryStore = defineStore('library', () => {
   const auth = useAuthStore()
   const folders = ref<FolderEntry[]>([])
@@ -102,6 +104,7 @@ export const useLibraryStore = defineStore('library', () => {
   const mode = ref<'browse' | 'search'>('browse')
   const loading = ref(false)
   const navigationLoading = ref(false)
+  const navigationError = ref('')
   const error = ref('')
   const total = ref<number | null>(null)
   const nextCursor = ref<string | null>(null)
@@ -111,9 +114,10 @@ export const useLibraryStore = defineStore('library', () => {
   let resultSequence = 0
   let navigationSequence = 0
 
-  async function loadNavigation() {
+  async function loadNavigation(afterMutation = false) {
     const sequence = ++navigationSequence
     navigationLoading.value = true
+    navigationError.value = ''
     try {
       const [folderResponse, tagResponse] = await Promise.all([
         apiRequest<{ items: FolderEntry[] }>('/api/v1/folders/tree'),
@@ -124,6 +128,11 @@ export const useLibraryStore = defineStore('library', () => {
       tags.value = tagResponse.items
     } catch (caught) {
       if (sequence !== navigationSequence) return
+      navigationError.value = afterMutation
+        ? MUTATION_REFRESH_ERROR
+        : caught instanceof Error
+          ? caught.message
+          : '目录与标签暂时不可用'
       throw caught
     } finally {
       if (sequence === navigationSequence) navigationLoading.value = false
@@ -236,12 +245,22 @@ export const useLibraryStore = defineStore('library', () => {
     total.value = null
   }
 
+  // 七个结构 mutations 共用：写响应已确认成功后才刷新目录；读取失败只记录到共享
+  // navigationError，不把已确认写入误报为失败（恢复入口是各处的只读重新读取）。
+  async function refreshNavigationAfterWrite() {
+    try {
+      await loadNavigation(true)
+    } catch {
+      // 已确认的写入不受读取失败影响，这里有意吞掉读取异常。
+    }
+  }
+
   async function createFolder(name: string, parentId: string | null) {
     await apiRequest(
       '/api/v1/folders',
       jsonRequest('POST', { name, parentId }, auth.csrfToken),
     )
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   async function renameFolder(id: string, name: string) {
@@ -249,7 +268,7 @@ export const useLibraryStore = defineStore('library', () => {
       `/api/v1/folders/${id}`,
       jsonRequest('PATCH', { name }, auth.csrfToken),
     )
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   async function moveFolder(id: string, parentId: string | null) {
@@ -257,27 +276,27 @@ export const useLibraryStore = defineStore('library', () => {
       `/api/v1/folders/${id}/move`,
       jsonRequest('POST', { parentId }, auth.csrfToken),
     )
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   async function deleteFolder(id: string) {
     await apiRequest(`/api/v1/folders/${id}`, jsonRequest('DELETE', {}, auth.csrfToken))
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   async function createTag(name: string) {
     await apiRequest('/api/v1/tags', jsonRequest('POST', { name }, auth.csrfToken))
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   async function renameTag(id: string, name: string) {
     await apiRequest(`/api/v1/tags/${id}`, jsonRequest('PATCH', { name }, auth.csrfToken))
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   async function deleteTag(id: string) {
     await apiRequest(`/api/v1/tags/${id}`, jsonRequest('DELETE', {}, auth.csrfToken))
-    await loadNavigation()
+    await refreshNavigationAfterWrite()
   }
 
   return {
@@ -288,6 +307,7 @@ export const useLibraryStore = defineStore('library', () => {
     mode,
     loading,
     navigationLoading,
+    navigationError,
     error,
     total,
     nextCursor,

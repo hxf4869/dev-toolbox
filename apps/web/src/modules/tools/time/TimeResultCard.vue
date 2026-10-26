@@ -1,8 +1,8 @@
 <script setup lang="ts">
+import CopyButton from '../shared/ui/CopyButton.vue'
 import type { TimeSnapshot } from './time'
 
 defineProps<{ value: TimeSnapshot | null }>()
-defineEmits<{ copy: [value: string] }>()
 </script>
 
 <template>
@@ -19,7 +19,7 @@ defineEmits<{ copy: [value: string] }>()
         ['UTC offset', value.offset],
       ]" :key="row[0]">
         <dt>{{ row[0] }}</dt>
-        <dd><code>{{ row[1] }}</code><button type="button" @click="$emit('copy', row[1])">复制</button></dd>
+        <dd><code>{{ row[1] }}</code><CopyButton :text="row[1]" /></dd>
       </div>
     </dl>
     <p v-else class="empty-result">转换后在此显示。</p>
@@ -34,7 +34,6 @@ h2 { margin-top: 0; margin-bottom: var(--space-4); font-size: 16px; }
 .result-list dt { color: var(--text-muted); font-size: 11px; }
 .result-list dd { display: flex; justify-content: space-between; gap: var(--space-3); margin: 2px 0 0; overflow-wrap: anywhere; }
 .result-list code { color: var(--text-primary); font-family: var(--font-mono); }
-.result-list button { width: max-content; padding: 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; }
 .empty-result { color: var(--text-muted); }
 @media (max-width: 720px) { .result-list dd { align-items: flex-start; flex-direction: column; } }
 </style>

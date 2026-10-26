@@ -36,6 +36,24 @@ describe('digest algorithms and chunking', () => {
     expect(compareDigest(actual, actual.replace(/.$/, '0'), 'sha256').status).toBe('mismatch')
     expect(compareDigest(actual, 'not-hex', 'sha256').status).toBe('invalid')
   })
+
+  it('strips all six ASCII whitespace characters around an uppercase 0x-prefixed value', () => {
+    const actual = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+    const padded = ` \t0X${actual.slice(0, 4)}\n\v${actual.slice(4, 8)}\f${actual.slice(8, 16)}\r${actual.slice(16)} `
+    expect(compareDigest(actual, padded.toUpperCase(), 'sha256').status).toBe('match')
+  })
+
+  it('keeps non-ASCII whitespace in the normalized value so the hex validation rejects it', () => {
+    const actual = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+    expect(compareDigest(actual, `\u00A0${actual}\u00A0`, 'sha256').status).toBe('invalid')
+    expect(compareDigest(actual, `\u3000${actual.slice(0, 32)}\u2028${actual.slice(32)}`, 'sha256').status).toBe('invalid')
+    expect(compareDigest(actual, '\u00A0', 'sha256').status).toBe('invalid')
+  })
+
+  it('still treats an expected value of only ASCII whitespace as empty', () => {
+    const actual = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+    expect(compareDigest(actual, ' \t\n\v\f\r ', 'sha256').status).toBe('empty')
+  })
 })
 
 class FakeWorker {

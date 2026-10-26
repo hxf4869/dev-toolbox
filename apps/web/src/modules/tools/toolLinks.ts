@@ -1,3 +1,5 @@
+import { digestLabels } from './digest/contracts'
+
 export type ToolGroup = 'encoding' | 'development' | 'online'
 
 export interface ToolLink {
@@ -18,6 +20,8 @@ export interface ToolLink {
     | 'scan-text'
   readonly group: ToolGroup
   readonly processing: 'local' | 'cloud'
+  // 工具已有能力的名称（算法 ID、展示名等），只参与导航搜索的子串匹配，不展示。
+  readonly searchTerms?: readonly string[]
 }
 
 // 这是当前已发布工具的静态导航元数据，不负责加载模块，也不构成插件注册器。
@@ -39,6 +43,7 @@ export const V2_TOOLS: readonly ToolLink[] = [
     icon: 'braces',
     group: 'encoding',
     processing: 'local',
+    searchTerms: ['JSONPath'],
   },
   {
     name: 'URL 编解码',
@@ -84,6 +89,7 @@ export const V2_TOOLS: readonly ToolLink[] = [
     icon: 'hash',
     group: 'development',
     processing: 'local',
+    searchTerms: [...Object.keys(digestLabels), ...Object.values(digestLabels)],
   },
   {
     name: '正则测试',

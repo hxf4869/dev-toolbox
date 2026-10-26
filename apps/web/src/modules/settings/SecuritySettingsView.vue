@@ -31,6 +31,7 @@ const auth = useAuthStore()
 const devices = ref<TrustedDevice[]>([])
 const sessions = ref<AuthSession[]>([])
 const loading = ref(true)
+const listsLoaded = ref(false)
 const pageError = ref('')
 const action = ref<SensitiveAction | null>(null)
 const actionError = ref('')
@@ -75,6 +76,7 @@ onMounted(() => void loadSecurityState())
 
 async function loadSecurityState() {
   loading.value = true
+  listsLoaded.value = false
   pageError.value = ''
   try {
     const [deviceResponse, sessionResponse] = await Promise.all([
@@ -83,6 +85,7 @@ async function loadSecurityState() {
     ])
     devices.value = deviceResponse.items
     sessions.value = sessionResponse.items
+    listsLoaded.value = true
   } catch (error) {
     pageError.value = messageFor(error)
   } finally {
@@ -186,12 +189,13 @@ function editDevice(device: TrustedDevice) {
 }
 
 async function saveDeviceName(device: TrustedDevice) {
-  const normalized = deviceName.value.trim()
+  const submittedName = deviceName.value
+  const normalized = submittedName.trim()
   if (!normalized) return
   try {
     await apiRequest(`/api/v1/auth/trusted-devices/${device.id}`, jsonRequest('PATCH', { displayName: normalized }, auth.csrfToken))
     device.displayName = normalized
-    editingDeviceID.value = ''
+    if (editingDeviceID.value === device.id && deviceName.value === submittedName) editingDeviceID.value = ''
   } catch (error) {
     pageError.value = messageFor(error)
   }
@@ -269,7 +273,7 @@ function messageFor(error: unknown) {
     title-id="security-title"
     title="安全与会话"
     description="管理双因素认证、可信设备与当前登录会话。"
-    :show-aside="!loading"
+    :show-aside="listsLoaded"
     :surface="false"
   >
     <template #actions>
@@ -312,7 +316,7 @@ function messageFor(error: unknown) {
         </div>
       </section>
 
-      <section class="security-card" aria-labelledby="devices-title">
+      <section v-if="listsLoaded" class="security-card" aria-labelledby="devices-title">
         <header>
           <div><h3 id="devices-title">可信设备</h3></div>
           <span>{{ devices.length }} 台有效设备</span>
@@ -336,7 +340,7 @@ function messageFor(error: unknown) {
         </div>
       </section>
 
-      <section class="security-card" aria-labelledby="sessions-title">
+      <section v-if="listsLoaded" class="security-card" aria-labelledby="sessions-title">
         <header>
           <div><h3 id="sessions-title">活跃会话</h3></div>
           <UiButton variant="danger" :disabled="busy" @click="logoutAll">退出全部设备</UiButton>

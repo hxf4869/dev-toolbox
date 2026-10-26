@@ -22,6 +22,20 @@ async function flushCopyWork() {
   await vi.advanceTimersByTimeAsync(0)
 }
 
+function deferred() {
+  let resolve: () => void = () => {}
+  let reject: (reason?: unknown) => void = () => {}
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function blockedClipboardError() {
+  return new DOMException('Clipboard write was blocked', 'NotAllowedError')
+}
+
 afterEach(() => {
   if (originalClipboardDescriptor) {
     Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
@@ -249,6 +263,259 @@ describe('CopyButton copy feedback and error recovery', () => {
     } finally {
       if (!settledA) resolveA()
       if (!settledB) resolveB()
+      wrapper.unmount()
+    }
+  })
+})
+
+describe('CopyButton attributes feedback to the latest copy request', () => {
+  it('keeps the newer success when an older same-text request fails late', async () => {
+    vi.useFakeTimers()
+    const older = deferred()
+    const newer = deferred()
+    const writeText = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+    installClipboard(writeText)
+
+    const wrapper = mount(CopyButton, { props: { text: TEXT, label: LABEL } })
+    try {
+      const button = wrapper.get('button')
+
+      // 同一文本连续点击两次，两次写入都挂起。
+      await button.trigger('click')
+      await button.trigger('click')
+      await flushCopyWork()
+
+      expect(writeText).toHaveBeenCalledTimes(2)
+
+      // 较新的第二次先成功：显示“已复制”。
+      newer.resolve()
+      await flushCopyWork()
+
+      expect(button.text()).toContain('已复制')
+
+      // 较旧的第一次随后失败：不得清掉“已复制”、不得出现错误区、不得 emit error。
+      older.reject(blockedClipboardError())
+      await flushCopyWork()
+
+      expect(button.text()).toContain('已复制')
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      expect(wrapper.emitted('error')).toBeUndefined()
+
+      // 反馈窗口仍归属当前成功：到期后退回原 label。
+      await vi.advanceTimersByTimeAsync(FEEDBACK_MS)
+
+      expect(button.text()).not.toContain('已复制')
+      expect(button.text()).toContain(LABEL)
+    } finally {
+      older.resolve()
+      newer.resolve()
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps the newer failure when an older same-text request succeeds late', async () => {
+    vi.useFakeTimers()
+    const older = deferred()
+    const newer = deferred()
+    const writeText = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+    installClipboard(writeText)
+
+    const wrapper = mount(CopyButton, { props: { text: TEXT, label: LABEL } })
+    try {
+      const button = wrapper.get('button')
+
+      await button.trigger('click')
+      await button.trigger('click')
+      await flushCopyWork()
+
+      // 较新的第二次先失败：出现 role=alert 错误并 emit 一次 error。
+      newer.reject(blockedClipboardError())
+      await flushCopyWork()
+
+      expect(wrapper.get('[role="alert"]').text()).toContain('剪贴板')
+      expect(wrapper.emitted('error')).toHaveLength(1)
+
+      // 较旧的第一次随后成功：错误区必须保留，不得显示“已复制”，error 既不重复也不被撤销。
+      older.resolve()
+      await flushCopyWork()
+
+      expect(wrapper.get('[role="alert"]').text()).toContain('剪贴板')
+      expect(button.text()).not.toContain('已复制')
+      expect(button.text()).toContain(LABEL)
+      expect(wrapper.emitted('error')).toHaveLength(1)
+    } finally {
+      older.resolve()
+      newer.resolve()
+      wrapper.unmount()
+    }
+  })
+
+  it('ignores a stale request after the text changes away and back to the same value', async () => {
+    vi.useFakeTimers()
+    const A = 'dt-roundtrip-first-text'
+    const B = 'dt-roundtrip-second-text'
+    const lateSuccess = deferred()
+    const lateFailure = deferred()
+    const writeText = vi.fn()
+      .mockReturnValueOnce(lateSuccess.promise)
+      .mockReturnValueOnce(lateFailure.promise)
+    installClipboard(writeText)
+
+    const wrapper = mount(CopyButton, { props: { text: A, label: LABEL } })
+    try {
+      const button = wrapper.get('button')
+
+      // A 的写入挂起时 A→B→A：晚到的成功不得显示“已复制”。
+      await button.trigger('click')
+      await flushCopyWork()
+      await wrapper.setProps({ text: B })
+      await wrapper.setProps({ text: A })
+      lateSuccess.resolve()
+      await flushCopyWork()
+
+      expect(button.text()).not.toContain('已复制')
+      expect(button.text()).toContain(LABEL)
+
+      // 再次点击 A 后 A→B→A：晚到的拒绝不得报错，也不得 emit error。
+      await button.trigger('click')
+      await flushCopyWork()
+      await wrapper.setProps({ text: B })
+      await wrapper.setProps({ text: A })
+      lateFailure.reject(blockedClipboardError())
+      await flushCopyWork()
+
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      expect(wrapper.emitted('error')).toBeUndefined()
+      expect(writeText).toHaveBeenNthCalledWith(1, A)
+      expect(writeText).toHaveBeenNthCalledWith(2, A)
+    } finally {
+      lateSuccess.resolve()
+      lateFailure.resolve()
+      wrapper.unmount()
+    }
+  })
+
+  it('discards requests that settle after unmount without scheduling feedback or emitting error', async () => {
+    vi.useFakeTimers()
+    const lateSuccess = deferred()
+    const lateFailure = deferred()
+    const writeText = vi.fn()
+      .mockReturnValueOnce(lateSuccess.promise)
+      .mockReturnValueOnce(lateFailure.promise)
+    installClipboard(writeText)
+    const onError = vi.fn()
+
+    const wrapper = mount(CopyButton, { props: { text: TEXT }, attrs: { onError } })
+    try {
+      const button = wrapper.get('button')
+
+      // 两次写入都挂起时卸载（对应 JSON 结果区 v-if 切走）。
+      await button.trigger('click')
+      await button.trigger('click')
+      await flushCopyWork()
+      wrapper.unmount()
+
+      expect(writeText).toHaveBeenCalledTimes(2)
+      expect(vi.getTimerCount()).toBe(0)
+
+      // 晚到的成功不得在已卸载组件上再排 1600ms 反馈计时器。
+      lateSuccess.resolve()
+      await flushCopyWork()
+
+      expect(vi.getTimerCount()).toBe(0)
+
+      // 晚到的失败不得再向父组件 emit error。
+      lateFailure.reject(blockedClipboardError())
+      await flushCopyWork()
+
+      expect(onError).not.toHaveBeenCalled()
+    } finally {
+      lateSuccess.resolve()
+      lateFailure.resolve()
+    }
+  })
+})
+
+describe('CopyButton live text opt-in', () => {
+  it('keeps success feedback attributed to the click when text changes while liveText is enabled, then copies the new text on the next click', async () => {
+    vi.useFakeTimers()
+    const A = 'dt-live-first-text'
+    const B = 'dt-live-second-text'
+    const gate = deferred()
+    const writeText = vi.fn()
+      .mockReturnValueOnce(gate.promise)
+      .mockResolvedValueOnce(undefined)
+    installClipboard(writeText)
+
+    const wrapper = mount(CopyButton, { props: { text: A, label: LABEL, liveText: true } })
+    try {
+      const button = wrapper.get('button')
+
+      await button.trigger('click')
+      await flushCopyWork()
+      expect(writeText).toHaveBeenCalledTimes(1)
+
+      // text 自然更新为 B：live 值更新不作废在途复制、不清除反馈。
+      await wrapper.setProps({ text: B })
+      gate.resolve()
+      await flushCopyWork()
+
+      expect(button.text()).toContain('已复制')
+
+      await vi.advanceTimersByTimeAsync(FEEDBACK_MS)
+
+      expect(button.text()).not.toContain('已复制')
+      expect(button.text()).toContain(LABEL)
+
+      // 下一次点击复制当时最新 text。
+      await button.trigger('click')
+      await flushCopyWork()
+
+      expect(button.text()).toContain('已复制')
+      expect(writeText).toHaveBeenNthCalledWith(2, B)
+    } finally {
+      gate.resolve()
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps a retryable local failure when text changes while liveText is enabled', async () => {
+    vi.useFakeTimers()
+    const A = 'dt-live-fail-first'
+    const B = 'dt-live-fail-second'
+    const gate = deferred()
+    const writeText = vi.fn()
+      .mockReturnValueOnce(gate.promise)
+      .mockResolvedValueOnce(undefined)
+    installClipboard(writeText)
+
+    const wrapper = mount(CopyButton, { props: { text: A, label: LABEL, liveText: true } })
+    try {
+      const button = wrapper.get('button')
+
+      await button.trigger('click')
+      await flushCopyWork()
+
+      await wrapper.setProps({ text: B })
+      gate.reject(blockedClipboardError())
+      await flushCopyWork()
+
+      const alert = wrapper.get('[role="alert"]')
+      expect(alert.text()).toContain('剪贴板')
+      expect(button.attributes('disabled')).toBeUndefined()
+
+      await button.trigger('click')
+      await flushCopyWork()
+
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      expect(button.text()).toContain('已复制')
+      expect(writeText).toHaveBeenNthCalledWith(2, B)
+    } finally {
+      gate.resolve()
       wrapper.unmount()
     }
   })

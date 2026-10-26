@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import UiButton from '../../../components/ui/UiButton.vue'
 import {
@@ -25,14 +25,23 @@ const parsed = ref<ParsedUrl | null>(null)
 const queryRows = ref<QueryRow[]>([])
 const errorMessage = ref('')
 const liveMessage = ref('')
+const rebuildFailed = ref(false)
+let pasteContext = 0
 const inputBytes = computed(() => urlUtf8ByteLength(input.value))
 
+function claimPasteContext(): number {
+  pasteContext += 1
+  return pasteContext
+}
+
 function switchMode(mode: 'transform' | 'inspect') {
+  if (mode !== activeMode.value) claimPasteContext()
   activeMode.value = mode
   resetError()
 }
 
 function runTransform() {
+  claimPasteContext()
   resetError()
   try {
     transformResult.value = transformUrlText(input.value, operation.value, scope.value)
@@ -43,6 +52,7 @@ function runTransform() {
 }
 
 function inspectUrl() {
+  claimPasteContext()
   resetError()
   try {
     parsed.value = parseUrlPreserving(input.value)
@@ -57,8 +67,16 @@ function inspectUrl() {
 
 function rebuild() {
   if (!parsed.value) return
-  rebuildResult.value = rebuildUrl(parsed.value, queryRows.value)
-  liveMessage.value = '已按当前行顺序重新构建；地址不会被打开。'
+  claimPasteContext()
+  resetError()
+  try {
+    rebuildResult.value = rebuildUrl(parsed.value, queryRows.value)
+    liveMessage.value = '已按当前行顺序重新构建；地址不会被打开。'
+  } catch (error) {
+    rebuildResult.value = ''
+    rebuildFailed.value = true
+    showError(error)
+  }
 }
 
 function addQueryRow() {
@@ -70,25 +88,40 @@ function removeQueryRow(index: number) {
 }
 
 async function pasteInput() {
+  const context = claimPasteContext()
   resetError()
   try {
-    input.value = await navigator.clipboard.readText()
+    const text = await navigator.clipboard.readText()
+    if (context !== pasteContext) return
+    input.value = text
   } catch {
+    if (context !== pasteContext) return
     errorMessage.value = '浏览器未允许读取剪贴板，请使用系统粘贴快捷键。'
   }
 }
 
+function resultFor(mode: 'transform' | 'inspect') {
+  return mode === 'transform' ? transformResult.value : rebuildResult.value
+}
+
 async function copyResult() {
-  const text = activeMode.value === 'transform' ? transformResult.value : rebuildResult.value
+  const mode = activeMode.value
+  const text = resultFor(mode)
+  resetError()
   try {
     await navigator.clipboard.writeText(text)
-    liveMessage.value = '结果已复制'
+    if (activeMode.value === mode && resultFor(mode) === text) {
+      liveMessage.value = '结果已复制'
+    }
   } catch {
-    errorMessage.value = '复制未成功，请选中结果后手动复制。'
+    if (activeMode.value === mode && resultFor(mode) === text) {
+      errorMessage.value = '复制未成功，请选中结果后手动复制。'
+    }
   }
 }
 
 function clearAll() {
+  claimPasteContext()
   input.value = ''
   transformResult.value = ''
   rebuildResult.value = ''
@@ -100,12 +133,38 @@ function clearAll() {
 function resetError() {
   errorMessage.value = ''
   liveMessage.value = ''
+  rebuildFailed.value = false
 }
 
 function showError(error: unknown) {
   errorMessage.value =
     error instanceof UrlInputError ? error.message : '处理未完成，请检查输入后重试。'
 }
+
+watch(input, () => {
+  claimPasteContext()
+  transformResult.value = ''
+  rebuildResult.value = ''
+  parsed.value = null
+  queryRows.value = []
+  resetError()
+})
+
+watch([operation, scope], () => {
+  claimPasteContext()
+  transformResult.value = ''
+  resetError()
+})
+
+watch(
+  queryRows,
+  () => {
+    claimPasteContext()
+    rebuildResult.value = ''
+    if (parsed.value) resetError()
+  },
+  { deep: true },
+)
 </script>
 
 <template>
@@ -138,14 +197,14 @@ function showError(error: unknown) {
       </fieldset>
     </section>
 
-    <p v-if="errorMessage" class="error-summary" role="alert">{{ errorMessage }}</p>
+    <p v-if="errorMessage && !rebuildFailed" class="error-summary" role="alert">{{ errorMessage }}</p>
 
     <section class="input-panel">
       <div class="panel-header">
         <label for="url-input">{{ activeMode === 'transform' ? '输入文本' : '待解析 URL' }}</label>
         <span>{{ input.length }} 字符 · {{ formatUrlBytes(inputBytes) }}</span>
       </div>
-      <textarea id="url-input" v-model="input" rows="7" spellcheck="false" :aria-invalid="Boolean(errorMessage)" />
+      <textarea id="url-input" v-model="input" rows="7" spellcheck="false" :aria-invalid="Boolean(errorMessage) && !rebuildFailed" />
       <div class="actions">
         <UiButton variant="ghost" @click="pasteInput">粘贴</UiButton>
         <UiButton variant="ghost" @click="clearAll">清空</UiButton>
@@ -189,6 +248,7 @@ function showError(error: unknown) {
             <UiButton variant="ghost" :aria-label="`删除第 ${index + 1} 行`" @click="removeQueryRow(index)">删除</UiButton>
           </div>
         </div>
+        <div v-if="errorMessage && rebuildFailed" class="error-summary" role="alert">{{ errorMessage }}</div>
         <div class="actions"><UiButton variant="primary" @click="rebuild">重新构建</UiButton></div>
       </section>
 

@@ -208,4 +208,61 @@ describe('module nav tools navigation', () => {
       `focused element <${active?.tagName ?? 'unknown'}> "${active?.textContent?.trim() ?? ''}" is inside a collapsed group`,
     ).toHaveLength(0)
   })
+
+  it('re-expands a manually collapsed encoding group when a non-empty query matches its tools', async () => {
+    installMatchMedia('desktop')
+    const router = await createToolsRouter(toolByPath('/tools/digest').path)
+    wrapper = mountModuleNav(router)
+    // 先让初始展开落定，再模拟用户折叠静态展开的编码与数据组。
+    await flushPromises()
+    await nextTick()
+
+    const encodingDetails = groupDetails(wrapper, 'encoding-tools-heading')
+    userCollapseGroup(encodingDetails)
+    expect(encodingDetails.open).toBe(false)
+
+    await wrapper.get('.module-nav__search input').setValue('json')
+    await flushPromises()
+    await nextTick()
+
+    // 当前工具 digest 在开发辅助组，而 json 命中的入口在编码与数据组；该组必须重新展开，匹配入口才可用。
+    expect(encodingDetails.open).toBe(true)
+    const matchedNames = Array.from(encodingDetails.querySelectorAll('nav a')).map((link) =>
+      link.textContent?.trim(),
+    )
+    expect(matchedNames).toEqual([toolByPath('/tools/json').name, toolByPath('/tools/yaml').name])
+  })
+
+  it('re-expands a manually collapsed online group in the compact drawer when the query changes to match it', async () => {
+    installMatchMedia('compact')
+    const router = await createToolsRouter(toolByPath('/tools/digest').path)
+    wrapper = mountModuleNav(router, { open: true })
+    await flushPromises()
+    await nextTick()
+
+    const search = wrapper.get('.module-nav__search input')
+    await search.setValue('json')
+    await flushPromises()
+    await nextTick()
+    const onlineDetails = groupDetails(wrapper, 'online-tools-heading')
+    // 前提确认：查询非空时在线能力组已随搜索展开；再模拟用户手动折叠它。
+    expect(onlineDetails.open).toBe(true)
+    userCollapseGroup(onlineDetails)
+
+    // 同一规范化查询（仅新增空白）不得撤销用户手动折叠。
+    await search.setValue('json ')
+    await flushPromises()
+    await nextTick()
+    expect(onlineDetails.open).toBe(false)
+
+    await search.setValue('ocr')
+    await flushPromises()
+    await nextTick()
+
+    expect(onlineDetails.open).toBe(true)
+    const matchedNames = Array.from(onlineDetails.querySelectorAll('nav a')).map((link) =>
+      link.textContent?.trim(),
+    )
+    expect(matchedNames).toEqual([toolByPath('/tools/ocr-translate').name])
+  })
 })

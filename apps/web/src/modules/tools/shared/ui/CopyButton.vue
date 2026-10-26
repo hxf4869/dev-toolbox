@@ -4,33 +4,41 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import UiButton from '../../../../components/ui/UiButton.vue'
 import UiIcon from '../../../../components/ui/UiIcon.vue'
 
-const props = defineProps<{ text: string; label?: string }>()
+const props = defineProps<{ text: string; label?: string; liveText?: boolean }>()
 const emit = defineEmits<{ error: [message: string] }>()
 const copied = ref(false)
 const failed = ref(false)
 let feedbackTimer: number | undefined
+let activeCopy = 0
 
 function clearFeedbackTimer() {
   window.clearTimeout(feedbackTimer)
 }
 
-watch(() => props.text, () => {
+function discardPendingCopies() {
+  activeCopy += 1
   clearFeedbackTimer()
+}
+
+// liveText：text 为持续变化的 live 值（如实时时钟）时启用——反馈归属点击快照，text 自然更新不作废在途复制、不清除反馈；下一次点击仍复制当时最新 text。
+watch(() => props.text, () => {
+  if (props.liveText) return
+  discardPendingCopies()
   copied.value = false
   failed.value = false
 })
 
 async function copy() {
-  const text = props.text
+  const request = ++activeCopy
   try {
-    await navigator.clipboard.writeText(text)
-    if (props.text !== text) return
+    await navigator.clipboard.writeText(props.text)
+    if (request !== activeCopy) return
     failed.value = false
     copied.value = true
     clearFeedbackTimer()
     feedbackTimer = window.setTimeout(() => { copied.value = false }, 1600)
   } catch {
-    if (props.text !== text) return
+    if (request !== activeCopy) return
     copied.value = false
     clearFeedbackTimer()
     failed.value = true
@@ -38,7 +46,7 @@ async function copy() {
   }
 }
 
-onBeforeUnmount(clearFeedbackTimer)
+onBeforeUnmount(discardPendingCopies)
 </script>
 
 <template>
