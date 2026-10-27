@@ -92,20 +92,30 @@ function releaseMonacoRuntime() {
 
 export async function createMonacoEditor(options: EditorDriverOptions): Promise<EditorDriver> {
   const { monaco, ensureLanguage, release } = await prepareMonaco(options.language)
-  const model = monaco.editor.createModel(options.value, options.language)
-  const editor = monaco.editor.create(options.host, {
-    automaticLayout: true,
-    ariaLabel: options.ariaLabel,
-    minimap: { enabled: false },
-    model,
-    readOnly: options.readOnly,
-    scrollBeyondLastLine: false,
-  })
   let applyingValue = false
   let disposed = false
-  const changeSubscription = editor.onDidChangeModelContent(() => {
-    if (!applyingValue) options.onChange(model.getValue())
-  })
+  let model: ReturnType<typeof monaco.editor.createModel>
+  let editor: ReturnType<typeof monaco.editor.create>
+  let changeSubscription: ReturnType<typeof editor.onDidChangeModelContent>
+  try {
+    model = monaco.editor.createModel(options.value, options.language)
+    editor = monaco.editor.create(options.host, {
+      automaticLayout: true,
+      ariaLabel: options.ariaLabel,
+      minimap: { enabled: false },
+      model,
+      readOnly: options.readOnly,
+      scrollBeyondLastLine: false,
+    })
+    changeSubscription = editor.onDidChangeModelContent(() => {
+      if (!applyingValue) options.onChange(model.getValue())
+    })
+  } catch (error) {
+    // prepareMonaco 已计入运行时引用；创建中途失败必须释放，否则重试会累积
+    // 泄漏的 MutationObserver 与 worker。
+    release()
+    throw error
+  }
 
   return {
     kind: 'monaco',
@@ -140,19 +150,27 @@ export async function createMonacoEditor(options: EditorDriverOptions): Promise<
 
 export async function createMonacoDiffEditor(options: DiffDriverOptions): Promise<DiffDriver> {
   const { monaco, ensureLanguage, release } = await prepareMonaco(options.language)
-  const originalModel = monaco.editor.createModel(options.original, options.language)
-  const modifiedModel = monaco.editor.createModel(options.modified, options.language)
-  const diffEditor = monaco.editor.createDiffEditor(options.host, {
-    automaticLayout: true,
-    ariaLabel: options.ariaLabel,
-    enableSplitViewResizing: true,
-    originalEditable: false,
-    readOnly: true,
-    renderSideBySide: true,
-    scrollBeyondLastLine: false,
-  })
-  diffEditor.setModel({ original: originalModel, modified: modifiedModel })
   let disposed = false
+  let originalModel: ReturnType<typeof monaco.editor.createModel>
+  let modifiedModel: ReturnType<typeof monaco.editor.createModel>
+  let diffEditor: ReturnType<typeof monaco.editor.createDiffEditor>
+  try {
+    originalModel = monaco.editor.createModel(options.original, options.language)
+    modifiedModel = monaco.editor.createModel(options.modified, options.language)
+    diffEditor = monaco.editor.createDiffEditor(options.host, {
+      automaticLayout: true,
+      ariaLabel: options.ariaLabel,
+      enableSplitViewResizing: true,
+      originalEditable: false,
+      readOnly: true,
+      renderSideBySide: true,
+      scrollBeyondLastLine: false,
+    })
+    diffEditor.setModel({ original: originalModel, modified: modifiedModel })
+  } catch (error) {
+    release()
+    throw error
+  }
 
   return {
     kind: 'monaco',

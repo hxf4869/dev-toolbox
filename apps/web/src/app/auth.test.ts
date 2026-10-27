@@ -268,4 +268,47 @@ describe('auth store', () => {
     expect(auth.csrfToken).toBe('csrf-b')
     expect(auth.owner?.id).toBe('owner-1')
   })
+
+  it('旧 logout 的迟到 204 也不得清掉新登录的会话（成功分支归属 guard）', async () => {
+    const authenticatedA = {
+      status: 'authenticated',
+      owner: { id: 'owner-1', username: 'owner' },
+      session: { id: 'session-a', expiresAt: '2026-09-06T00:00:00Z' },
+      csrfToken: 'csrf-a',
+    }
+    const authenticatedB = {
+      status: 'authenticated',
+      owner: { id: 'owner-1', username: 'owner' },
+      session: { id: 'session-b', expiresAt: '2026-09-07T00:00:00Z' },
+      csrfToken: 'csrf-b',
+    }
+    let releaseLogout!: (response: Response) => void
+    const logoutGate = new Promise<Response>((resolve) => {
+      releaseLogout = resolve
+    })
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, authenticatedA))
+      .mockImplementationOnce(() => logoutGate)
+      .mockResolvedValueOnce(jsonResponse(200, authenticatedB))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const auth = useAuthStore()
+    await auth.bootstrap()
+    expect(auth.stage).toBe('authenticated')
+
+    const pending = auth.logout()
+    // 旧 logout 在途时用户重新登录。
+    await auth.login('owner', 'exact password')
+    expect(auth.session?.id).toBe('session-b')
+
+    releaseLogout(new Response(null, { status: 204 }))
+    await pending
+
+    expect(auth.stage).toBe('authenticated')
+    expect(auth.isAuthenticated).toBe(true)
+    expect(auth.session?.id).toBe('session-b')
+    expect(auth.csrfToken).toBe('csrf-b')
+    expect(auth.owner?.id).toBe('owner-1')
+  })
 })

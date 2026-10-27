@@ -1,0 +1,183 @@
+================================================================
+开发百宝箱（dev-toolbox）全仓库代码审计报告
+日期：2026-10-27
+方式：open-code-review-delegate 规则引擎 + 10 个并发子代理分范围审查 + 主审计员逐条复核
+性质：只读审计，未修改任何文件
+================================================================
+
+一、总体结论
+----------------------------------------------------------------
+535 个代码文件全部审计完成，覆盖率 100%，无跳过。
+未发现 critical / high 级问题。
+共 63 条发现：medium 19 条（全部经主审计员读源码逐条复核确认，无
+误报）、low 44 条。
+
+整体代码质量较高：认证边界（Argon2id、Token 哈希、CSRF、限流）、
+AI 工具注册表（无 Shell/SQL/任意 HTTP 高权限工具）、凭据加密、日志
+脱敏、文件上传限制等安全基线全部核验通过。问题集中在错误可观测性、
+并发锁序和少量前端状态缺口。
+
+二、审计方法
+----------------------------------------------------------------
+1. ocr delegate preview 确认工作区干净，按全仓审计处理（非 diff 审计）。
+2. ocr delegate rule 拉取 6 组审查规则，覆盖 529 个代码文件；
+   另含 6 个 prompts 产品文档。
+3. 划分 10 个范围，全部由 general-purpose 子代理并发执行
+   （受并发上限限制，实际每轮 2 个、共 5 轮完成）。
+4. 主审计员对全部 medium 发现逐条读源码复核后汇总。
+
+三、medium 级发现（19 条，已全部复核）
+----------------------------------------------------------------
+
+【安全】redact 脱敏遗漏（同一系统性缺口，两处）
+1. apps/api/internal/ai/internal_tasks.go:340-348
+   apps/api/internal/assistant/retrieval.go:245-254
+   redact 策略下外发给模型的记录 Title 从未经过脱敏：两处均只对
+   Summary/Content 调用 redactor.Redact()，而 redact 政策允许
+   sensitivity != normal 的记录外发。标题中内嵌的凭据样式文本会绕过
+   脱敏规则直达模型 Provider 与前端快照。
+
+【并发正确性】
+2. apps/api/internal/ai/tasks.go:423-473
+   apps/api/internal/ai/internal_tasks.go:359-408
+   apps/api/internal/ai/batch.go:321
+   行锁顺序倒置可致死锁：cancelTask 先锁 parent 再改子任务行；
+   claimTask 触发的 recoverExpiredTasks 先锁子任务（SKIP LOCKED）
+   再经 updateBatchParent 锁 parent。用户取消批量任务与 worker 领取
+   任务回收过期子任务并发时形成 AB-BA 环，PostgreSQL 检测后回滚
+   一方，表现为偶发 500。其余 completeTask/failTask 均为子到父顺序，
+   仅此路径相反。
+
+【错误处理与可观测性】
+3. apps/api/internal/assistant/indexing.go:466-470
+   embedding key 解密失败被 if err == nil 静默吞掉，仍以 200 返回
+   片段与空 APIKey；worker 用空凭据发起注定失败的真实外部调用，错误
+   被误归因为 EMBEDDING_PROVIDER_UNAVAILABLE；主密钥配置错误时每轮
+   claim 重复该循环。同文件 claimRun 有正确降级，此处缺失。
+4. apps/api/internal/assistant/indexing.go:175-225（调用方 service.go
+   Run 循环同样零日志）：reconciler 所有失败路径裸 return，索引卡死
+   时无任何排查线索。
+5. apps/ai-worker/src/task-runner.ts:908-916（assistant/index.ts 存在
+   两份同构循环）：claim 阶段所有异常无条件吞掉且零日志后无限重试，
+   包括 service token 失效（401/403）等永久错误——容器健康但 AI 功能
+   静默失效。
+6. apps/api/internal/auth/handlers_public.go:278-302
+   finishChallenge 把真实数据库错误（序列化冲突、连接故障）与凭据
+   错误混同，一律返回 401 并记一次限流失败，污染暴力破解计数；
+   setupTOTP 与 PAT last_used_at 更新同模式。
+7. apps/web/src/app/auth.ts:177-195
+   logout 的 401 分支有会话归属 guard，204 成功分支没有——迟到的
+   成功登出会清掉用户重新登录后的新会话。
+
+【前端功能性 bug】
+8. apps/web/src/app/theme.ts:11-14
+   “跟随系统”主题不生效：computed 内非响应式读取 matchMedia，全仓
+   无 change 监听，系统切换深浅色后页面不变，与设置页文案承诺相悖。
+9. apps/web/src/modules/assistant/assistantStore.ts:809-814
+   SSE 重连遇 404（Run 已被删除）时先置 reconnecting=true 和
+   “正在恢复回答”再 return，不清理状态也不 stopObservation——
+   重连徽标永久常驻。
+10. apps/web/src/modules/tools/shared/editor/adaptiveEditor.ts:134-140
+    operation.then(migrate) 链式中 Monaco chunk 动态加载一旦失败，
+    promise 变 rejected，后续迁移永不执行、无重试无降级，编辑器区域
+    永久空白且产生未处理 rejection。
+
+【性能】
+11. apps/web/src/modules/tools/json/operations.ts:254-268
+    JSON diff 结果无数量上限，5 MiB 输入的全量差异经主线程拼接可
+    冻结页面（regex 模块有 500 条上限，此处缺等价防护）。
+12. apps/web/src/modules/assistant/AssistantMarkdown.vue:23-31
+    每次求值新建 MarkdownIt 并全文重解析；流式回答每个 delta 触发
+    一次，长回答为 O(n^2) 重渲染。
+
+【可维护性】
+13. apps/web/src/modules/tools/time/cron.ts:110
+    apps/web/src/modules/tools/time/time.ts:256
+    用中文错误文案子串匹配区分自家错误与库错误，文案一改行为即错。
+14. apps/web/src/modules/tools/digest/digestRunner.ts:98
+    摘要长度常量与 contracts.ts 导出的 digestLengths 完全重复。
+15. apps/web/src/modules/knowledge/（多文件）
+    flattenFolders 重复 4 份、formatBytes 3 份、时间格式化 3 种实现。
+16. apps/ai-worker/src/（多文件，已抽查确认）
+    鉴权、writeJson、请求体限额读取等基础工具函数存在 7 组近乎相同
+    的拷贝（如 validInternalAuthorization 在 index.ts:267 与
+    assistant/index.ts:386 各一份），修改脱敏/超时策略极易漏改。
+17. deploy/fail2ban/filter.d/dev-toolbox-auth.conf.template:2
+    failregex 期待竖线分隔自定义格式，但 deploy/ 全目录无任何
+    log_format 定义（Nginx 模板用默认 combined 格式）——fail2ban
+    登录防护静默失效；有限流兜底故未定级 high。
+    注：若宿主机既有 Nginx 在仓库外配置了该格式则不成立，仓库内
+    无法证实。
+
+四、low 级发现（44 条，按主题归纳）
+----------------------------------------------------------------
+错误契约：
+- aliyun writeAliyunError 对未注册错误码 WriteHeader(0) 引发 panic
+  兜底 500（internal/aliyun/http.go:99-110）。
+- /internal/provider-test 把畸形输入映射为 503，导致无意义重试
+  （ai-worker/src/index.ts:232-239）。
+- temporary 端点 as T 断言畸形请求抛 500
+  （ai-worker/src/assistant/temporary.ts:115-123）。
+
+健壮性：
+- assistant SSE 单帧坏 JSON 终止整流、无帧长上限、重连固定 600ms
+  无退避（assistantSse.ts / assistantStore.ts）。
+- executeDraft 工具调用 break 留下未应答 tool_calls
+  （task-runner.ts:280-304）。
+- auth challenge 失败记账 `_, _ =` 忽略写库错误
+  （handlers_public.go:324-327）。
+- embedding 响应先全量缓冲再验 32MiB 上限（model-gateway.ts:599-602）。
+- backup.sh 符号链接检查晚于 mkdir 副作用（deploy/scripts/backup.sh:19-20）。
+
+信息暴露（轻）：
+- .dockerignore 未递归排除 deploy/.env*（构建上下文包含内部路径）。
+- restic 测试 fixture 写入真实京东云 endpoint 与个人路径
+  （test-restic-backups.sh:52）。
+- ModuleNav 折叠组焦点陷阱（焦点可移出 aria-modal 对话框）。
+- IME Escape 保护遗漏 2 处（SecuritySettingsView、ModuleNav 抽屉）。
+
+死代码 / 重复 / 风格：
+- json/repair.ts 与 typeGeneration.ts 死分支。
+- ai-worker rewritePrompt 导出常量无消费者。
+- KNOWN_PERSISTENT_EVENTS 与 KNOWN_TEMPORARY_EVENTS 集合重复。
+- 嵌套三元约 10 处（jwt.ts、JsonView.vue、YamlView.vue、
+  AssistantModuleNav.vue 等）。
+- formatBytes 三份实现。
+- 玻璃拟态 backdrop-filter 与登录页径向渐变待对照设计稿确认。
+
+其他：
+- OCR 图片重编码后上传文件名扩展名与实际字节（PNG）不一致。
+- Intl.DateTimeFormat 每次调用重新构造（最多 100 条任务轮询路径）。
+- 迁移副本记录在历史时间线被描述为“添加补充原始记录”。
+- verify-https.sh 的 curl 未加 --noproxy，代理环境下门禁结论可能失真。
+- lib.sh 用 alpine 镜像 chown，与运行镜像的 postgres uid 不一致。
+
+五、覆盖率
+----------------------------------------------------------------
+前端工具页 A/B（tools 模块）          68 + 58 = 126 / 126
+前端骨架/设置/auth/配置                61 / 61
+前端 knowledge/ai 模块                49 / 49
+前端 assistant 模块                   31 / 31
+Go assistant/ai                       51 / 51
+Go knowledge/aliyun + 迁移            44 / 44
+Go auth/platform/operations/cmd/
+  integration                         65 / 65
+AI worker（含 prompts）               49 / 49
+deploy/tests/patches/根配置           59 / 59
+----------------------------------------------------------------
+合计                                 535 / 535，跳过 0，覆盖率 100%
+
+各子代理交叉核验并通过的主要安全基线：Provider Key 加密存储且仅掩码
+展示；Agent Token/PAT/会话 Token 均只存哈希；Caddy 屏蔽 /internal/*；
+原始记录无覆盖路径；AI 工具注册表无高权限工具；未知 AI block 回退有
+测试锁定；日志无凭据与正文泄露；迁移索引与查询匹配。
+
+六、修复优先级建议（未实施，仅建议）
+----------------------------------------------------------------
+1. redact 策略下 Title 脱敏（安全）。
+2. 批量任务取消锁序统一为子到父（并发正确性）。
+3. 三处“错误静默吞掉”：embedding key、reconciler 日志、worker claim
+   循环（可观测性）。
+4. 前端四条：theme 跟随系统、logout 204 归属 guard、assistant 404
+   状态清理、编辑器驱动加载失败降级。
+5. 其余 medium 与 low 按需排期。

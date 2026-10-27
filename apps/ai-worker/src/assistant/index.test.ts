@@ -145,6 +145,76 @@ describe('assistant lane loops', () => {
     // stop() stays awaitable even though the lane already died.
     await runners.stop()
   })
+
+  it('keeps the index lane alive through transient claim failures', async () => {
+    let claimCalls = 0
+    const fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.endsWith('/index/claim')) {
+        claimCalls += 1
+        if (claimCalls <= 2) return new Response('api down', { status: 503 })
+        return new Response(null, { status: 204 })
+      }
+      throw new Error(`unexpected synthetic request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const onLaneFailure = vi.fn()
+    const runners = startAssistantRunners({ ...laneOptions(), onLaneFailure })
+
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(claimCalls).toBe(3)
+    expect(onLaneFailure).not.toHaveBeenCalled()
+
+    await expect(runners.stop()).resolves.toBeUndefined()
+  })
+
+  it('routes 401 claim failures to onLaneFailure instead of silent retries', async () => {
+    let claimCalls = 0
+    const fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.endsWith('/index/claim')) {
+        claimCalls += 1
+        return Response.json({ error: { code: 'AUTH_REQUIRED', message: '内部服务凭据无效' } }, { status: 401 })
+      }
+      throw new Error(`unexpected synthetic request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const onLaneFailure = vi.fn()
+    const runners = startAssistantRunners({ ...laneOptions(), onLaneFailure })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onLaneFailure).toHaveBeenCalledOnce()
+    const [lane, error] = onLaneFailure.mock.calls[0]!
+    expect(lane).toBe('index')
+    expect((error as AssistantClientError).status).toBe(401)
+    expect(claimCalls).toBe(1)
+    expect(requestsTo(fetch, '/index/claim')).toHaveLength(1)
+
+    await runners.stop()
+  })
+
+  it('routes chat lane 401 claim failures to onLaneFailure as well', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.endsWith('/runs/claim')) {
+        return Response.json({ error: { code: 'AUTH_REQUIRED', message: '内部服务凭据无效' } }, { status: 401 })
+      }
+      throw new Error(`unexpected synthetic request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const onLaneFailure = vi.fn()
+    const runners = startAssistantRunners({ ...laneOptions(), chatSlots: 1, onLaneFailure })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onLaneFailure).toHaveBeenCalledOnce()
+    const [lane, error] = onLaneFailure.mock.calls[0]!
+    expect(lane).toBe('chat')
+    expect((error as AssistantClientError).status).toBe(401)
+
+    await runners.stop()
+  })
 })
 
 function laneOptions() {

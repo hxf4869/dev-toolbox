@@ -419,7 +419,27 @@ func (service *Service) cancelTask(response http.ResponseWriter, request *http.R
 		return
 	}
 	defer tx.Rollback(request.Context())
+	// Global row-lock order for ai_task_runs is child rows before the parent
+	// row: completeTask, failTask and recoverExpiredTasks all follow it. A
+	// batch cancel must do the same — peek the type without a lock, take every
+	// child lock in deterministic id order, and only then lock the parent.
+	// Otherwise the parent lock is held while waiting on a child lock that a
+	// concurrent claim-side recovery holds, and the recovery blocks on the
+	// parent in return.
 	var taskType, status string
+	if err := tx.QueryRow(request.Context(), `SELECT task_type, status FROM ai_task_runs WHERE id = $1`, id).Scan(&taskType, &status); errors.Is(err, pgx.ErrNoRows) {
+		writeTaskNotFound(response, request)
+		return
+	} else if err != nil {
+		writeTaskInternal(response, request)
+		return
+	}
+	if taskType == "batch_organize" {
+		if _, err := tx.Exec(request.Context(), `SELECT id FROM ai_task_runs WHERE parent_task_id = $1 ORDER BY id FOR UPDATE`, id); err != nil {
+			writeTaskInternal(response, request)
+			return
+		}
+	}
 	if err := tx.QueryRow(request.Context(), `SELECT task_type, status FROM ai_task_runs WHERE id = $1 FOR UPDATE`, id).Scan(&taskType, &status); errors.Is(err, pgx.ErrNoRows) {
 		writeTaskNotFound(response, request)
 		return

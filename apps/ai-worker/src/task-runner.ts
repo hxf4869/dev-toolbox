@@ -899,21 +899,44 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+// Claim failures split into: quiet (no task / shutdown), transient (network
+// unreachable and statuses the API contract treats as retryable — logged but
+// throttled), and everything else. A 401/403 means the service token or API
+// contract is broken: retrying silently forever would keep the container
+// healthy while the lane never works, so those errors surface to the lane
+// failure handler and the process exits.
+function isTransientClaimError(error: unknown): error is TaskClientError {
+	return error instanceof TaskClientError && (error.status === 0 || error.status === 429 || error.status >= 500)
+}
+
+const claimFailureLogInterval = 30
+
 export async function runTaskLoop(
-  client: TaskClient,
-  runner: TaskRunner,
-  signal: AbortSignal,
-  idleDelayMs = 1_000,
+	client: TaskClient,
+	runner: TaskRunner,
+	signal: AbortSignal,
+	idleDelayMs = 1_000,
 ): Promise<void> {
-  while (!signal.aborted) {
-    let claim: ClaimedTask | null
-    try {
-      claim = await client.claim(signal)
-    } catch (error) {
-      if (signal.aborted) return
-      await abortableDelay(idleDelayMs, signal)
-      continue
-    }
+	let consecutiveClaimFailures = 0
+	while (!signal.aborted) {
+		let claim: ClaimedTask | null
+		try {
+			claim = await client.claim(signal)
+			consecutiveClaimFailures = 0
+		} catch (error) {
+			if (signal.aborted) return
+			if (!isTransientClaimError(error)) throw error
+			consecutiveClaimFailures += 1
+			if (consecutiveClaimFailures === 1 || consecutiveClaimFailures % claimFailureLogInterval === 0) {
+				log('warn', 'task_claim_retrying', {
+					errorType: error instanceof Error ? error.name : 'unknown',
+					status: error.status,
+					consecutiveFailures: consecutiveClaimFailures,
+				})
+			}
+			await abortableDelay(idleDelayMs, signal)
+			continue
+		}
     if (claim === null) {
       await abortableDelay(idleDelayMs, signal)
       continue

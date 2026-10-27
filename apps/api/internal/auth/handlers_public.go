@@ -184,6 +184,12 @@ func (service *Service) setupTOTP(response http.ResponseWriter, request *http.Re
 		FOR UPDATE OF challenge
 	`, challengeID, service.now().UTC()).Scan(&username, &pendingCiphertext)
 	if err != nil {
+		// A missing/expired challenge is an authentication failure; any other
+		// database error is a system fault with a distinct response.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+			return
+		}
 		service.invalidCredentials(response, request)
 		return
 	}
@@ -295,7 +301,19 @@ func (service *Service) finishChallenge(response http.ResponseWriter, request *h
 		&currentTOTPCiphertext,
 		&pendingTOTPCiphertext,
 	)
-	if err != nil || mode != expectedMode {
+	if err != nil {
+		// A missing challenge row is an authentication failure; any other
+		// database error is a system fault and must not consume the
+		// wrong-credential rate limit budget.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+			return
+		}
+		service.limiter.failure(rateKeys...)
+		service.invalidCredentials(response, request)
+		return
+	}
+	if mode != expectedMode {
 		service.limiter.failure(rateKeys...)
 		service.invalidCredentials(response, request)
 		return
@@ -306,7 +324,13 @@ func (service *Service) finishChallenge(response http.ResponseWriter, request *h
 	if expectedMode == "totp_enroll" {
 		if len(pendingTOTPCiphertext) > 0 {
 			secret, decryptErr := decryptSecret(service.masterKey, pendingTOTPCiphertext)
-			valid = decryptErr == nil && validateTOTP(secret, code, service.now())
+			if decryptErr != nil {
+				// A master-key/ciphertext mismatch is a system fault, not a
+				// wrong verification code; it must not burn an attempt.
+				httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
+				return
+			}
+			valid = validateTOTP(secret, code, service.now())
 		}
 	} else {
 		valid, usedRecoveryID, err = service.verifySecondFactor(request.Context(), tx, currentTOTPCiphertext, method, code)

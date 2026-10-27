@@ -224,3 +224,155 @@ describe('adaptive diff editor', () => {
     expect(disposed).toEqual(['codemirror', 'monaco'])
   })
 })
+
+describe('adaptive editor load failures', () => {
+  function createDriver(kind: EditorKind, initialValue: string): EditorDriver {
+    let value = initialValue
+    return {
+      kind,
+      getValue: () => value,
+      setValue: (nextValue) => {
+        value = nextValue
+      },
+      setLanguage: vi.fn(async () => {}),
+      setAriaLabel: vi.fn(),
+      setReadOnly: vi.fn(),
+      dispose: vi.fn(),
+    }
+  }
+
+  it('keeps text and lets a later refresh succeed after the initial load fails', async () => {
+    const query = new FakeCapabilityQuery(false)
+    let attempts = 0
+    const codeMirror = vi.fn(async (options): Promise<EditorDriver> => {
+      attempts += 1
+      if (attempts === 1) throw new Error('chunk load failed')
+      return createDriver('codemirror', options.value)
+    })
+    const editor = createAdaptiveEditor({
+      host: document.createElement('div'),
+      ariaLabel: 'JSON input',
+      language: 'json',
+      value: '{"kept":true}',
+      capabilityQuery: query,
+      loadMonaco: vi.fn(),
+      loadCodeMirror: codeMirror,
+    })
+
+    // ready 的 rejection 必须显式抛给调用方，而不是伪装成功。
+    await expect(editor.ready).rejects.toThrow('chunk load failed')
+    expect(editor.kind).toBeNull()
+    // 失败期间文本仍可读写，不丢数据。
+    editor.setValue('{"kept":true,"edited":1}')
+    expect(editor.getValue()).toBe('{"kept":true,"edited":1}')
+
+    // 手动重试（refresh）成功后编辑器可用且文本完整。
+    await editor.refresh()
+    expect(editor.kind).toBe('codemirror')
+    expect(editor.getValue()).toBe('{"kept":true,"edited":1}')
+    expect(codeMirror).toHaveBeenCalledTimes(2)
+    editor.dispose()
+  })
+
+  it('lets later refresh, language updates, and capability changes run after a failed migration', async () => {
+    const query = new FakeCapabilityQuery(false)
+    let monacoAttempts = 0
+    const monaco = vi.fn(async (options): Promise<EditorDriver> => {
+      monacoAttempts += 1
+      if (monacoAttempts === 1) throw new Error('monaco chunk failed')
+      return createDriver('monaco', options.value)
+    })
+    const onMigrationError = vi.fn()
+    const editor = createAdaptiveEditor({
+      host: document.createElement('div'),
+      ariaLabel: 'JSON input',
+      language: 'json',
+      value: 'text',
+      capabilityQuery: query,
+      loadMonaco: monaco,
+      loadCodeMirror: vi.fn(async (options) => createDriver('codemirror', options.value)),
+      onMigrationError,
+    })
+    await editor.refresh()
+
+    // 能力变化触发迁移失败：onMigrationError 接住，且不阻塞后续操作。
+    query.setMatches(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(onMigrationError).toHaveBeenCalledOnce()
+
+    // 队列未毒化：语言更新可以照常执行。
+    await editor.setLanguage('yaml')
+
+    // 再次能力变化重试加载成功。
+    query.setMatches(false)
+    query.setMatches(true)
+    await editor.refresh()
+    expect(editor.kind).toBe('monaco')
+    editor.dispose()
+  })
+
+  it('does not mount a driver that resolves after dispose', async () => {
+    const query = new FakeCapabilityQuery(false)
+    let finishLoading!: (driver: EditorDriver) => void
+    const pending = new Promise<EditorDriver>((resolve) => {
+      finishLoading = resolve
+    })
+    const driver = createDriver('codemirror', 'late')
+    const codeMirror = vi.fn(() => pending)
+    const editor = createAdaptiveEditor({
+      host: document.createElement('div'),
+      ariaLabel: 'JSON input',
+      language: 'json',
+      value: '',
+      capabilityQuery: query,
+      loadMonaco: vi.fn(),
+      loadCodeMirror: codeMirror,
+    })
+
+    // 等到 loader 已被调用、加载在途，再 dispose。
+    await Promise.resolve()
+    editor.dispose()
+    finishLoading(driver)
+    await pending
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(driver.dispose).toHaveBeenCalledOnce()
+    expect(editor.kind).toBeNull()
+  })
+
+  it('keeps the diff migration queue usable after a failed load', async () => {
+    const query = new FakeCapabilityQuery(false)
+    let attempts = 0
+    const factory = (): DiffDriver => ({
+      kind: 'codemirror',
+      getModifiedValue: () => '{"after":1}',
+      setTexts: vi.fn(),
+      setLanguage: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    })
+    const codeMirror = vi.fn(async (): Promise<DiffDriver> => {
+      attempts += 1
+      if (attempts === 1) throw new Error('diff chunk failed')
+      return factory()
+    })
+    const diff = createAdaptiveDiffEditor({
+      host: document.createElement('div'),
+      ariaLabel: 'JSON diff',
+      language: 'json',
+      original: '{}',
+      modified: '{"before":1}',
+      capabilityQuery: query,
+      loadMonaco: vi.fn(),
+      loadCodeMirror: codeMirror,
+    })
+
+    await expect(diff.ready).rejects.toThrow('diff chunk failed')
+    expect(diff.getModifiedValue()).toBe('{"before":1}')
+
+    diff.setTexts('{}', '{"after":1}')
+    await diff.refresh()
+    expect(diff.kind).toBe('codemirror')
+    expect(diff.getModifiedValue()).toBe('{"after":1}')
+    diff.dispose()
+  })
+})

@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -82,14 +83,16 @@ func NewService(
 // RunOnce executes a single reconciler pass immediately; integration tests use
 // it instead of the background loop.
 func (service *Service) RunOnce(ctx context.Context) {
-	service.reconcileIndex(ctx, service.now().UTC())
+	_ = service.reconcileIndex(ctx, service.now().UTC())
 }
 
 // Run blocks until ctx is done and periodically reconciles the embedding index.
 // The integrator starts it in a goroutine after RegisterRoutes and cancels it
 // via the server shutdown context.
 func (service *Service) Run(ctx context.Context, logger *slog.Logger) {
-	service.reconcileIndex(ctx, service.now().UTC())
+	if err := service.reconcileIndex(ctx, service.now().UTC()); err != nil {
+		logReconcileFailure(ctx, logger, err)
+	}
 	ticker := time.NewTicker(ReconcileInterval)
 	defer ticker.Stop()
 	for {
@@ -97,7 +100,26 @@ func (service *Service) Run(ctx context.Context, logger *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			service.reconcileIndex(ctx, service.now().UTC())
+			if err := service.reconcileIndex(ctx, service.now().UTC()); err != nil {
+				logReconcileFailure(ctx, logger, err)
+			}
 		}
 	}
+}
+
+// logReconcileFailure records exactly one entry per failed reconciler pass. A
+// shutdown that cancels the in-flight pass is normal and stays silent.
+func logReconcileFailure(ctx context.Context, logger *slog.Logger, err error) {
+	if logger == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	var failure *reconcileFailure
+	if !errors.As(err, &failure) {
+		return
+	}
+	logger.ErrorContext(ctx, "assistant_index_reconcile_failed",
+		"stage", failure.stage, "error", classifyReconcileCause(failure.cause))
 }

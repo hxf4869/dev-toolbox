@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
+  generateEmbeddings,
   ProviderGatewayError,
   testProviderConnection,
   type ProviderProtocol,
@@ -239,3 +240,85 @@ function sendData(response: ServerResponse, value: unknown): void {
 function sendEvent(response: ServerResponse, event: string, value: unknown): void {
   response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`)
 }
+
+describe('generateEmbeddings response bounding', () => {
+  const chunk1MiB = Buffer.alloc(1024 * 1024, 0x61)
+
+  async function listen(handler: (request: IncomingMessage, response: ServerResponse) => void): Promise<number> {
+    const server = createServer(handler)
+    servers.push(server)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no port')
+    return address.port
+  }
+
+  function embeddingsRequest(port: number) {
+    return generateEmbeddings({
+      baseUrl: `http://127.0.0.1:${port}`,
+      apiKey: 'synthetic-embedding-key',
+      modelId: 'mock-embedding',
+      input: ['合成文本'],
+      dimensions: 4,
+      allowInsecureHttp: true,
+    })
+  }
+
+  it('terminates an oversized streaming body without a content-length instead of buffering it', async () => {
+    let serverCompleted = false
+    let serverSawClose = Promise.withResolvers<void>()
+    const port = await listen((_request, response) => {
+      // 不声明 content-length：chunked 传输下超额只能靠实际字节拦截。
+      response.writeHead(200, { 'content-type': 'application/json' })
+      let sent = 0
+      const timer = setInterval(() => {
+        response.write(chunk1MiB)
+        sent += chunk1MiB.length
+        if (sent >= 40 * 1024 * 1024) {
+          clearInterval(timer)
+          serverCompleted = true
+          response.end()
+        }
+      }, 1)
+      response.on('close', () => {
+        serverSawClose.resolve()
+      })
+    })
+
+    await expect(embeddingsRequest(port)).rejects.toMatchObject({ category: 'embedding_response_invalid' })
+    await serverSawClose.promise
+    // 客户端在累计超过 32 MiB 后主动取消：服务端从未写完全部 40 MiB。
+    expect(serverCompleted).toBe(false)
+  })
+
+  it('rejects an early-declared oversize content-length by cancelling the body and releasing the connection', async () => {
+    const serverSawClose = Promise.withResolvers<void>()
+    const port = await listen((_request, response) => {
+      // 声明 40 MiB 但只提供 1 MiB：客户端提前拒绝时必须主动取消，连接
+      // 随即被释放；若客户端改为读完 body，会一直等到超时。
+      response.writeHead(200, { 'content-length': String(40 * 1024 * 1024) })
+      response.write(chunk1MiB)
+      response.on('close', () => {
+        serverSawClose.resolve()
+      })
+    })
+
+    await expect(embeddingsRequest(port)).rejects.toMatchObject({ category: 'embedding_response_invalid' })
+    // 确定性断言：取消传播到服务端、连接结束（不依赖 teardown 关服兜底）。
+    await serverSawClose.promise
+  })
+
+  it('parses a normal chunked response without content-length', async () => {
+    const port = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        data: [{ embedding: [0.5, 0.5, 0.5, 0.5] }],
+        usage: { prompt_tokens: 3, total_tokens: 3 },
+      }))
+    })
+
+    const result = await embeddingsRequest(port)
+    expect(result.embeddings).toEqual([[0.5, 0.5, 0.5, 0.5]])
+    expect(result.usage).toEqual({ inputTokens: 3, totalTokens: 3 })
+  })
+})

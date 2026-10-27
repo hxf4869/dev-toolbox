@@ -806,12 +806,16 @@ export const useAssistantStore = defineStore('assistant', () => {
           streamMessage.value = '登录已失效，已停止恢复回答；请退出登录后重新登录。'
           return
         }
-        reconnecting.value = true
-        streamMessage.value = '连接暂时中断，正在恢复回答…'
         if (error instanceof ApiError && error.status === 404) {
+          // Run 已在服务端被删除或清理：结束本次观察并清掉重连状态，不再
+          // 显示“正在恢复回答”；保留已收到的消息与准确错误反馈，不伪造
+          // failed/cancelled，也不动草稿与模型选择。
+          stopObservation()
           actionError.value = error.message
           return
         }
+        reconnecting.value = true
+        streamMessage.value = '连接暂时中断，正在恢复回答…'
       }
       await reconnectDelay(controller.signal)
     }

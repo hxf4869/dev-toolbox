@@ -33,7 +33,7 @@ import type {
   PositionedIssue,
   StructuralDifference,
 } from './contracts'
-import { StructuredToolError } from './contracts'
+import { DIFF_DISPLAY_LIMIT, StructuredToolError } from './contracts'
 import {
   assertStructuredTextLimit,
   containsUnsafeNumber,
@@ -241,41 +241,69 @@ export function diffJson(
   if (mode === 'text') {
     assertStructuredTextLimit(leftText)
     assertStructuredTextLimit(rightText)
-    const differences = textDifferences(leftText, rightText)
-    return { operation: 'diff', summary: `${differences.length} 处行差异`, differences }
+    const state = textDifferences(leftText, rightText)
+    return { operation: 'diff', summary: diffSummary(state, '行'), differences: state.differences, truncated: state.truncated }
   }
   const left = parseLosslessJson(leftText)
   const right = parseLosslessJson(rightText)
-  const differences: StructuralDifference[] = []
-  compareStructure(left, right, '$', differences, identityField?.trim() || undefined)
-  return { operation: 'diff', summary: `${differences.length} 处结构差异`, differences }
+  const state: DiffCollection = { differences: [], truncated: false }
+  compareStructure(left, right, '$', state, identityField?.trim() || undefined)
+  return { operation: 'diff', summary: diffSummary(state, '结构'), differences: state.differences, truncated: state.truncated }
 }
 
-function textDifferences(left: string, right: string): StructuralDifference[] {
+interface DiffCollection {
+  differences: StructuralDifference[]
+  truncated: boolean
+}
+
+function diffSummary(state: DiffCollection, kind: '行' | '结构'): string {
+  // 截断时不得把上限数量写成真实总数。
+  return state.truncated
+    ? `${DIFF_DISPLAY_LIMIT}+ 处${kind}差异（已截断，仅显示前 ${DIFF_DISPLAY_LIMIT} 处）`
+    : `${state.differences.length} 处${kind}差异`
+}
+
+// 收集一条差异：已收集满上限时，这条就是确认存在的第 501 条——只据此标记
+// 截断，不收集也不继续统计。恰好第 500 条收集完不触发截断。
+function collectDifference(output: DiffCollection, difference: StructuralDifference): void {
+  if (output.differences.length >= DIFF_DISPLAY_LIMIT) {
+    output.truncated = true
+    return
+  }
+  output.differences.push(difference)
+}
+
+function textDifferences(left: string, right: string): DiffCollection {
   const before = left.split('\n')
   const after = right.split('\n')
-  const output: StructuralDifference[] = []
+  const state: DiffCollection = { differences: [], truncated: false }
   for (let index = 0; index < Math.max(before.length, after.length); index += 1) {
     if (before[index] === after[index]) continue
-    output.push({
+    if (state.differences.length >= DIFF_DISPLAY_LIMIT) {
+      // 达到上限后只确认仍存在更多差异，不继续收集或统计总数。
+      state.truncated = true
+      break
+    }
+    state.differences.push({
       path: `第 ${index + 1} 行`,
       kind: before[index] === undefined ? 'added' : after[index] === undefined ? 'removed' : 'changed',
       before: before[index],
       after: after[index],
     })
   }
-  return output
+  return state
 }
 
 function compareStructure(
   left: LosslessJsonValue | undefined,
   right: LosslessJsonValue | undefined,
   path: string,
-  output: StructuralDifference[],
+  output: DiffCollection,
   identityField?: string,
 ): void {
+  if (output.truncated) return
   if (left === undefined || right === undefined) {
-    output.push({
+    collectDifference(output, {
       path,
       kind: left === undefined ? 'added' : 'removed',
       before: left === undefined ? undefined : displayLossless(left),
@@ -289,22 +317,27 @@ function compareStructure(
       const rightMap = indexIdentity(right, identityField, path)
       const identities = [...leftMap.keys(), ...[...rightMap.keys()].filter((key) => !leftMap.has(key))]
       for (const identity of identities) {
+        if (output.truncated) return
         compareStructure(leftMap.get(identity), rightMap.get(identity), `${path}[${JSON.stringify(identity)}]`, output, identityField)
       }
       return
     }
     for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+      if (output.truncated) return
       compareStructure(left[index], right[index], `${path}[${index}]`, output, identityField)
     }
     return
   }
   if (isObject(left) && isObject(right)) {
     const keys = [...Object.keys(left), ...Object.keys(right).filter((key) => !(key in left))]
-    for (const key of keys) compareStructure(left[key], right[key], canonicalChildPath(path, key), output, identityField)
+    for (const key of keys) {
+      if (output.truncated) return
+      compareStructure(left[key], right[key], canonicalChildPath(path, key), output, identityField)
+    }
     return
   }
   if (displayLossless(left) !== displayLossless(right)) {
-    output.push({ path, kind: 'changed', before: displayLossless(left), after: displayLossless(right) })
+    collectDifference(output, { path, kind: 'changed', before: displayLossless(left), after: displayLossless(right) })
   }
 }
 

@@ -242,12 +242,16 @@ func rankOrMax(rank *int) int {
 // buildSourceSnapshots redacts and freezes the retrieved fragments. Redact
 // policy applies to every outbound fragment even when the item's sensitivity
 // label is normal: labels do not prove the text itself contains no secret.
+// Titles and content share one redactor per source so the same secret found in
+// both resolves to the same placeholder.
 func buildSourceSnapshots(candidates []retrievalCandidate, policy string) []retrievalCandidate {
 	snapshots := make([]retrievalCandidate, len(candidates))
 	copy(snapshots, candidates)
 	for index := range snapshots {
 		if policy == "redact" {
-			snapshots[index].Content = ai.NewTextRedactor().Redact(snapshots[index].Content)
+			redactor := ai.NewTextRedactor()
+			snapshots[index].Title = redactor.Redact(snapshots[index].Title)
+			snapshots[index].Content = redactor.Redact(snapshots[index].Content)
 		}
 	}
 	return snapshots

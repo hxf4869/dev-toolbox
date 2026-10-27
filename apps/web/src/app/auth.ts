@@ -189,8 +189,10 @@ export const useAuthStore = defineStore('auth', () => {
       if (!(error instanceof ApiError) || error.status !== 401 || error.code !== 'AUTH_REQUIRED') {
         throw error
       }
-      if (session.value?.id !== sessionId) return
     }
+    // 迟到的成功登出也不能清掉重新登录后的新会话：无论 204 还是
+    // AUTH_REQUIRED，都只在会话仍是发起请求时的那个会话时才清理本地状态。
+    if (session.value?.id !== sessionId) return
     clearAuthentication()
   }
 

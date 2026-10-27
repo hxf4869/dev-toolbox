@@ -342,6 +342,7 @@ func (service *Service) buildClaimInput(request *http.Request, tx pgx.Tx, itemID
 				return result, 0, err
 			}
 			if policy == "redact" && relatedSensitivity != "normal" {
+				entry.Title = redactor.Redact(entry.Title)
 				entry.Summary = redactor.Redact(entry.Summary)
 			}
 			estimatedTokens += utf8.RuneCountInString(entry.Title) + utf8.RuneCountInString(entry.Summary)

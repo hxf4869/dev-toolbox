@@ -180,6 +180,56 @@ describe('assistant store', () => {
     }
   })
 
+  it('ends observation with cleared reconnect state when the run is gone (404)', async () => {
+    vi.useFakeTimers()
+    try {
+      const streamPersistentRun = vi.fn(async function* (
+        _runId: string,
+        _options: { afterSequence?: number; signal: AbortSignal },
+      ) {
+        yield {
+          type: 'snapshot',
+          data: {
+            lastSequence: 0,
+            run: structuredClone(runFixtures.running),
+            assistantMessage: {
+              ...structuredClone(runStartFixture.assistantMessage),
+              currentRun: structuredClone(runFixtures.running),
+            },
+          },
+        }
+        yield { type: 'answer.delta', data: { sequence: 1, delta: '被删除前。' } }
+        throw new ApiError(404, {
+          error: { code: 'NOT_FOUND', message: '会话不存在或已被清理', requestId: 'req-404' },
+        })
+      })
+      const store = useAssistantStore()
+      store.setApi(createApi({ streamPersistentRun }))
+      await store.initialize()
+      store.draft = '测试 404 清理'
+
+      await store.send()
+      await flushPromises()
+      // 重连徽标与“正在恢复回答”文案必须清掉，错误反馈保留。
+      expect(store.reconnecting).toBe(false)
+      expect(store.streamMessage).toBe('')
+      expect(store.actionError).toBe('会话不存在或已被清理')
+      // 已收到的消息保留，Run 未被伪造为 failed/cancelled。
+      expect(store.displayMessages.at(-1)?.content).toBe('被删除前。')
+      const observedRuns = store.messages
+        .filter((message) => message.currentRun)
+        .map((message) => message.currentRun?.status)
+      expect(observedRuns).toContain('running')
+      // 不再重连：推进多个重连间隔后连接次数不变。
+      const callsAfter404 = streamPersistentRun.mock.calls.length
+      await vi.advanceTimersByTimeAsync(6_000)
+      await flushPromises()
+      expect(streamPersistentRun.mock.calls.length).toBe(callsAfter404)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('forwards both explicit folder deletion behaviors without inventing a default', async () => {
     const deleteFolder = vi.fn().mockResolvedValue(undefined)
     const store = useAssistantStore()

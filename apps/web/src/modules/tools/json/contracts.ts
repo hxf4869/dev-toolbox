@@ -1,5 +1,9 @@
 export const STRUCTURED_TEXT_LIMIT_BYTES = 5 * 1024 * 1024
 
+// diff 结果的展示上限：生成差异时达到该数量即停止收集，只确认是否仍存在
+// 更多差异。与 regex 工具的 REGEX_MATCH_DISPLAY_LIMIT 同一约定。
+export const DIFF_DISPLAY_LIMIT = 500
+
 export type JsonLocalLanguage = 'typescript' | 'java' | 'go' | 'kotlin'
 
 export type JsonWorkerRequest =
@@ -35,7 +39,7 @@ export type JsonWorkerResult =
   | { operation: 'format'; output: string }
   | { operation: 'repair'; candidate: string; diff: string; changed: boolean }
   | { operation: 'jsonpath'; matches: JsonPathMatch[] }
-  | { operation: 'diff'; summary: string; differences: StructuralDifference[] }
+  | { operation: 'diff'; summary: string; differences: StructuralDifference[]; truncated: boolean }
   | {
       operation: 'schema-validate'
       schemaValid: true

@@ -235,7 +235,10 @@ func (service *Service) claimRun(response http.ResponseWriter, request *http.Req
 			knowledge.ModelID = strings.TrimSpace(deref(config.ModelID))
 			knowledge.BaseURL = deref(config.BaseURL)
 			knowledge.Dimensions = config.Dimensions
-			if ciphertext := service.loadEmbeddingCiphertext(ctx, tx); ciphertext != nil {
+			// A ciphertext read failure folds into "no credential" so run
+			// creation keeps its knowledge-unavailable degradation; only the
+			// index claim path treats a missing credential as a hard failure.
+			if ciphertext, ciphertextErr := service.loadEmbeddingCiphertext(ctx, tx); ciphertextErr == nil && ciphertext != nil {
 				if embeddingKey, openErr := secretbox.Open(service.masterKey, ciphertext); openErr == nil {
 					knowledge.APIKey = embeddingKey
 				}
@@ -683,11 +686,15 @@ func deref(value *string) string {
 	return *value
 }
 
-func (service *Service) loadEmbeddingCiphertext(ctx context.Context, querier rowQuerier) []byte {
+func (service *Service) loadEmbeddingCiphertext(ctx context.Context, querier rowQuerier) ([]byte, error) {
 	var ciphertext []byte
-	if err := querier.QueryRow(ctx,
-		`SELECT api_key_ciphertext FROM assistant_embedding_config WHERE singleton`).Scan(&ciphertext); err != nil {
-		return nil
+	err := querier.QueryRow(ctx,
+		`SELECT api_key_ciphertext FROM assistant_embedding_config WHERE singleton`).Scan(&ciphertext)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return ciphertext
+	return ciphertext, nil
 }

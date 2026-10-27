@@ -96,6 +96,7 @@ const mobilePane = ref<'input' | 'result'>('input')
 const summary = ref('')
 const issues = ref<string[]>([])
 const errorMessage = ref('')
+const editorFailed = ref(false)
 const repairCandidate = ref('')
 const repairDiff = ref('')
 const running = ref(false)
@@ -163,6 +164,8 @@ const actionLabel = computed(() => {
   return generationSource.value === 'ai' ? '预览并确认发送' : '生成本地类型'
 })
 
+const editorLoadFailedMessage = '编辑器组件加载失败，已输入内容不会丢失；可重试加载。'
+
 onMounted(async () => {
   if (!inputHost.value || !resultHost.value) return
   inputEditor = createAdaptiveEditor({
@@ -173,6 +176,9 @@ onMounted(async () => {
     onChange(value) {
       invalidateStaleResults()
       input.value = value
+    },
+    onMigrationError() {
+      editorFailed.value = true
     },
   })
   resultEditor = createAdaptiveEditor({
@@ -190,9 +196,26 @@ onMounted(async () => {
         schemaText.value = value
       }
     },
+    onMigrationError() {
+      editorFailed.value = true
+    },
   })
-  await Promise.all([inputEditor.ready, resultEditor.ready])
+  try {
+    await Promise.all([inputEditor.ready, resultEditor.ready])
+  } catch {
+    editorFailed.value = true
+  }
 })
+
+async function retryEditorLoad() {
+  if (!inputEditor || !resultEditor) return
+  try {
+    await Promise.all([inputEditor.refresh(), resultEditor.refresh()])
+    editorFailed.value = false
+  } catch {
+    editorFailed.value = true
+  }
+}
 
 watch(input, (value) => {
   if (repairCandidate.value && value !== repairSource) {
@@ -727,6 +750,10 @@ function describeAIError(error: unknown): string {
     <div id="json-feedback" tabindex="-1">
       <p v-if="showProgress" class="progress" role="status">正在浏览器 Worker 中处理…</p>
       <p v-else-if="aiRunning" class="progress" role="status">已按确认内容发送，正在等待所选 Provider；可取消当前 HTTP 请求。</p>
+      <div v-if="editorFailed" class="message message--error" role="alert">
+        <span>{{ editorLoadFailedMessage }}</span>
+        <UiButton variant="secondary" @click="retryEditorLoad">重试加载编辑器</UiButton>
+      </div>
       <div v-if="errorMessage" id="json-errors" class="message message--error" role="alert">
         <span>{{ errorMessage }}</span>
         <UiButton v-if="aiFailed" variant="secondary" @click="selectGenerationSource('local')">返回本地生成</UiButton>

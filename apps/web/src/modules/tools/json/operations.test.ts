@@ -2,6 +2,7 @@ import { getAllRegisteredSchemaUris } from '@hyperjump/json-schema/draft-2020-12
 import { describe, expect, it, vi } from 'vitest'
 
 import { STRUCTURED_TEXT_LIMIT_BYTES, StructuredToolError } from './contracts'
+import { DIFF_DISPLAY_LIMIT } from './contracts'
 import { diffJson, queryJsonPath, runJsonOperation, validateSchema } from './operations'
 import { parseLosslessJson } from './lossless'
 import { createLimitedRepair } from './repair'
@@ -117,6 +118,115 @@ describe('JSON diff', () => {
 
   it('refuses to merge duplicate explicit identities', () => {
     expectCode(() => diffJson('[{"id":1},{"id":1}]', '[{"id":1}]', 'structure', 'id'), 'DIFF_IDENTITY_DUPLICATE')
+  })
+
+  it('reports no truncation at exactly the display limit and stops collecting beyond it', () => {
+    const lines = (count: number, suffix: string) =>
+      Array.from({ length: count }, (_, index) => `{"line":${index},"v":"${suffix}"}`).join('\n')
+
+    // 恰好 500 条差异且没有后续差异：不得误报截断。
+    const exact = diffJson(lines(500, 'a'), lines(500, 'b'), 'text')
+    if (exact.operation !== 'diff') throw new Error('expected diff result')
+    expect(exact.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(exact.truncated).toBe(false)
+    expect(exact.summary).toBe(`${DIFF_DISPLAY_LIMIT} 处行差异`)
+
+    // 第 501 处差异存在：截断为 true，只收集 500 条，不继续统计总数。
+    const over = diffJson(lines(501, 'a'), lines(501, 'b'), 'text')
+    if (over.operation !== 'diff') throw new Error('expected diff result')
+    expect(over.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(over.truncated).toBe(true)
+    expect(over.summary).toContain('已截断')
+    expect(over.summary).not.toBe(`${DIFF_DISPLAY_LIMIT} 处行差异`)
+
+    // 结构模式同样受上限约束。
+    const structureOver = diffJson(
+      `[${Array.from({ length: 501 }, (_, index) => `{"id":${index},"v":"a"}`).join(',')}]`,
+      `[${Array.from({ length: 501 }, (_, index) => `{"id":${index},"v":"b"}`).join(',')}]`,
+      'structure',
+      'id',
+    )
+    if (structureOver.operation !== 'diff') throw new Error('expected diff result')
+    expect(structureOver.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(structureOver.truncated).toBe(true)
+  })
+
+  it('structure mode does not truncate at exactly 500 changed entries', () => {
+    // 用户复现场景：500 个 0 对 500 个 1，恰 500 条 changed 差异。
+    const zeros = JSON.stringify(Array.from({ length: DIFF_DISPLAY_LIMIT }, () => 0))
+    const ones = JSON.stringify(Array.from({ length: DIFF_DISPLAY_LIMIT }, () => 1))
+
+    const result = diffJson(zeros, ones, 'structure')
+    if (result.operation !== 'diff') throw new Error('expected diff result')
+    expect(result.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(result.truncated).toBe(false)
+    expect(result.summary).toBe(`${DIFF_DISPLAY_LIMIT} 处结构差异`)
+
+    // 第 501 个元素也发生变化时才标记截断，且仍只收集 500 条。
+    const over = diffJson(
+      JSON.stringify(Array.from({ length: DIFF_DISPLAY_LIMIT + 1 }, () => 0)),
+      JSON.stringify(Array.from({ length: DIFF_DISPLAY_LIMIT + 1 }, () => 1)),
+      'structure',
+    )
+    if (over.operation !== 'diff') throw new Error('expected diff result')
+    expect(over.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(over.truncated).toBe(true)
+  })
+
+  it('structure mode does not truncate when entries after the 500th difference are identical', () => {
+    // 前 500 个元素有差异，其后全部相同：差异恰好 500 条，不误报截断。
+    const left = JSON.stringify([...Array.from({ length: DIFF_DISPLAY_LIMIT }, () => 0), 7, 8, 9])
+    const right = JSON.stringify([...Array.from({ length: DIFF_DISPLAY_LIMIT }, () => 1), 7, 8, 9])
+
+    const result = diffJson(left, right, 'structure')
+    if (result.operation !== 'diff') throw new Error('expected diff result')
+    expect(result.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(result.truncated).toBe(false)
+  })
+
+  it('structure mode truncates added and removed branches at the 501st entry', () => {
+    // added：右侧多出的第 501 个新增元素触发截断（前 500 个相同前缀不算差异）。
+    const prefix = JSON.stringify(Array.from({ length: 10 }, (_, index) => index))
+    const addedOver = diffJson(
+      prefix,
+      JSON.stringify([...Array.from({ length: 10 }, (_, index) => index), ...Array.from({ length: DIFF_DISPLAY_LIMIT + 1 }, (_, index) => 1000 + index)]),
+      'structure',
+    )
+    if (addedOver.operation !== 'diff') throw new Error('expected diff result')
+    expect(addedOver.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(addedOver.differences.every((item) => item.kind === 'added')).toBe(true)
+    expect(addedOver.truncated).toBe(true)
+
+    // added 恰好 500 条：不误报。
+    const addedExact = diffJson('[]', JSON.stringify(Array.from({ length: DIFF_DISPLAY_LIMIT }, (_, index) => index)), 'structure')
+    if (addedExact.operation !== 'diff') throw new Error('expected diff result')
+    expect(addedExact.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(addedExact.truncated).toBe(false)
+
+    // removed：左侧多出的第 501 个元素同样触发截断。
+    const removedOver = diffJson(
+      JSON.stringify([...Array.from({ length: 10 }, (_, index) => index), ...Array.from({ length: DIFF_DISPLAY_LIMIT + 1 }, (_, index) => 1000 + index)]),
+      prefix,
+      'structure',
+    )
+    if (removedOver.operation !== 'diff') throw new Error('expected diff result')
+    expect(removedOver.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(removedOver.differences.every((item) => item.kind === 'removed')).toBe(true)
+    expect(removedOver.truncated).toBe(true)
+
+    // removed 恰好 500 条：不误报。
+    const removedExact = diffJson(JSON.stringify(Array.from({ length: DIFF_DISPLAY_LIMIT }, (_, index) => index)), '[]', 'structure')
+    if (removedExact.operation !== 'diff') throw new Error('expected diff result')
+    expect(removedExact.differences).toHaveLength(DIFF_DISPLAY_LIMIT)
+    expect(removedExact.truncated).toBe(false)
+  })
+
+  it('keeps a normal diff untouched by the display limit', () => {
+    const result = diffJson('{"a":1}', '{"a":2}', 'structure')
+    if (result.operation !== 'diff') throw new Error('expected diff result')
+    expect(result.differences).toHaveLength(1)
+    expect(result.truncated).toBe(false)
+    expect(result.summary).toBe('1 处结构差异')
   })
 
   it('accepts exactly 5 MiB per text editor and rejects either editor above its UTF-8 limit', () => {

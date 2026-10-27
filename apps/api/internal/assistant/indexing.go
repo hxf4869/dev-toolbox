@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/ai"
 	"github.com/hxf4869/dev-toolbox/apps/api/internal/platform/httpapi"
@@ -170,36 +171,68 @@ func writeIndexStatus(response http.ResponseWriter, request *http.Request, compu
 	httpapi.WriteJSON(response, http.StatusOK, dto)
 }
 
+// reconcileFailure carries the fixed processing stage where the reconciler
+// stopped. The raw database error never reaches logs — constraint and driver
+// messages can embed parameter values or connection details — so the caller
+// logs the stage plus a safe classification instead.
+type reconcileFailure struct {
+	stage string
+	cause error
+}
+
+func (failure *reconcileFailure) Error() string {
+	return "assistant index reconciler failed at stage " + failure.stage
+}
+
+func (failure *reconcileFailure) Unwrap() error { return failure.cause }
+
+// classifyReconcileCause maps a failure cause to a fixed, safe category;
+// SQLSTATE codes are five fixed characters and carry no user data.
+func classifyReconcileCause(cause error) string {
+	var databaseError *pgconn.PgError
+	if errors.As(cause, &databaseError) {
+		return "database_error_" + databaseError.Code
+	}
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(cause, context.Canceled) {
+		return "canceled"
+	}
+	return "database_error"
+}
+
 // reconcileIndex is the single writer for index queue rows and the global
-// status. It runs on the reconciler loop only.
-func (service *Service) reconcileIndex(ctx context.Context, now time.Time) {
+// status. It runs on the reconciler loop only. Failures return the stage they
+// stopped at so the loop can log them exactly once.
+func (service *Service) reconcileIndex(ctx context.Context, now time.Time) error {
 	tx, err := service.database.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return
+		return &reconcileFailure{stage: "begin_tx", cause: err}
 	}
 	defer tx.Rollback(ctx)
 	// Global lock order is app_settings -> assistant_embedding_config. Settings
 	// updates use the same order when a policy change bumps the generation.
 	if _, err := tx.Exec(ctx, `SELECT true FROM app_settings WHERE singleton FOR SHARE`); err != nil {
-		return
+		return &reconcileFailure{stage: "lock_settings", cause: err}
 	}
 	if _, err := tx.Exec(ctx, `SELECT true FROM assistant_embedding_config WHERE singleton FOR UPDATE`); err != nil {
-		return
+		return &reconcileFailure{stage: "lock_index_config", cause: err}
 	}
 	computation, err := service.computeIndexStatus(ctx, tx)
 	if err != nil {
-		return
+		return &reconcileFailure{stage: "compute_status", cause: err}
 	}
 	if !computation.config.Configured || !computation.config.Enabled {
 		_ = tx.Rollback(ctx)
-		return
+		return nil
 	}
 	if err := service.requeueIndexRows(ctx, tx, computation.config.Generation, computation.policy, now); err != nil {
-		return
+		return &reconcileFailure{stage: "requeue", cause: err}
 	}
 	updated, err := service.computeIndexStatus(ctx, tx)
 	if err != nil {
-		return
+		return &reconcileFailure{stage: "compute_status", cause: err}
 	}
 	if updated.status != computation.config.Status {
 		errorCode := updated.config.LastErrorCode
@@ -216,12 +249,13 @@ func (service *Service) reconcileIndex(ctx context.Context, now time.Time) {
 			UPDATE assistant_embedding_config SET status = $1, last_error_code = $2, updated_at = $3
 			WHERE singleton
 		`, updated.status, errorCode, now); err != nil {
-			return
+			return &reconcileFailure{stage: "write_index_status", cause: err}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return
+		return &reconcileFailure{stage: "commit", cause: err}
 	}
+	return nil
 }
 
 func firstCurrentFailureCode(ctx context.Context, tx pgx.Tx, generation int64) (*string, error) {
@@ -443,6 +477,20 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 		return
 	}
 	expires := now.Add(assistantLeaseDuraton)
+	// The connection snapshot exists only inside this lease response. Confirm a
+	// usable credential before any lease row is touched: a read/decrypt failure
+	// must fail the claim instead of committing running leases that cycle
+	// through a doomed empty-key attempt on every claim.
+	ciphertext, ciphertextErr := service.loadEmbeddingCiphertext(ctx, tx)
+	if ciphertextErr != nil || ciphertext == nil {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
+	apiKey, openErr := secretbox.Open(service.masterKey, ciphertext)
+	if openErr != nil || apiKey == "" {
+		writeAssistantInternalFailure(response, request)
+		return
+	}
 	for index, row := range claimed {
 		if _, err := tx.Exec(ctx, `
 			UPDATE assistant_fragment_embeddings SET state = 'running', attempt = attempt + 1,
@@ -455,18 +503,13 @@ func (service *Service) claimIndexBatch(response http.ResponseWriter, request *h
 		}
 		claimed[index].attempt = row.attempt + 1
 	}
-	result := indexClaimResult{Generation: config.Generation, Policy: policy, ExpiresAt: expires, Fragments: []indexClaimFragment{}}
-	// Embedding connection snapshot; exists only inside this lease response.
+	result := indexClaimResult{Generation: config.Generation, Policy: policy, ExpiresAt: expires,
+		APIKey: apiKey, Fragments: []indexClaimFragment{}}
 	result.BaseURL = deref(config.BaseURL)
 	result.ModelID = deref(config.ModelID)
 	result.Dimensions = 0
 	if config.Dimensions != nil {
 		result.Dimensions = *config.Dimensions
-	}
-	if ciphertext := service.loadEmbeddingCiphertext(ctx, tx); ciphertext != nil {
-		if apiKey, err := secretbox.Open(service.masterKey, ciphertext); err == nil {
-			result.APIKey = apiKey
-		}
 	}
 	for _, row := range claimed {
 		row.fragment.Attempt = row.attempt

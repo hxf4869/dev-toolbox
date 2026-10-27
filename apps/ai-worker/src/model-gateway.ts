@@ -570,6 +570,33 @@ export interface EmbeddingResult {
   readonly usage: { readonly inputTokens: number | null; readonly totalTokens: number | null } | null
 }
 
+// 读取 embedding 响应体时按流累计实际字节，超限立即中断读取并取消响应体，
+// 而不是先完整缓冲任意大小的响应再拒绝；Content-Length 缺失或不准确时实际
+// 字节限额仍然生效。
+async function readBoundedEmbeddingBody(response: Response): Promise<Uint8Array> {
+  if (response.body === null) return new Uint8Array(0)
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    received += value.byteLength
+    if (received > maximumEmbeddingResponseBytes) {
+      await reader.cancel().catch(() => undefined)
+      throw new ProviderGatewayError('embedding_response_invalid', new Error('embedding response exceeds the 32 MiB limit'))
+    }
+    chunks.push(value)
+  }
+  const output = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    output.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return output
+}
+
 export async function generateEmbeddings(request: EmbeddingRequest): Promise<EmbeddingResult> {
   const baseUrl = normalizeBaseUrl(request.baseUrl, request.allowInsecureHttp)
   if (!request.apiKey || !request.modelId || request.input.length === 0 || request.input.length > 16) {
@@ -597,9 +624,13 @@ export async function generateEmbeddings(request: EmbeddingRequest): Promise<Emb
       throw new ProviderGatewayError('unavailable')
     }
     const declared = Number(response.headers.get('content-length') ?? '0')
-    if (declared > maximumEmbeddingResponseBytes) throw new ProviderGatewayError('unavailable')
-    const raw = await response.arrayBuffer()
-    if (raw.byteLength > maximumEmbeddingResponseBytes) throw new ProviderGatewayError('unavailable')
+    // 响应过大不是可重试的瞬时故障：重试只会得到同样超限的响应。
+    if (declared > maximumEmbeddingResponseBytes) {
+      // 提前拒绝也必须取消响应体释放连接；清理失败不得覆盖主要错误。
+      await response.body?.cancel().catch(() => undefined)
+      throw new ProviderGatewayError('embedding_response_invalid', new Error('embedding response exceeds the 32 MiB limit'))
+    }
+    const raw = await readBoundedEmbeddingBody(response)
     if (response.status === 401 || response.status === 403) {
       throw new ProviderGatewayError('credentials_invalid')
     }

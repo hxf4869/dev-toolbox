@@ -92,20 +92,49 @@ export function startAssistantRunners(options: AssistantRunnerOptions): RunningA
   }
 }
 
+// Claim failures split into: quiet (no task / shutdown), transient (network
+// unreachable and statuses the API contract treats as retryable — logged but
+// throttled), and everything else. A 401/403 means the service token or API
+// contract is broken: retrying silently forever would keep the container
+// healthy while the lane never works, so those errors surface to the lane
+// failure handler and the process exits.
+function isTransientClaimError(error: unknown): error is AssistantClientError {
+	return error instanceof AssistantClientError &&
+		(error.status === 0 || error.status === 429 || error.status >= 500)
+}
+
+const claimFailureLogInterval = 30
+
+// logClaimRetry emits the first failure immediately, then one entry per
+// interval so a long outage stays observable without flooding the log.
+function logClaimRetry(lane: 'chat' | 'index', error: AssistantClientError, consecutiveFailures: number): void {
+	if (consecutiveFailures === 1 || consecutiveFailures % claimFailureLogInterval === 0) {
+		log('warn', 'assistant_claim_retrying', {
+			lane, errorType: error instanceof Error ? error.name : 'unknown',
+			status: error.status, consecutiveFailures,
+		})
+	}
+}
+
 async function runAssistantLoop(
-  client: AssistantClient,
-  runner: AssistantRunner,
-  signal: AbortSignal,
+	client: AssistantClient,
+	runner: AssistantRunner,
+	signal: AbortSignal,
 ): Promise<void> {
-  while (!signal.aborted) {
-    let claim: ClaimedAssistantRun | null
-    try {
-      claim = await client.claimRun(signal)
-    } catch {
-      if (signal.aborted) return
-      await abortableDelay(idleDelayMs, signal)
-      continue
-    }
+	let consecutiveClaimFailures = 0
+	while (!signal.aborted) {
+		let claim: ClaimedAssistantRun | null
+		try {
+			claim = await client.claimRun(signal)
+			consecutiveClaimFailures = 0
+		} catch (error) {
+			if (signal.aborted) return
+			if (!isTransientClaimError(error)) throw error
+			consecutiveClaimFailures += 1
+			logClaimRetry('chat', error, consecutiveClaimFailures)
+			await abortableDelay(idleDelayMs, signal)
+			continue
+		}
     if (claim === null) {
       await abortableDelay(idleDelayMs, signal)
       continue
@@ -129,19 +158,24 @@ async function runAssistantLoop(
 }
 
 async function runIndexLoop(
-  client: AssistantClient,
-  runner: EmbeddingIndexRunner,
-  signal: AbortSignal,
+	client: AssistantClient,
+	runner: EmbeddingIndexRunner,
+	signal: AbortSignal,
 ): Promise<void> {
-  while (!signal.aborted) {
-    let batch: ClaimedIndexBatch | null
-    try {
-      batch = await client.claimIndexBatch(signal)
-    } catch {
-      if (signal.aborted) return
-      await abortableDelay(idleDelayMs, signal)
-      continue
-    }
+	let consecutiveClaimFailures = 0
+	while (!signal.aborted) {
+		let batch: ClaimedIndexBatch | null
+		try {
+			batch = await client.claimIndexBatch(signal)
+			consecutiveClaimFailures = 0
+		} catch (error) {
+			if (signal.aborted) return
+			if (!isTransientClaimError(error)) throw error
+			consecutiveClaimFailures += 1
+			logClaimRetry('index', error, consecutiveClaimFailures)
+			await abortableDelay(idleDelayMs, signal)
+			continue
+		}
     if (batch === null) {
       await abortableDelay(idleDelayMs, signal)
       continue

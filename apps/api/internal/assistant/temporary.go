@@ -195,7 +195,9 @@ func (service *Service) temporaryStream(response http.ResponseWriter, request *h
 	}
 	embedding := temporaryEmbeddingSnapshot{}
 	if config.Configured && config.Enabled && config.BaseURL != nil && config.ModelID != nil && config.Dimensions != nil {
-		if ciphertext := service.loadEmbeddingCiphertext(ctx, tx); ciphertext != nil {
+		// A ciphertext read failure folds into "no credential" so a temporary
+		// chat keeps running without knowledge instead of failing outright.
+		if ciphertext, ciphertextErr := service.loadEmbeddingCiphertext(ctx, tx); ciphertextErr == nil && ciphertext != nil {
 			if key, openErr := secretbox.Open(service.masterKey, ciphertext); openErr == nil {
 				embedding = temporaryEmbeddingSnapshot{
 					BaseURL: *config.BaseURL, APIKey: key, ModelID: *config.ModelID, Dimensions: *config.Dimensions,

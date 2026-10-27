@@ -15,6 +15,8 @@ const output = ref('')
 const mobilePane = ref<'input' | 'result'>('input')
 const status = ref('')
 const errorMessage = ref('')
+const editorFailed = ref(false)
+const editorLoadFailedMessage = '编辑器组件加载失败，已输入内容不会丢失；可重试加载。'
 const running = ref(false)
 const showProgress = ref(false)
 const inputHost = ref<HTMLElement | null>(null)
@@ -35,10 +37,35 @@ const actionLabel = computed(() => mode.value === 'format' ? '格式化并校验
 
 onMounted(async () => {
   if (!inputHost.value || !outputHost.value) return
-  inputEditor = createAdaptiveEditor({ host: inputHost.value, ariaLabel: 'YAML 输入编辑器', language: inputLanguage.value, value: input.value, onChange(value) { input.value = value } })
-  outputEditor = createAdaptiveEditor({ host: outputHost.value, ariaLabel: 'YAML 结果编辑器', language: outputLanguage.value, value: '', readOnly: true })
-  await Promise.all([inputEditor.ready, outputEditor.ready])
+  inputEditor = createAdaptiveEditor({
+    host: inputHost.value, ariaLabel: 'YAML 输入编辑器', language: inputLanguage.value, value: input.value,
+    onChange(value) { input.value = value },
+    onMigrationError() {
+      editorFailed.value = true
+    },
+  })
+  outputEditor = createAdaptiveEditor({
+    host: outputHost.value, ariaLabel: 'YAML 结果编辑器', language: outputLanguage.value, value: '', readOnly: true,
+    onMigrationError() {
+      editorFailed.value = true
+    },
+  })
+  try {
+    await Promise.all([inputEditor.ready, outputEditor.ready])
+  } catch {
+    editorFailed.value = true
+  }
 })
+
+async function retryEditorLoad() {
+  if (!inputEditor || !outputEditor) return
+  try {
+    await Promise.all([inputEditor.refresh(), outputEditor.refresh()])
+    editorFailed.value = false
+  } catch {
+    editorFailed.value = true
+  }
+}
 watch(input, (value) => {
   if (inputEditor?.getValue() !== value) inputEditor?.setValue(value)
   if (value === outputSourceInput) return
@@ -152,6 +179,10 @@ function cancelLocalRequest() {
     </div>
     <div id="yaml-feedback" tabindex="-1">
       <p v-if="showProgress" class="message" role="status">正在浏览器 Worker 中处理…</p>
+      <div v-if="editorFailed" class="message error" role="alert">
+        <p>{{ editorLoadFailedMessage }}</p>
+        <UiButton variant="secondary" @click="retryEditorLoad">重试加载编辑器</UiButton>
+      </div>
       <p v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</p>
       <p v-else-if="status" class="message" role="status">{{ status }}</p>
     </div>

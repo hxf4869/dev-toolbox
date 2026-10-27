@@ -19,6 +19,9 @@ export interface AdaptiveEditorOptions {
   capabilityQuery?: EditorCapabilityQuery
   loadMonaco?: EditorDriverFactory
   loadCodeMirror?: EditorDriverFactory
+  // 接住能力变化等无人 await 的迁移 rejection；ready/refresh 的 rejection
+  // 仍由调用方自行处理并呈现。
+  onMigrationError?(error: unknown): void
 }
 
 export interface AdaptiveEditor {
@@ -42,6 +45,7 @@ export interface AdaptiveDiffEditorOptions {
   capabilityQuery?: EditorCapabilityQuery
   loadMonaco?: DiffDriverFactory
   loadCodeMirror?: DiffDriverFactory
+  onMigrationError?(error: unknown): void
 }
 
 export interface AdaptiveDiffEditor {
@@ -132,10 +136,16 @@ export function createAdaptiveEditor(options: AdaptiveEditorOptions): AdaptiveEd
   }
 
   const enqueueMigration = () => {
-    operation = operation.then(migrate)
+    // 一次迁移失败不能毒化队列：隔离上一次的 rejection，让后续 refresh、
+    // 语言更新与能力变化照常执行；本次返回的 promise 仍向上抛给调用方呈现。
+    operation = operation.then(migrate, migrate)
     return operation
   }
-  const onCapabilityChange = () => void enqueueMigration()
+  const onCapabilityChange = () => {
+    void enqueueMigration().catch((error: unknown) => {
+      options.onMigrationError?.(error)
+    })
+  }
   query.addEventListener('change', onCapabilityChange)
   const ready = enqueueMigration()
 
@@ -153,9 +163,10 @@ export function createAdaptiveEditor(options: AdaptiveEditorOptions): AdaptiveEd
     },
     setLanguage(nextLanguage) {
       language = nextLanguage
-      operation = operation.then(async () => {
+      const applyLanguage = async (): Promise<void> => {
         await driver?.setLanguage(nextLanguage)
-      })
+      }
+      operation = operation.then(applyLanguage, applyLanguage)
       return operation
     },
     setAriaLabel(nextAriaLabel) {
@@ -230,10 +241,15 @@ export function createAdaptiveDiffEditor(options: AdaptiveDiffEditorOptions): Ad
   }
 
   const enqueueMigration = () => {
-    operation = operation.then(migrate)
+    // 与普通编辑器相同：一次迁移失败不能毒化队列，后续迁移照常执行。
+    operation = operation.then(migrate, migrate)
     return operation
   }
-  const onCapabilityChange = () => void enqueueMigration()
+  const onCapabilityChange = () => {
+    void enqueueMigration().catch((error: unknown) => {
+      options.onMigrationError?.(error)
+    })
+  }
   query.addEventListener('change', onCapabilityChange)
   const ready = enqueueMigration()
 
@@ -252,9 +268,10 @@ export function createAdaptiveDiffEditor(options: AdaptiveDiffEditorOptions): Ad
     },
     setLanguage(nextLanguage) {
       language = nextLanguage
-      operation = operation.then(async () => {
+      const applyLanguage = async (): Promise<void> => {
         await driver?.setLanguage(nextLanguage)
-      })
+      }
+      operation = operation.then(applyLanguage, applyLanguage)
       return operation
     },
     refresh: enqueueMigration,
