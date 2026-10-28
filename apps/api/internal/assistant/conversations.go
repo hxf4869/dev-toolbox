@@ -572,14 +572,14 @@ func (service *Service) listMessages(response http.ResponseWriter, request *http
 		}
 		nextCursor = &encoded
 	}
-	items := make([]AssistantMessageDTO, 0, len(entries))
+	messages := make([]messageRow, 0, len(entries))
 	for index := len(entries) - 1; index >= 0; index-- {
-		dto, err := service.messageDTO(request.Context(), service.database, entries[index].row)
-		if err != nil {
-			writeAssistantInternalFailure(response, request)
-			return
-		}
-		items = append(items, dto)
+		messages = append(messages, entries[index].row)
+	}
+	items, err := service.messageDTOs(request.Context(), service.database, messages)
+	if err != nil {
+		writeAssistantInternalFailure(response, request)
+		return
 	}
 	httpapi.WriteJSON(response, http.StatusOK, map[string]any{"items": items, "nextCursor": nextCursor})
 }

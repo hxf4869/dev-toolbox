@@ -329,10 +329,14 @@ function compareStructure(
     return
   }
   if (isObject(left) && isObject(right)) {
-    const keys = [...Object.keys(left), ...Object.keys(right).filter((key) => !(key in left))]
+    const keys = [...Object.keys(left), ...Object.keys(right).filter((key) => !Object.hasOwn(left, key))]
     for (const key of keys) {
       if (output.truncated) return
-      compareStructure(left[key], right[key], canonicalChildPath(path, key), output, identityField)
+      compareStructure(
+        Object.hasOwn(left, key) ? left[key] : undefined,
+        Object.hasOwn(right, key) ? right[key] : undefined,
+        canonicalChildPath(path, key), output, identityField,
+      )
     }
     return
   }
@@ -344,7 +348,7 @@ function compareStructure(
 function indexIdentity(values: LosslessJsonValue[], field: string, path: string): Map<string, LosslessJsonValue> {
   const output = new Map<string, LosslessJsonValue>()
   for (const value of values) {
-    if (!isObject(value) || !(field in value)) {
+    if (!isObject(value) || !Object.hasOwn(value, field)) {
       throw new StructuredToolError({
         code: 'DIFF_IDENTITY_MISSING',
         message: `${path} 中有数组元素缺少显式身份字段 ${JSON.stringify(field)}。`,

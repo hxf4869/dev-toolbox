@@ -144,6 +144,10 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 	if err != nil {
 		return AssistantRunDTO{}, err
 	}
+	return runDTOWithCounts(run, provided, cited, lastSequence, canRetry), nil
+}
+
+func runDTOWithCounts(run runRow, provided, cited int, lastSequence int64, canRetry bool) AssistantRunDTO {
 	dto := AssistantRunDTO{
 		ID: run.ID, ConversationID: run.ConversationID, InputMessageID: run.InputMessageID,
 		OutputMessageID: run.OutputMessageID, ClientRequestID: run.ClientRequestID,
@@ -174,7 +178,7 @@ func (service *Service) runDTO(ctx context.Context, querier rowQuerier, run runR
 	if run.isTerminal() {
 		dto.Timings.TotalMS = totalRunTiming(run)
 	}
-	return dto, nil
+	return dto
 }
 
 func (service *Service) runRetryable(ctx context.Context, querier rowQuerier, run runRow) (bool, error) {
@@ -346,12 +350,7 @@ func (service *Service) citationRefs(ctx context.Context, querier rowQuerier, ru
 }
 
 func (service *Service) messageDTO(ctx context.Context, querier rowQuerier, message messageRow) (AssistantMessageDTO, error) {
-	dto := AssistantMessageDTO{
-		ID: message.ID, ConversationID: message.ConversationID, Sequence: message.Sequence,
-		Role: message.Role, Content: message.Content, ReasoningContent: message.ReasoningContent,
-		Status: message.Status, Citations: []CitationRefDTO{}, CreatedAt: message.CreatedAt,
-		CompletedAt: message.CompletedAt,
-	}
+	dto := messageBaseDTO(message)
 	if message.Role == "assistant" {
 		var reasoningMS *int64
 		if message.CurrentRunID != nil {
@@ -375,4 +374,109 @@ func (service *Service) messageDTO(ctx context.Context, querier rowQuerier, mess
 		dto.ReasoningDurationMS = reasoningMS
 	}
 	return dto, nil
+}
+
+func messageBaseDTO(message messageRow) AssistantMessageDTO {
+	return AssistantMessageDTO{
+		ID: message.ID, ConversationID: message.ConversationID, Sequence: message.Sequence,
+		Role: message.Role, Content: message.Content, ReasoningContent: message.ReasoningContent,
+		Status: message.Status, Citations: []CitationRefDTO{}, CreatedAt: message.CreatedAt,
+		CompletedAt: message.CompletedAt,
+	}
+}
+
+// A message page loads run metadata and citation references in two queries,
+// regardless of the number of assistant messages. Full excerpts are not needed
+// for the message list; the source drawer still loads them on demand.
+func (service *Service) messageDTOs(ctx context.Context, querier rowQuerier, messages []messageRow) ([]AssistantMessageDTO, error) {
+	items := make([]AssistantMessageDTO, len(messages))
+	runIDs := make([]uuid.UUID, 0)
+	seen := make(map[uuid.UUID]bool)
+	for index, message := range messages {
+		items[index] = messageBaseDTO(message)
+		if message.Role == "assistant" && message.CurrentRunID != nil && !seen[*message.CurrentRunID] {
+			seen[*message.CurrentRunID] = true
+			runIDs = append(runIDs, *message.CurrentRunID)
+		}
+	}
+	if len(runIDs) == 0 {
+		return items, nil
+	}
+	rows, err := querier.Query(ctx, `
+		SELECT `+runColumns+`,
+		       (SELECT count(*) FROM assistant_run_sources WHERE run_id = run.id),
+		       (SELECT count(*) FROM assistant_run_sources WHERE run_id = run.id AND cited_number IS NOT NULL),
+		       COALESCE((SELECT max(sequence) FROM assistant_run_events WHERE run_id = run.id), 0),
+		       run.status IN ('failed', 'stopped') AND EXISTS (
+		           SELECT 1 FROM assistant_messages message
+		           WHERE message.id = run.output_message_id AND message.current_run_id = run.id
+		             AND message.sequence = (SELECT max(sequence) FROM assistant_messages WHERE conversation_id = run.conversation_id)
+		       )
+		FROM assistant_runs run WHERE run.id = ANY($1)
+	`, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	runs := make(map[uuid.UUID]AssistantRunDTO, len(runIDs))
+	for rows.Next() {
+		var run runRow
+		var provided, cited int
+		var lastSequence int64
+		var canRetry bool
+		targets := append(runScanTargets(&run), &provided, &cited, &lastSequence, &canRetry)
+		if err := rows.Scan(targets...); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		runs[run.ID] = runDTOWithCounts(run, provided, cited, lastSequence, canRetry)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = querier.Query(ctx, `
+		SELECT s.run_id, s.ordinal, s.cited_number, s.fragment_id, s.item_id, s.artifact_id,
+		       s.source_kind, s.title_snapshot, i.id IS NULL OR i.deleted_at IS NOT NULL
+		FROM assistant_run_sources s
+		LEFT JOIN knowledge_items i ON i.id = s.item_id
+		WHERE s.run_id = ANY($1) AND s.cited_number IS NOT NULL
+		ORDER BY s.run_id, s.ordinal
+	`, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	citations := make(map[uuid.UUID][]CitationRefDTO)
+	for rows.Next() {
+		var runID uuid.UUID
+		var source sourceRow
+		if err := rows.Scan(&runID, &source.Ordinal, &source.CitedNumber, &source.FragmentID,
+			&source.ItemID, &source.ArtifactID, &source.SourceKind, &source.TitleSnapshot, &source.ItemDeleted); err != nil {
+			return nil, err
+		}
+		dto := service.sourceDTO(runRow{ID: runID}, source, *source.CitedNumber)
+		citations[runID] = append(citations[runID], CitationRefDTO{
+			RunID: runID, SourceOrdinal: source.Ordinal, CitationNumber: *source.CitedNumber,
+			SourceKind: dto.SourceKind, SourceClass: dto.SourceClass, Title: dto.Title,
+			Availability: dto.Availability,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index, message := range messages {
+		if message.Role != "assistant" || message.CurrentRunID == nil {
+			continue
+		}
+		run, ok := runs[*message.CurrentRunID]
+		if !ok {
+			return nil, pgx.ErrNoRows
+		}
+		items[index].CurrentRun = &run
+		items[index].ReasoningDurationMS = run.Timings.ReasoningMS
+		if refs := citations[run.ID]; len(refs) > 0 {
+			items[index].Citations = refs
+		}
+	}
+	return items, nil
 }

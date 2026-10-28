@@ -32,6 +32,7 @@ interface RecordedProviderCall {
 }
 
 interface StubHandlers {
+  answerModelText?: string
   // Summary model response text; defaults to a valid merged summary with
   // empty and whitespace-only entries that sanitization must drop.
   summaryModelText?: string
@@ -126,7 +127,7 @@ async function runTemporaryStream(
     if (kind === 'summary' && handlers.summaryFetch) return handlers.summaryFetch(init?.signal)
     const text = kind === 'summary'
       ? handlers.summaryModelText ?? defaultSummaryModelText
-      : '合成回答正文'
+      : handlers.answerModelText ?? '合成回答正文'
     return completionSse(text)
   })
   vi.stubGlobal('fetch', fetch)
@@ -245,7 +246,7 @@ describe('temporary rolling summary maintenance (DT-R04)', () => {
     })
     const { events } = await runTemporaryStream(
       { summaryModelText },
-      { summarySource: rollingSummarySource() },
+      { sensitivePolicy: 'redact', summarySource: rollingSummarySource() },
     )
 
     const completed = completedEvent(events)
@@ -254,6 +255,18 @@ describe('temporary rolling summary maintenance (DT-R04)', () => {
     expect(summary).not.toContain('192.168.77.77')
     expect(summary).toContain('<TOKEN_1>')
     expect(summary).toContain('<INTERNAL_IP_1>')
+  })
+
+  it.each(['allow', 'redact'])('applies %s to temporary answers and summaries', async (sensitivePolicy) => {
+    const text = '合成服务地址 192.168.77.77'
+    const { events } = await runTemporaryStream({
+      answerModelText: text,
+      summaryModelText: JSON.stringify({ confirmedFacts: [text], corrections: [], rejectedHypotheses: [], unresolvedQuestions: [] }),
+    }, { sensitivePolicy, summarySource: rollingSummarySource() })
+    const answer = events.filter((event) => event.event === 'answer.delta').map((event) => event.data.delta).join('')
+    const expected = sensitivePolicy === 'allow' ? text : '合成服务地址 <INTERNAL_IP_1>'
+    expect(answer).toBe(expected)
+    expect(completedEvent(events).data.temporarySummary).toMatchObject({ confirmedFacts: [expected] })
   })
 
   it('skips maintenance entirely when prior plus the full prefix exceeds the budget', async () => {

@@ -318,9 +318,9 @@ export class AssistantRunner {
     let reasoningSeen = false
     let answerSeen = false
 
-    const redactor = new StreamRedactor()
+    const redactor = claim.sensitivePolicy === 'allow' ? null : new StreamRedactor()
     const parser = new CitationParser(sources.length)
-    const reasoner = new StreamRedactor()
+    const reasoner = claim.sensitivePolicy === 'allow' ? null : new StreamRedactor()
 
     const flusher = new EventFlusher(async (events) => {
       await this.submitEvents(claim, heartbeat, events)
@@ -341,53 +341,65 @@ export class AssistantRunner {
     })
 
     let usageCaptured = false
-    for await (const event of stream) {
-      ensureAlive(heartbeat, deadline)
-      if (event.type === 'done') {
-        usage.answerInputTokens = event.message.usage.input
-        usage.answerOutputTokens = event.message.usage.output
-        const contextTokens = event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite
-        usage.answerContextTokens = contextTokens > 0 ? contextTokens : null
-        usageCaptured = true
-        break
-      }
-      if (event.type === 'error') {
-        throw new ProviderGatewayError('unavailable', new Error(event.error.errorMessage ?? 'stream error'))
-      }
-      if (event.type === 'thinking_delta') {
-        reasoningSeen = true
-        const redacted = reasoner.push(event.delta)
-        if (redacted.length > 0) {
-          await flusher.pushReasoningDelta(redacted)
+    try {
+      for await (const event of stream) {
+        ensureAlive(heartbeat, deadline)
+        if (event.type === 'done') {
+          usage.answerInputTokens = event.message.usage.input
+          usage.answerOutputTokens = event.message.usage.output
+          const contextTokens = event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite
+          usage.answerContextTokens = contextTokens > 0 ? contextTokens : null
+          usageCaptured = true
+          break
         }
-        continue
-      }
-      if (event.type === 'text_delta') {
-        if (answerStarted === null) answerStarted = performance.now()
-        if (reasoningSeen && !answerSeen) {
-          answerSeen = true
-          timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
-          const tail = reasoner.flush()
-          if (tail.length > 0) {
-            await flusher.pushReasoningDelta(tail)
+        if (event.type === 'error') {
+          throw new ProviderGatewayError('unavailable', new Error(event.error.errorMessage ?? 'stream error'))
+        }
+        if (event.type === 'thinking_delta') {
+          reasoningSeen = true
+          const redacted = reasoner?.push(event.delta) ?? event.delta
+          if (redacted.length > 0) {
+            onDelta(true)
+            await flusher.pushReasoningDelta(redacted)
           }
-          await flusher.push('reasoning.completed', { durationMs: timings.reasoningMs ?? 0 })
+          continue
         }
-        // Output redaction precedes citation parsing; any reserved prefix is a
-        // hard protocol failure (docs/16 §8.11).
-        const redacted = redactor.push(event.delta)
-        await submitCitationResults(parser.push(redacted), flusher, onDelta)
-        continue
+        if (event.type === 'text_delta') {
+          if (answerStarted === null) answerStarted = performance.now()
+          if (reasoningSeen && !answerSeen) {
+            answerSeen = true
+            timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
+            const tail = reasoner?.flush() ?? ''
+            if (tail.length > 0) {
+              onDelta(true)
+              await flusher.pushReasoningDelta(tail)
+            }
+            await flusher.push('reasoning.completed', { durationMs: timings.reasoningMs ?? 0 })
+          }
+          // Output redaction precedes citation parsing; any reserved prefix is a
+          // hard protocol failure (docs/16 §8.11).
+          const redacted = redactor?.push(event.delta) ?? event.delta
+          await submitCitationResults(parser.push(redacted), flusher, onDelta)
+          continue
+        }
       }
+    } catch (error) {
+      // Settle already released deltas before failing the run or retrying;
+      // no timer from this attempt may append into a later attempt.
+      await flusher.drain()
+      throw error
     }
     timings.answerMs = answerStarted === null ? null : Math.round(performance.now() - answerStarted)
-    const reasoningTail = reasoner.flush()
+    const reasoningTail = reasoner?.flush() ?? ''
     if (!answerSeen && reasoningSeen) {
       timings.reasoningMs = Math.round(performance.now() - reasoningStarted)
-      if (reasoningTail.length > 0) await flusher.pushReasoningDelta(reasoningTail)
+      if (reasoningTail.length > 0) {
+        onDelta(true)
+        await flusher.pushReasoningDelta(reasoningTail)
+      }
       await flusher.push('reasoning.completed', { durationMs: timings.reasoningMs ?? 0 })
     }
-    const answerTail = redactor.flush()
+    const answerTail = redactor?.flush() ?? ''
     await submitCitationResults(parser.push(answerTail), flusher, onDelta)
     await submitCitationResults(parser.flush(), flusher, onDelta)
     await flusher.push('usage.updated', {

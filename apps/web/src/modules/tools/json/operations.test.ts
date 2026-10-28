@@ -99,6 +99,20 @@ describe('JSONPath subset', () => {
 })
 
 describe('JSON diff', () => {
+  it.each(['toString', 'constructor', 'hasOwnProperty'])('compares own %s properties without prototype values', (key) => {
+    const source = JSON.stringify({ [key]: 'fixture' })
+    expect(diffJson('{}', source, 'structure')).toMatchObject({
+      differences: [{ kind: 'added', before: undefined, after: '"fixture"' }],
+    })
+    expect(diffJson(source, '{}', 'structure')).toMatchObject({
+      differences: [{ kind: 'removed', before: '"fixture"', after: undefined }],
+    })
+  })
+
+  it('rejects an identity field inherited from Object.prototype', () => {
+    expectCode(() => diffJson('[{}]', '[{}]', 'structure', 'constructor'), 'DIFF_IDENTITY_MISSING')
+  })
+
   it('ignores object key order in structural mode and keeps text mode literal', () => {
     const structure = diffJson('{"a":1,"b":2}', '{"b":2,"a":1}', 'structure')
     const text = diffJson('{"a":1,"b":2}', '{"b":2,"a":1}', 'text')

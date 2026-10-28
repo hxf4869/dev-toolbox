@@ -250,9 +250,9 @@ async function handleStream(
       },
     ],
   }
-  const redactor = new StreamRedactor()
+  const redactor = body.sensitivePolicy === 'allow' ? null : new StreamRedactor()
   const parser = new CitationParser(sources.length)
-  const reasoner = new StreamRedactor()
+  const reasoner = body.sensitivePolicy === 'allow' ? null : new StreamRedactor()
   let reasoningSeen = false
   let answerSeen = false
   const streamStarted = performance.now()
@@ -289,7 +289,7 @@ async function handleStream(
       }
       if (event.type === 'thinking_delta') {
         reasoningSeen = true
-        const redacted = reasoner.push(event.delta)
+        const redacted = reasoner?.push(event.delta) ?? event.delta
         if (redacted.length > 0) emit('reasoning.delta', { delta: redacted })
         continue
       }
@@ -298,22 +298,22 @@ async function handleStream(
         if (reasoningSeen && !answerSeen) {
           answerSeen = true
           reasoningDurationMs = Math.round(performance.now() - reasoningStarted)
-          const tail = reasoner.flush()
+          const tail = reasoner?.flush() ?? ''
           if (tail.length > 0) emit('reasoning.delta', { delta: tail })
           emit('reasoning.completed', { durationMs: reasoningDurationMs })
         }
-        const redacted = redactor.push(event.delta)
+        const redacted = redactor?.push(event.delta) ?? event.delta
         emitTemporaryCitationResults(parser.push(redacted), emit)
         continue
       }
     }
-    const tail = reasoner.flush()
+    const tail = reasoner?.flush() ?? ''
     if (!answerSeen && reasoningSeen) {
       reasoningDurationMs = Math.round(performance.now() - reasoningStarted)
       if (tail.length > 0) emit('reasoning.delta', { delta: tail })
       emit('reasoning.completed', { durationMs: reasoningDurationMs })
     }
-    const answerTail = redactor.flush()
+    const answerTail = redactor?.flush() ?? ''
     emitTemporaryCitationResults(parser.push(answerTail), emit)
     emitTemporaryCitationResults(parser.flush(), emit)
     if (usage === null) throw new ProviderGatewayError('protocol_error')
@@ -448,12 +448,12 @@ function buildTemporarySummaryInput(
 // never on the JSON blob. Sanitization then drops empty entries and enforces
 // the entry/byte limits; the byte limit counts raw entry bytes, the same
 // caliber the Go API validates on the next request.
-function sanitizeTemporarySummary(parsed: Record<string, string[]>): TemporarySummary | null {
-  const outputRedactor = new StreamRedactor()
+function sanitizeTemporarySummary(parsed: Record<string, string[]>, policy: string): TemporarySummary | null {
+  const outputRedactor = policy === 'allow' ? null : new StreamRedactor()
   const clean = (entries: string[] | undefined): string[] =>
     (entries ?? [])
       .filter((entry) => entry.trim().length > 0)
-      .map((entry) => outputRedactor.push(entry) + outputRedactor.flush())
+      .map((entry) => redactTemporaryInput(outputRedactor, entry))
   const summary: TemporarySummary = {
     confirmedFacts: clean(parsed.confirmedFacts),
     corrections: clean(parsed.corrections),
@@ -509,7 +509,7 @@ async function maintainTemporarySummary(
       signal: maintenance.signal,
     })
     const parsed = parseSummary(message.text)
-    return parsed === null ? null : sanitizeTemporarySummary(parsed)
+    return parsed === null ? null : sanitizeTemporarySummary(parsed, body.sensitivePolicy)
   } catch {
     return null
   } finally {

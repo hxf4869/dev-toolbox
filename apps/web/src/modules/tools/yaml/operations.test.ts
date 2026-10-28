@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { parse } from 'yaml'
 
 import { StructuredToolError } from '../json/contracts'
 import { runYamlOperation } from './operations'
@@ -14,6 +15,13 @@ function expectCode(run: () => unknown, code: string) {
 }
 
 describe('YAML 1.2 workbench', () => {
+  it.each([false, true])('preserves ordinary isLosslessNumber=%s fields in nested objects', (flag) => {
+    const value = { isLosslessNumber: flag, value: 'fixture', other: 1 }
+    const source = { nested: value, items: [value] }
+    const result = runYamlOperation({ operation: 'from-json', text: JSON.stringify(source) })
+    expect(parse(result.output)).toEqual(source)
+  })
+
   it('round-trips nested empty containers in objects and arrays', () => {
     const source = '{"list":[],"nested":{},"items":[{},[],{"child":[]} ]}'
     const yaml = runYamlOperation({ operation: 'from-json', text: source })

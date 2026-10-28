@@ -14,7 +14,6 @@ import { isNumber, LosslessNumber } from 'lossless-json'
 import { StructuredToolError } from '../json/contracts'
 import {
   assertStructuredTextLimit,
-  isObject,
   type LosslessJsonValue,
   parseLosslessJson,
   stringifyLossless,
@@ -174,12 +173,12 @@ function emitYamlValue(value: LosslessJsonValue, depth: number, inline: boolean)
   if (value === null) return 'null'
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (typeof value === 'string') return JSON.stringify(value)
-  if ('isLosslessNumber' in Object(value)) return (value as LosslessNumber).value
+  if (value instanceof LosslessNumber) return value.value
   if (Array.isArray(value)) {
     if (value.length === 0) return `${inline ? '' : '  '.repeat(depth)}[]`
     return value.map((item) => {
       const prefix = `${'  '.repeat(depth)}-`
-      if (isObject(item) || Array.isArray(item)) return `${prefix}\n${emitYamlValue(item, depth + 1, false)}`
+      if (item !== null && typeof item === 'object' && !(item instanceof LosslessNumber)) return `${prefix}\n${emitYamlValue(item, depth + 1, false)}`
       return `${prefix} ${emitYamlValue(item, depth + 1, true)}`
     }).join('\n')
   }
@@ -188,7 +187,7 @@ function emitYamlValue(value: LosslessJsonValue, depth: number, inline: boolean)
   return entries.map(([key, child]) => {
     const keyText = /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key) ? key : JSON.stringify(key)
     const prefix = `${'  '.repeat(depth)}${keyText}:`
-    if (isObject(child) || Array.isArray(child)) return `${prefix}\n${emitYamlValue(child, depth + 1, false)}`
+    if (child !== null && typeof child === 'object' && !(child instanceof LosslessNumber)) return `${prefix}\n${emitYamlValue(child, depth + 1, false)}`
     return `${prefix} ${emitYamlValue(child, depth + 1, true)}`
   }).join('\n')
 }

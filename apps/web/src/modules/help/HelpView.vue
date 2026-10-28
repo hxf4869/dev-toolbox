@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import UiIcon from '../../components/ui/UiIcon.vue'
 
-const version = import.meta.env.VITE_APP_VERSION || 'v3.0.0-rc.2'
+const version = import.meta.env.VITE_APP_VERSION || 'v3.0.0-rc.3'
 </script>
 
 <template>

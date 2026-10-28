@@ -137,18 +137,19 @@ func (service *Service) purgeItem(response http.ResponseWriter, request *http.Re
 
 	operationRoot := filepath.Join(service.quarantineRoot, uuid.NewString())
 	moved := make([]quarantinedFile, 0, len(entries))
-	restoreMoved := func() {
-		for index := len(moved) - 1; index >= 0; index-- {
-			_ = os.MkdirAll(filepath.Dir(moved[index].originalPath), 0o700)
-			_ = os.Rename(moved[index].quarantinePath, moved[index].originalPath)
+	restoreMoved := func() bool {
+		if err := restoreQuarantinedFiles(moved, operationRoot); err != nil {
+			httpapi.WriteError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "附件回滚未完成，未恢复的隔离副本已保留，请检查存储")
+			return false
 		}
-		_ = os.RemoveAll(operationRoot)
+		return true
 	}
 	for _, entry := range entries {
 		originalPath, err := service.storagePath(entry.key)
 		if err != nil {
-			restoreMoved()
-			writeItemInternal(response, request)
+			if restoreMoved() {
+				writeItemInternal(response, request)
+			}
 			return
 		}
 		info, err := os.Stat(originalPath)
@@ -156,24 +157,28 @@ func (service *Service) purgeItem(response http.ResponseWriter, request *http.Re
 			continue
 		}
 		if errors.Is(err, os.ErrNotExist) || err == nil && !info.Mode().IsRegular() {
-			restoreMoved()
-			writePurgeStorageError(response, request, errAttachmentMissing)
+			if restoreMoved() {
+				writePurgeStorageError(response, request, errAttachmentMissing)
+			}
 			return
 		}
 		if err != nil {
-			restoreMoved()
-			writePurgeStorageError(response, request, err)
+			if restoreMoved() {
+				writePurgeStorageError(response, request, err)
+			}
 			return
 		}
 		quarantinePath := filepath.Join(operationRoot, filepath.FromSlash(entry.key))
 		if err := os.MkdirAll(filepath.Dir(quarantinePath), 0o700); err != nil {
-			restoreMoved()
-			writePurgeStorageError(response, request, err)
+			if restoreMoved() {
+				writePurgeStorageError(response, request, err)
+			}
 			return
 		}
 		if err := os.Rename(originalPath, quarantinePath); err != nil {
-			restoreMoved()
-			writePurgeStorageError(response, request, err)
+			if restoreMoved() {
+				writePurgeStorageError(response, request, err)
+			}
 			return
 		}
 		moved = append(moved, quarantinedFile{originalPath: originalPath, quarantinePath: quarantinePath})
@@ -189,27 +194,46 @@ func (service *Service) purgeItem(response http.ResponseWriter, request *http.Re
 		       locator_snapshot = '{"status":"unavailable"}'::jsonb
 		WHERE item_id = $1
 	`, itemID); err != nil {
-		restoreMoved()
-		writeItemInternal(response, request)
+		if restoreMoved() {
+			writeItemInternal(response, request)
+		}
 		return
 	}
 	if _, err := tx.Exec(request.Context(), "DELETE FROM knowledge_items WHERE id = $1", itemID); err != nil {
-		restoreMoved()
-		writeItemInternal(response, request)
+		if restoreMoved() {
+			writeItemInternal(response, request)
+		}
 		return
 	}
 	if service.auth == nil || service.auth.InsertRequestSecurityEvent(request.Context(), tx, request, "item_permanently_deleted", map[string]any{"itemId": itemID}) != nil {
-		restoreMoved()
-		writeItemInternal(response, request)
+		if restoreMoved() {
+			writeItemInternal(response, request)
+		}
 		return
 	}
 	if err := tx.Commit(request.Context()); err != nil {
-		restoreMoved()
-		writeItemInternal(response, request)
+		if restoreMoved() {
+			writeItemInternal(response, request)
+		}
 		return
 	}
 	_ = os.RemoveAll(operationRoot)
 	response.WriteHeader(http.StatusNoContent)
+}
+
+// Only remove quarantine after every original has been restored. A storage
+// failure must leave the remaining originals available for recovery.
+func restoreQuarantinedFiles(moved []quarantinedFile, operationRoot string) error {
+	for index := len(moved) - 1; index >= 0; index-- {
+		if err := os.MkdirAll(filepath.Dir(moved[index].originalPath), 0o700); err != nil {
+			return err
+		}
+		if err := os.Rename(moved[index].quarantinePath, moved[index].originalPath); err != nil {
+			return err
+		}
+	}
+	_ = os.RemoveAll(operationRoot)
+	return nil
 }
 
 func writePurgeStorageError(response http.ResponseWriter, request *http.Request, err error) {
